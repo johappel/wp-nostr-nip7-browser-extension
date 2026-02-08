@@ -18,6 +18,11 @@ class NostrWPIntegration {
 
     // 1. Extension Detection
     this.hasExtension = await this.detectExtension();
+    if (!this.hasExtension) {
+      // Race beim Seitenstart abfangen: NIP-07 API kann kurz spaeter erscheinen.
+      await this.waitForNostrApi(3000, 120);
+      this.hasExtension = this.isNostrApiAvailable();
+    }
 
     if (!this.hasExtension) {
       this.showInstallPrompt();
@@ -41,12 +46,17 @@ class NostrWPIntegration {
 
   async detectExtension() {
     return new Promise((resolve) => {
-      window.postMessage({ type: 'NOSTR_PING', _id: 'detect' }, '*');
+      const requestId = `detect-${this.createRequestId()}`;
+      window.postMessage({ type: 'NOSTR_PING', _id: requestId }, '*');
 
       const handler = (e) => {
-        if (e.data.type === 'NOSTR_PING_RESPONSE') {
+        if (e.data.type === 'NOSTR_PING_RESPONSE' && e.data._id === requestId) {
           window.removeEventListener('message', handler);
-          console.log('[Nostr] Extension detected:', e.data.version);
+          if (e.data.error) {
+            resolve(false);
+            return;
+          }
+          console.log('[Nostr] Extension detected');
           resolve(true);
         }
       };
@@ -55,8 +65,8 @@ class NostrWPIntegration {
 
       setTimeout(() => {
         window.removeEventListener('message', handler);
-        resolve(false);
-      }, 500);
+        resolve(this.isNostrApiAvailable());
+      }, 800);
     });
   }
 
@@ -69,18 +79,29 @@ class NostrWPIntegration {
       return;
     }
 
-    try {
-      const result = await this.sendExtensionMessage(
-        'NOSTR_SET_DOMAIN_CONFIG',
-        { primaryDomain, domainSecret },
-        2500
-      );
-      if (!result?.success) {
-        console.warn('[Nostr] Domain sync config not acknowledged by extension');
+    const payload = { primaryDomain, domainSecret };
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const result = await this.sendExtensionMessage(
+          'NOSTR_SET_DOMAIN_CONFIG',
+          payload,
+          3500
+        );
+        if (!result?.success) {
+          console.warn('[Nostr] Domain sync config not acknowledged by extension');
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) {
+          await this.delay(250 * attempt);
+        }
       }
-    } catch (error) {
-      console.warn('[Nostr] Failed to configure domain sync:', error);
     }
+
+    console.warn('[Nostr] Failed to configure domain sync:', lastError);
   }
 
   async sendExtensionMessage(type, payload = null, timeoutMs = 1000) {
@@ -124,6 +145,26 @@ class NostrWPIntegration {
       return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
     }
     return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  isNostrApiAvailable() {
+    const nostrApi = window.nostr;
+    return Boolean(nostrApi && typeof nostrApi.getPublicKey === 'function');
+  }
+
+  async waitForNostrApi(maxWaitMs = 3000, intervalMs = 120) {
+    const start = Date.now();
+    while ((Date.now() - start) < maxWaitMs) {
+      if (this.isNostrApiAvailable()) {
+        return true;
+      }
+      await this.delay(intervalMs);
+    }
+    return false;
+  }
+
+  delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   showInstallPrompt() {
