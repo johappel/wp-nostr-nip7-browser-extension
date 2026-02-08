@@ -67,11 +67,16 @@ function nostr_enqueue_scripts() {
         return;
     }
 
+    $script_path = plugin_dir_path(__FILE__) . 'nostr-integration.js';
+    $style_path = plugin_dir_path(__FILE__) . 'nostr-integration.css';
+    $script_version = file_exists($script_path) ? (string) filemtime($script_path) : '1.0.0';
+    $style_version = file_exists($style_path) ? (string) filemtime($style_path) : '1.0.0';
+
     wp_enqueue_script(
         'nostr-integration',
         plugins_url('nostr-integration.js', __FILE__),
         [],
-        '1.0.0',
+        $script_version,
         true
     );
     
@@ -90,7 +95,7 @@ function nostr_enqueue_scripts() {
         'nostr-integration-css',
         plugins_url('nostr-integration.css', __FILE__),
         [],
-        '1.0.0'
+        $style_version
     );
 }
 

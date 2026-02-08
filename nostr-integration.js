@@ -361,7 +361,14 @@ class NostrWPIntegration {
   }
 }
 
-// Initialisierung wenn DOM bereit
-document.addEventListener('DOMContentLoaded', () => {
+function initNostrWPIntegration() {
+  if (window.nostrWP) return;
   window.nostrWP = new NostrWPIntegration();
-});
+}
+
+// Robust gegen spaet geladenes Script (z. B. durch Caching/Optimierungs-Plugins).
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initNostrWPIntegration, { once: true });
+} else {
+  initNostrWPIntegration();
+}
