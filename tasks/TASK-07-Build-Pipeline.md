@@ -1,73 +1,41 @@
-# TASK-07: Build Pipeline
+# TASK-07: Build Pipeline & Browser-Kompatibilität
 
 ## Ziel
-nostr-tools als ES Module in MV3 Service Worker bundeln. Chrome + Firefox Kompatibilität.
+Einrichtung einer robusten Build-Pipeline mit Rollup, um:
+1. `nostr-tools` und andere Abhängigkeiten in den Service Worker zu bundeln.
+2. Separate Builds für Chrome (Manifest V3) und Firefox (Manifest V3) zu erstellen.
+3. Statische Assets (Icons, HTML, CSS) automatisch zu kopieren.
 
-## package.json
+## Abhängigkeiten
+- **TASK-01: Extension Grundgerüst**
 
-```json
-{
-  "name": "wp-nostr-nip7-extension",
-  "type": "module",
-  "scripts": {
-    "build": "rollup -c",
-    "build:firefox": "rollup -c --environment TARGET:firefox"
-  },
-  "dependencies": {
-    "nostr-tools": "^2.7.0"
-  },
-  "devDependencies": {
-    "@rollup/plugin-node-resolve": "^15.0.0",
-    "@rollup/plugin-commonjs": "^25.0.0",
-    "rollup": "^4.0.0"
-  }
-}
-```
+## Ergebnis
+Nach Abschluss dieses Tasks:
+- `npm run build` erstellt fertige Extension-Pakete in `dist/chrome` und `dist/firefox`.
+- `npm run dev` startet den Watch-Mode für Entwicklung.
+- `nostr-tools` ist korrekt im Background-Script verfügbar.
 
-## rollup.config.js
+---
 
-```javascript
-import resolve from '@rollup/plugin-node-resolve';
-import commonjs from '@rollup/plugin-commonjs';
+## Zu erstellende Dateien
 
-const isFirefox = process.env.TARGET === 'firefox';
-const outDir = isFirefox ? 'dist/firefox' : 'dist/chrome';
+### 1. package.json
 
-export default [
-  {
-    input: 'src/background.js',
-    output: { file: `${outDir}/background.js`, format: 'es' },
-    plugins: [resolve({ browser: true }), commonjs()]
-  },
-  {
-    input: 'src/inpage.js',
-    output: { file: `${outDir}/inpage.js`, format: 'iife' }
-  }
-];
-```
+Definition der Abhängigkeiten und Scripts.
 
-## manifest.firefox.json
+### 2. rollup.config.js
 
-```json
-{
-  "manifest_version": 3,
-  "name": "WordPress Nostr Signer",
-  "version": "1.0.0",
-  "background": {
-    "scripts": ["background.js"],
-    "type": "module"
-  },
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "nostr-signer@wordpress.org",
-      "strict_min_version": "109.0"
-    }
-  }
-}
-```
+Konfiguration für:
+- Input: `src/background.js`
+- Output: `dist/chrome/background.js` (Format: ES Module)
+- Plugins: Node Resolve, CommonJS, Copy (für Manifest & Assets)
 
-## Akzeptanzkriterien
+### 3. .gitignore
 
-- [ ] `npm run build` erzeugt Chrome-Extension
-- [ ] `npm run build:firefox` erzeugt Firefox-Extension
-- [ ] nostr-tools Imports sind im Bundle aufgelöst
+Ausschluss von `node_modules` und `dist`.
+
+### 4. manifest.firefox.json
+
+Spezifisches Manifest für Firefox (MV3).
+
+---
