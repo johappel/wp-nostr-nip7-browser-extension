@@ -30,7 +30,7 @@ function nostr_enqueue_scripts() {
 
     wp_enqueue_script(
         'nostr-integration',
-        plugins_url('js/nostr-integration.js', __FILE__),
+        plugins_url('nostr-integration.js', __FILE__),
         [],
         '1.0.0',
         true
@@ -46,7 +46,7 @@ function nostr_enqueue_scripts() {
     // CSS für Modal
     wp_enqueue_style(
         'nostr-integration-css',
-        plugins_url('css/nostr-integration.css', __FILE__),
+        plugins_url('nostr-integration.css', __FILE__),
         [],
         '1.0.0'
     );

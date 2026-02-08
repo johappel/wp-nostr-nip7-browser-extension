@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { KeyManager } from '../src/lib/key-manager.js';
+import { KeyManager } from '../lib/key-manager.js';
 import './setup.js'; // Importiert Mocks
 
 describe('KeyManager', () => {

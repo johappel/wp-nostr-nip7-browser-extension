@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateSecretKey, getPublicKey } from 'nostr-tools';
-import { handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt } from '../src/lib/crypto-handlers.js';
+import { handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt } from '../lib/crypto-handlers.js';
 
 describe('CryptoHandlers', () => {
   // Sender

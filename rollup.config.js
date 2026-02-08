@@ -9,21 +9,19 @@ const commonPlugins = [
 
 // Dateien, die 1:1 kopiert werden sollen
 const staticFiles = [
-  'src/content.js',
-  'src/inpage.js',
-  'src/popup.html',
-  'src/popup.js',
-  'src/popup.css',
-  'src/dialog.html',
-  'src/dialog.js',
-  'src/dialog.css',
-  'src/icons'
+  'content.js',
+  'inpage.js',
+  'popup.html',
+  'dialog.html',
+  'dialog.js',
+  'dialog.css',
+  'icons'
 ];
 
 export default [
   // Chrome Build
   {
-    input: 'src/background.js',
+    input: 'background.js',
     output: {
       file: 'dist/chrome/background.js',
       format: 'es'
@@ -32,7 +30,7 @@ export default [
       ...commonPlugins,
       copy({
         targets: [
-          { src: 'src/manifest.chrome.json', dest: 'dist/chrome', rename: 'manifest.json' },
+          { src: 'manifest.chrome.json', dest: 'dist/chrome', rename: 'manifest.json' },
           // Kopiere statische Files, ignoriere falls (noch) nicht existent
           ...staticFiles.map(file => ({ src: file, dest: 'dist/chrome' }))
         ]
@@ -41,7 +39,7 @@ export default [
   },
   // Firefox Build
   {
-    input: 'src/background.js',
+    input: 'background.js',
     output: {
       file: 'dist/firefox/background.js',
       format: 'es'
@@ -50,7 +48,7 @@ export default [
       ...commonPlugins,
       copy({
         targets: [
-          { src: 'src/manifest.firefox.json', dest: 'dist/firefox', rename: 'manifest.json' },
+          { src: 'manifest.firefox.json', dest: 'dist/firefox', rename: 'manifest.json' },
           ...staticFiles.map(file => ({ src: file, dest: 'dist/firefox' }))
         ]
       })

@@ -231,12 +231,34 @@ async function promptDomainApproval(domain) {
 // ============================================================
 // Domain Sync
 // ============================================================
+function getPrimaryDomainBaseUrl(primaryDomain) {
+  const value = String(primaryDomain || '').trim();
+  if (!value) return null;
+
+  // Wenn ein vollständiger Origin übergeben wurde, nutze ihn direkt.
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      return null;
+    }
+  }
+
+  // Lokale Entwicklung ohne SSL (localhost/127.0.0.1) zulassen.
+  const isLocalDev = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(value);
+  const protocol = isLocalDev ? 'http' : 'https';
+  return `${protocol}://${value}`;
+}
+
 async function updateDomainWhitelist() {
   try {
     const { primaryDomain, domainSecret } = await chrome.storage.local.get(['primaryDomain', 'domainSecret']);
     if (!primaryDomain) return;
+    const baseUrl = getPrimaryDomainBaseUrl(primaryDomain);
+    if (!baseUrl) return;
 
-    const response = await fetch(`https://${primaryDomain}/wp-json/nostr/v1/domains`);
+    const response = await fetch(`${baseUrl}/wp-json/nostr/v1/domains`);
     const data = await response.json();
 
     // Signatur der Domain-Liste verifizieren (HMAC mit shared secret)

@@ -9,7 +9,8 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://*/*"
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "scripts": ["background.js"],

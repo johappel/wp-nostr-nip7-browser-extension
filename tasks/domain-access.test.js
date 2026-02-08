@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { checkDomainAccess, allowDomain, blockDomain, verifyWhitelistSignature, DOMAIN_STATUS } from '../src/lib/domain-access.js';
+import { checkDomainAccess, allowDomain, blockDomain, verifyWhitelistSignature, DOMAIN_STATUS } from '../lib/domain-access.js';
 import './setup.js';
 
 describe('DomainAccess', () => {
