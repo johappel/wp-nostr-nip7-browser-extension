@@ -1,84 +1,52 @@
 # TASK-09: Unit Tests
 
 ## Ziel
-Alle sicherheitskritischen und logischen Module mit Tests absichern.
+Erstellung von Unit-Tests für die kritischen Logik-Komponenten der Extension.
 
-## vitest.config.js
+## Abhängigkeiten
+- **TASK-03: Key-Management**
+- **TASK-04: Encryption**
+- **TASK-05: Domain Whitelist**
 
-```javascript
-import { defineConfig } from 'vitest/config';
+## Ergebnis
+Nach Abschluss dieses Tasks:
+- `npm test` führt Tests erfolgreich aus.
+- Abdeckung für:
+  - `KeyManager` (Generierung, Verschlüsselung, Signatur)
+  - `DomainAccess` (Whitelist-Check, Signatur-Verifikation)
+  - `CryptoHandlers` (NIP-04, NIP-44)
 
-export default defineConfig({
-  test: {
-    globals: true,
-    environment: 'node',
-    include: ['tests/**/*.test.js']
-  }
-});
-```
+---
 
-## Test-Dateien
+## Zu erstellende Dateien
 
-### tests/key-manager.test.js
+### 1. tests/setup.js
 
-```javascript
-import { describe, it, expect } from 'vitest';
-import { KeyManager } from '../src/lib/key-manager.js';
+Mocking der Chrome Storage API und `crypto.subtle` (falls in Node-Umgebung nötig, Vitest nutzt jsdom/happy-dom, die WebCrypto oft unterstützen).
 
-describe('KeyManager', () => {
-  it('generates key with correct format', async () => {
-    const mockStorage = {
-      data: {},
-      async get(keys) {
-        const result = {};
-        keys.forEach(k => result[k] = this.data[k]);
-        return result;
-      },
-      async set(items) {
-        Object.assign(this.data, items);
-      }
-    };
-    
-    const km = new KeyManager(mockStorage);
-    const result = await km.generateKey('test-password-12345');
-    
-    expect(result.pubkey).toMatch(/^[a-f0-9]{64}$/);
-    expect(result.npub).toMatch(/^npub1/);
-  });
-});
-```
+### 2. tests/key-manager.test.js
 
-### tests/nip07-conformity.test.js
+Tests für:
+- `generateKey`
+- `storeKey` / `getKey` (Verschlüsselung)
+- `signEvent`
 
-```javascript
-import { describe, it, expect } from 'vitest';
-import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent } from 'nostr-tools';
+### 3. tests/domain-access.test.js
 
-describe('NIP-07', () => {
-  it('getPublicKey returns hex', () => {
-    const key = generateSecretKey();
-    const pubkey = getPublicKey(key);
-    expect(pubkey).toMatch(/^[a-f0-9]{64}$/);
-  });
+Tests für:
+- `checkDomainAccess` (Blocked, Allowed, Pending)
+- `verifyWhitelistSignature` (HMAC Validierung)
 
-  it('signEvent returns full event', () => {
-    const key = generateSecretKey();
-    const event = {
-      kind: 1,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [],
-      content: 'Test'
-    };
-    
-    const signed = finalizeEvent(event, key);
-    expect(signed).toHaveProperty('id');
-    expect(signed).toHaveProperty('sig');
-    expect(verifyEvent(signed)).toBe(true);
-  });
-});
-```
+### 4. tests/crypto-handlers.test.js
 
-## Akzeptanzkriterien
+Tests für:
+- NIP-04 Encrypt/Decrypt
+- NIP-44 Encrypt/Decrypt
 
-- [ ] Alle Tests laufen durch
-- [ ] Coverage >= 80% für src/lib/
+---
+
+## Technische Details
+
+- Wir nutzen `vitest` als Test-Runner.
+- `chrome.storage.local` muss gemockt werden.
+- `TextEncoder`/`TextDecoder` und `crypto` sind in modernen Node-Versionen (und Vitest) verfügbar.
