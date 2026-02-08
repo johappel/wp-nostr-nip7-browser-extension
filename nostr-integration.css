@@ -1,0 +1,143 @@
+/* Nostr Integration Styles */
+
+/* Modal Backdrop */
+.nostr-modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999999;
+}
+
+/* Modal */
+.nostr-modal {
+  background: white;
+  padding: 24px;
+  border-radius: 8px;
+  max-width: 450px;
+  width: 90%;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.nostr-modal h3 {
+  margin: 0 0 16px 0;
+  font-size: 20px;
+}
+
+.nostr-modal p {
+  margin: 0 0 12px 0;
+  color: #555;
+}
+
+.install-steps ol {
+  margin: 16px 0;
+  padding-left: 24px;
+}
+
+.install-steps li {
+  margin-bottom: 8px;
+}
+
+.nostr-modal-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+/* Buttons */
+.nostr-btn {
+  display: inline-block;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.2s;
+}
+
+.nostr-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.nostr-btn-primary {
+  background: #6441a5;
+  color: white;
+}
+
+.nostr-btn-primary:hover:not(:disabled) {
+  background: #543a8c;
+}
+
+.nostr-btn-secondary {
+  background: #e0e0e0;
+  color: #333;
+}
+
+.nostr-btn-secondary:hover:not(:disabled) {
+  background: #d0d0d0;
+}
+
+/* Registration Prompt */
+.nostr-register-prompt {
+  background: #f5f5f5;
+  padding: 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.nostr-register-prompt p {
+  margin: 0;
+  flex: 1;
+  min-width: 200px;
+}
+
+/* Status Messages */
+.nostr-success,
+.nostr-warning,
+.nostr-error {
+  padding: 12px 16px;
+  border-radius: 4px;
+  margin: 16px 0;
+}
+
+.nostr-success {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.nostr-warning {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeeba;
+}
+
+.nostr-error {
+  background: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+}
+
+/* Verified Badge */
+.nostr-verified-badge {
+  animation: fadeInOut 3s ease-in-out;
+}
+
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translateY(10px); }
+  20% { opacity: 1; transform: translateY(0); }
+  80% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
