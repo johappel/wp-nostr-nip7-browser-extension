@@ -1,54 +1,52 @@
 # TASK-05: Multi-Domain Whitelist Management
 
 ## Ziel
-Automatische Synchronisation erlaubter Domains über alle WordPress-Instanzen.
+Implementierung des Synchronisations-Mechanismus für die Domain-Whitelist. Die Extension lädt periodisch eine Liste vertrauenswürdiger Domains von der konfigurierten "Primary Domain" (WordPress) und verifiziert diese mittels HMAC-Signatur.
 
 ## Abhängigkeiten
-- **TASK-02: WordPress Integration & Detection**
+- **TASK-02: WordPress Integration** (stellt den REST-Endpoint bereit)
+- **TASK-03: Key-Management & UI** (stellt die Basis-Struktur in background.js bereit)
 
 ## Ergebnis
-- Admin kann Domains in WordPress verwalten
-- Extension aktualisiert Whitelist automatisch (alle 5 Minuten)
+Nach Abschluss dieses Tasks:
+- Extension akzeptiert Konfiguration für `primaryDomain` und `domainSecret`.
+- Hintergrund-Prozess (Alarm) ruft `/wp-json/nostr/v1/domains` ab.
+- Signatur der Domain-Liste wird geprüft.
+- Bei Erfolg wird die lokale Whitelist (`allowedDomains`) aktualisiert.
 
 ---
 
-## Code für background.js
+## Zu erstellende / zu ändernde Dateien
 
-```javascript
-// Domain Sync
-async function syncDomainsFromAllSites() {
-  const { wordpressSites = [], allowedDomains = [] } = 
-    await chrome.storage.local.get(['wordpressSites', 'allowedDomains']);
-  
-  const allDomains = new Set(allowedDomains);
-  
-  for (const siteUrl of wordpressSites) {
-    try {
-      const response = await fetch(`${siteUrl}/wp-json/nostr/v1/domains`);
-      const data = await response.json();
-      if (data.domains) {
-        data.domains.forEach(d => allDomains.add(d));
-      }
-    } catch (e) {
-      console.error(`Failed to sync from ${siteUrl}:`, e);
-    }
-  }
+### 1. src/lib/domain-access.js
 
-  await chrome.storage.local.set({
-    allowedDomains: Array.from(allDomains),
-    lastDomainSync: Date.now()
-  });
-}
+Erweiterung um `verifyWhitelistSignature`. Diese Funktion rekonstruiert den Payload (`json_encode($domains) . '|' . $timestamp`) und prüft die HMAC-SHA256 Signatur gegen das gespeicherte Secret.
 
-// Alarm alle 5 Minuten
-chrome.alarms.create('domainSync', { periodInMinutes: 5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'domainSync') syncDomainsFromAllSites();
-});
+### 2. src/background.js
+
+Update der `updateDomainWhitelist` Funktion:
+- Verwendung der neuen Verifikations-Logik.
+- Implementierung eines neuen Message-Handlers `NOSTR_SET_DOMAIN_CONFIG`, um die Primary Domain und das Secret initial zu setzen (z.B. durch den User oder ein Admin-Script).
+
+---
+
+## Sicherheitsregeln
+
+### 1. Signatur-Prüfung
+- Die Signatur MUSS valide sein, bevor Domains in die `allowedDomains` Liste übernommen werden.
+- Das Secret darf die Extension nie verlassen (nur `verify`, kein Export).
+
+### 2. Daten-Integrität
+- Der Timestamp der Antwort sollte geprüft werden, um Replay-Attacken mit alten Listen zu erschweren (optional, hier implementiert als "neuer als letztes Update").
+
+## Technische Details
+
+### Signatur-Schema (PHP Seite)
+```php
+$payload = json_encode($domains);
+$signature = hash_hmac('sha256', $payload . '|' . $timestamp, $secret);
 ```
 
-## Akzeptanzkriterien
-
-- [ ] Domains werden synchronisiert
-- [ ] User kann manuell Domains hinzufügen
-- [ ] Sync alle 5 Minuten
+### Verifikation (JS Seite)
+- `JSON.stringify(domains)` muss dem PHP `json_encode` entsprechen (bei einfachen String-Arrays ist das der Fall).
+- `crypto.subtle.verify` mit HMAC-SHA256.
