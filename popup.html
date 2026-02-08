@@ -21,6 +21,21 @@
     </p>
 
     <p class="hint warn">Aenderung wirkt nach Tab-Reload.</p>
+
+    <section class="sync-section">
+      <div class="section-head">
+        <h2>Domain Sync</h2>
+        <button id="sync-now" class="btn-secondary" type="button">Jetzt syncen</button>
+      </div>
+      <div class="manual-config">
+        <input id="manual-primary-domain" type="text" placeholder="Primary Domain (z. B. http://forums.test)" />
+        <input id="manual-domain-secret" type="password" placeholder="Domain Secret" />
+        <button id="manual-add" class="btn-secondary" type="button">Hinzufuegen / Aktualisieren</button>
+      </div>
+      <p id="sync-meta" class="hint"></p>
+      <div id="sync-list" class="sync-list"></div>
+    </section>
+
     <p id="status" class="status"></p>
   </main>
 

@@ -46,6 +46,17 @@ function nostr_normalize_domain($value) {
     return strtolower(trim($value));
 }
 
+function nostr_get_default_primary_domain() {
+    $home = wp_parse_url(home_url());
+    $scheme = isset($home['scheme']) ? $home['scheme'] : 'https';
+    $host = isset($home['host']) ? $home['host'] : parse_url(home_url(), PHP_URL_HOST);
+    if (!$host) {
+        return '';
+    }
+    $port = isset($home['port']) ? ':' . $home['port'] : '';
+    return $scheme . '://' . $host . $port;
+}
+
 // ============================================================
 // Frontend Scripts
 // ============================================================
@@ -69,7 +80,7 @@ function nostr_enqueue_scripts() {
         'nonce' => wp_create_nonce('wp_rest'),
         'siteDomain' => parse_url(home_url(), PHP_URL_HOST),
         'isLoggedIn' => is_user_logged_in(),
-        'primaryDomain' => get_option('nostr_primary_domain', parse_url(home_url(), PHP_URL_HOST)),
+        'primaryDomain' => get_option('nostr_primary_domain', nostr_get_default_primary_domain()),
         'domainSecret' => nostr_get_or_create_domain_secret(),
         'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]')
     ]);
@@ -218,7 +229,7 @@ function nostr_sanitize_allowed_domains($value) {
 function nostr_sanitize_primary_domain($value) {
     $value = trim((string) $value);
     if ($value === '') {
-        return parse_url(home_url(), PHP_URL_HOST);
+        return nostr_get_default_primary_domain();
     }
     return untrailingslashit($value);
 }
@@ -259,7 +270,7 @@ function nostr_settings_page() {
                         <input type="text" 
                                id="nostr_primary_domain"
                                name="nostr_primary_domain" 
-                               value="<?php echo esc_attr(get_option('nostr_primary_domain', parse_url(home_url(), PHP_URL_HOST))); ?>" 
+                               value="<?php echo esc_attr(get_option('nostr_primary_domain', nostr_get_default_primary_domain())); ?>" 
                                class="regular-text" />
                         <p class="description">
                             Hauptdomain für Extension-Updates (z.B. example.com)

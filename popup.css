@@ -6,7 +6,7 @@ body {
 }
 
 .popup {
-  width: 320px;
+  width: 360px;
   padding: 14px;
 }
 
@@ -43,4 +43,102 @@ h1 {
 code {
   font-family: Consolas, "Courier New", monospace;
   font-size: 11px;
+}
+
+.sync-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #d8dee9;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.section-head h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.manual-config {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.manual-config input {
+  border: 1px solid #c3ccd8;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: #fff;
+}
+
+.btn-secondary {
+  border: 1px solid #c3ccd8;
+  background: #fff;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sync-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.sync-item {
+  border: 1px solid #d8dee9;
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.sync-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.sync-host {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.sync-origin {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #3b4656;
+  word-break: break-all;
+}
+
+.sync-status {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #5a6677;
+  word-break: break-word;
+}
+
+.btn-danger {
+  border: 1px solid #dcb3b3;
+  background: #fff5f5;
+  color: #8a1f1f;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.empty {
+  margin: 0;
+  font-size: 12px;
+  color: #5a6677;
 }

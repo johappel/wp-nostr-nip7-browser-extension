@@ -15,14 +15,8 @@ async function injectInpageScript() {
     // Fallback to default
   }
 
-  // Provide config in MAIN world before loading inpage.js.
-  const configScript = document.createElement('script');
-  configScript.textContent = `window.__WP_NOSTR_PREFER_LOCK__ = ${preferLock ? 'true' : 'false'};`;
-  (document.head || document.documentElement).appendChild(configScript);
-  configScript.remove();
-
   const script = document.createElement('script');
-  script.src = chrome.runtime.getURL('inpage.js');
+  script.src = `${chrome.runtime.getURL('inpage.js')}?lock=${preferLock ? '1' : '0'}`;
   script.onload = () => script.remove();
   (document.head || document.documentElement).appendChild(script);
 }
@@ -33,7 +27,7 @@ window.addEventListener('message', async (event) => {
   if (!event.data.type?.startsWith('NOSTR_')) return;
 
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendMessageWithRetry({
       type: event.data.type,
       payload: event.data.payload,
       _id: event.data._id,
@@ -55,3 +49,19 @@ window.addEventListener('message', async (event) => {
     }, '*');
   }
 });
+
+async function sendMessageWithRetry(message) {
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (err) {
+    const text = String(err?.message || err || '');
+    const shouldRetry =
+      text.includes('message channel closed before a response was received') ||
+      text.includes('Receiving end does not exist');
+
+    if (!shouldRetry) throw err;
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return await chrome.runtime.sendMessage(message);
+  }
+}

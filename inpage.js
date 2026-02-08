@@ -22,7 +22,7 @@ function createNostrApi() {
   };
 }
 
-const preferLock = window.__WP_NOSTR_PREFER_LOCK__ !== false;
+const preferLock = readPreferLockFromScriptSrc();
 const wpNostrApi = createNostrApi();
 Object.defineProperty(wpNostrApi, '__wpNostrManaged', {
   value: true,
@@ -32,6 +32,19 @@ Object.defineProperty(wpNostrApi, '__wpNostrManaged', {
 });
 
 installNostrApi(wpNostrApi, preferLock);
+
+function readPreferLockFromScriptSrc() {
+  const src = document.currentScript?.src;
+  if (!src) return true;
+
+  try {
+    const lock = new URL(src).searchParams.get('lock');
+    if (lock === null) return true;
+    return lock !== '0' && lock.toLowerCase() !== 'false';
+  } catch {
+    return true;
+  }
+}
 
 function installNostrApi(api, lockEnabled) {
   if (!lockEnabled) {
