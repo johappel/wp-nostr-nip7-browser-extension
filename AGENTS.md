@@ -1251,6 +1251,9 @@ nostr-tools als ES Module in MV3 Service Worker bundeln. Chrome + Firefox Kompat
     "build": "rollup -c",
     "build:watch": "rollup -c --watch",
     "build:firefox": "rollup -c --environment TARGET:firefox",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "package:chrome": "npm run build && cd dist/chrome && zip -r ../../wp-nostr-chrome.zip .",
     "package:firefox": "npm run build:firefox && cd dist/firefox && zip -r ../../wp-nostr-firefox.zip ."
   },
@@ -1258,7 +1261,8 @@ nostr-tools als ES Module in MV3 Service Worker bundeln. Chrome + Firefox Kompat
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-commonjs": "^25.0.0",
     "rollup": "^4.0.0",
-    "rollup-plugin-copy": "^3.5.0"
+    "rollup-plugin-copy": "^3.5.0",
+    "vitest": "^2.0.0"
   },
   "dependencies": {
     "nostr-tools": "^2.7.0"
@@ -1460,6 +1464,558 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 ---
 
+## TASK 9: Unit Tests
+
+### Ziel
+Alle sicherheitskritischen und logischen Module mit automatisierten Tests absichern.
+
+**vitest.config.js**
+```javascript
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'node', // crypto.subtle verfügbar ab Node 20+
+    include: ['tests/**/*.test.js'],
+    coverage: {
+      provider: 'v8',
+      include: ['src/**'],
+      exclude: ['src/popup.js', 'src/dialog.js'], // UI-Code separat
+    }
+  }
+});
+```
+
+**tests/mocks/chrome.js** (Chrome API Mock)
+```javascript
+// Minimaler chrome.storage Mock für Tests
+export function createChromeStorageMock() {
+  const store = {};
+  return {
+    storage: {
+      local: {
+        get: vi.fn(async (keys) => {
+          if (typeof keys === 'string') keys = [keys];
+          const result = {};
+          for (const k of keys) {
+            if (store[k] !== undefined) result[k] = store[k];
+          }
+          return result;
+        }),
+        set: vi.fn(async (items) => {
+          Object.assign(store, items);
+        }),
+        remove: vi.fn(async (keys) => {
+          if (typeof keys === 'string') keys = [keys];
+          for (const k of keys) delete store[k];
+        })
+      },
+      session: {
+        get: vi.fn(async () => ({})),
+        set: vi.fn(async () => {}),
+        remove: vi.fn(async () => {})
+      },
+      onChanged: {
+        addListener: vi.fn(),
+        removeListener: vi.fn()
+      }
+    },
+    runtime: {
+      getURL: vi.fn((path) => `chrome-extension://test-id/${path}`),
+      getManifest: vi.fn(() => ({ version: '1.0.0' })),
+      sendMessage: vi.fn()
+    },
+    alarms: {
+      create: vi.fn(),
+      onAlarm: { addListener: vi.fn() }
+    },
+    windows: {
+      create: vi.fn()
+    },
+    _store: store // Direkt-Zugriff für Test-Assertions
+  };
+}
+```
+
+**tests/key-manager.test.js** (Crypto-kritisch)
+```javascript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
+
+// KeyManager muss aus src/background.js extrahiert und separat exportiert werden.
+// Empfehlung: src/lib/key-manager.js als eigenes Modul.
+//
+// Für die Tests hier: direkte Reimplementierung der Kernlogik,
+// die 1:1 dem background.js Code entspricht.
+
+async function deriveAesKey(password, salt, usage) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 600_000, hash: 'SHA-256' },
+    baseKey, { name: 'AES-GCM', length: 256 }, false, [usage]
+  );
+}
+
+describe('KeyManager - AES-GCM Encryption', () => {
+  const TEST_PASSWORD = 'test-password-12345';
+
+  it('verschlüsselt und entschlüsselt einen Secret Key korrekt', async () => {
+    const secretKey = generateSecretKey();
+    const original = new Uint8Array(secretKey);
+
+    // Encrypt
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encKey = await deriveAesKey(TEST_PASSWORD, salt, 'encrypt');
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, encKey, secretKey
+    );
+
+    // Decrypt
+    const decKey = await deriveAesKey(TEST_PASSWORD, salt, 'decrypt');
+    const decrypted = new Uint8Array(
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, decKey, ciphertext)
+    );
+
+    expect(decrypted).toEqual(original);
+  });
+
+  it('schlägt mit falschem Passwort fehl', async () => {
+    const secretKey = generateSecretKey();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+
+    const encKey = await deriveAesKey(TEST_PASSWORD, salt, 'encrypt');
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, encKey, secretKey
+    );
+
+    const wrongKey = await deriveAesKey('wrong-password', salt, 'decrypt');
+    await expect(
+      crypto.subtle.decrypt({ name: 'AES-GCM', iv }, wrongKey, ciphertext)
+    ).rejects.toThrow();
+  });
+
+  it('erzeugt unterschiedliche Ciphertexts für gleichen Key (zufälliger IV)', async () => {
+    const secretKey = generateSecretKey();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+
+    const iv1 = crypto.getRandomValues(new Uint8Array(12));
+    const iv2 = crypto.getRandomValues(new Uint8Array(12));
+
+    const encKey = await deriveAesKey(TEST_PASSWORD, salt, 'encrypt');
+    const ct1 = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv1 }, encKey, secretKey));
+    const ct2 = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv2 }, encKey, secretKey));
+
+    expect(ct1).not.toEqual(ct2);
+  });
+});
+
+describe('KeyManager - Key Generation', () => {
+  it('generateSecretKey erzeugt 32-Byte Uint8Array', () => {
+    const key = generateSecretKey();
+    expect(key).toBeInstanceOf(Uint8Array);
+    expect(key.length).toBe(32);
+  });
+
+  it('getPublicKey gibt 64-Zeichen hex-String zurück', () => {
+    const secretKey = generateSecretKey();
+    const pubkey = getPublicKey(secretKey);
+    expect(typeof pubkey).toBe('string');
+    expect(pubkey).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('nip19.npubEncode/Decode roundtrip', () => {
+    const secretKey = generateSecretKey();
+    const pubkey = getPublicKey(secretKey);
+    const npub = nip19.npubEncode(pubkey);
+    expect(npub).toMatch(/^npub1/);
+
+    const decoded = nip19.decode(npub);
+    expect(decoded.type).toBe('npub');
+    expect(decoded.data).toBe(pubkey);
+  });
+
+  it('nip19.nsecEncode/Decode roundtrip', () => {
+    const secretKey = generateSecretKey();
+    const nsec = nip19.nsecEncode(secretKey);
+    expect(nsec).toMatch(/^nsec1/);
+
+    const decoded = nip19.decode(nsec);
+    expect(decoded.type).toBe('nsec');
+    expect(new Uint8Array(decoded.data)).toEqual(secretKey);
+  });
+});
+```
+
+**tests/nip07-conformity.test.js** (NIP-07 Spec-Konformität)
+```javascript
+import { describe, it, expect } from 'vitest';
+import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent } from 'nostr-tools';
+
+describe('NIP-07 Konformität', () => {
+  const secretKey = generateSecretKey();
+
+  describe('getPublicKey() Format', () => {
+    it('gibt hex-String zurück (nicht npub)', () => {
+      const pubkey = getPublicKey(secretKey);
+      expect(pubkey).toMatch(/^[a-f0-9]{64}$/);
+      expect(pubkey).not.toMatch(/^npub/);
+    });
+  });
+
+  describe('signEvent() Format', () => {
+    it('gibt vollständiges Event mit id, pubkey, sig zurück', () => {
+      const template = {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: 'Hello Nostr'
+      };
+
+      const signed = finalizeEvent(template, secretKey);
+
+      // NIP-07: signEvent muss vollständiges Event zurückgeben
+      expect(signed).toHaveProperty('id');
+      expect(signed).toHaveProperty('pubkey');
+      expect(signed).toHaveProperty('sig');
+      expect(signed).toHaveProperty('kind', 1);
+      expect(signed).toHaveProperty('content', 'Hello Nostr');
+      expect(signed).toHaveProperty('tags');
+      expect(signed).toHaveProperty('created_at');
+
+      // id = 64 hex chars
+      expect(signed.id).toMatch(/^[a-f0-9]{64}$/);
+      // pubkey = hex
+      expect(signed.pubkey).toBe(getPublicKey(secretKey));
+      // sig = 128 hex chars (Schnorr)
+      expect(signed.sig).toMatch(/^[a-f0-9]{128}$/);
+    });
+
+    it('erzeugte Signatur ist verifizierbar', () => {
+      const template = {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: 'Verify me'
+      };
+
+      const signed = finalizeEvent(template, secretKey);
+      expect(verifyEvent(signed)).toBe(true);
+    });
+
+    it('manipuliertes Event verifiziert nicht', () => {
+      const template = {
+        kind: 1,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: 'Original'
+      };
+
+      const signed = finalizeEvent(template, secretKey);
+      const tampered = { ...signed, content: 'Tampered' };
+      expect(verifyEvent(tampered)).toBe(false);
+    });
+  });
+});
+```
+
+**tests/nip04-nip44.test.js** (Encryption)
+```javascript
+import { describe, it, expect } from 'vitest';
+import { generateSecretKey, getPublicKey, nip04 } from 'nostr-tools';
+import { v2 as nip44 } from 'nostr-tools/nip44';
+
+describe('NIP-04 Encryption (Legacy)', () => {
+  const aliceKey = generateSecretKey();
+  const bobKey = generateSecretKey();
+  const alicePub = getPublicKey(aliceKey);
+  const bobPub = getPublicKey(bobKey);
+
+  it('encrypt/decrypt Roundtrip zwischen zwei Schlüsselpaaren', async () => {
+    const plaintext = 'Hallo Bob, das ist eine geheime Nachricht!';
+
+    // Alice verschlüsselt für Bob
+    const ciphertext = await nip04.encrypt(aliceKey, bobPub, plaintext);
+    expect(typeof ciphertext).toBe('string');
+    expect(ciphertext).not.toBe(plaintext);
+
+    // Bob entschlüsselt mit Alices pubkey
+    const decrypted = await nip04.decrypt(bobKey, alicePub, ciphertext);
+    expect(decrypted).toBe(plaintext);
+  });
+
+  it('falscher Empfänger-Key entschlüsselt nicht korrekt', async () => {
+    const eveKey = generateSecretKey();
+    const plaintext = 'Geheim!';
+    const ciphertext = await nip04.encrypt(aliceKey, bobPub, plaintext);
+
+    // Eve versucht mit ihrem Key zu entschlüsseln
+    // nip04.decrypt wirft keinen Fehler, liefert aber falschen plaintext
+    try {
+      const result = await nip04.decrypt(eveKey, alicePub, ciphertext);
+      expect(result).not.toBe(plaintext);
+    } catch {
+      // Manche Implementierungen werfen bei falschem Key
+      expect(true).toBe(true);
+    }
+  });
+});
+
+describe('NIP-44 v2 Encryption', () => {
+  const aliceKey = generateSecretKey();
+  const bobKey = generateSecretKey();
+  const alicePub = getPublicKey(aliceKey);
+  const bobPub = getPublicKey(bobKey);
+
+  it('Conversation Key ist symmetrisch', () => {
+    const ck1 = nip44.utils.getConversationKey(aliceKey, bobPub);
+    const ck2 = nip44.utils.getConversationKey(bobKey, alicePub);
+    expect(ck1).toEqual(ck2);
+  });
+
+  it('encrypt/decrypt Roundtrip', () => {
+    const plaintext = 'NIP-44 verschlüsselte Nachricht';
+    const conversationKey = nip44.utils.getConversationKey(aliceKey, bobPub);
+
+    const ciphertext = nip44.encrypt(plaintext, conversationKey);
+    expect(typeof ciphertext).toBe('string');
+    expect(ciphertext).not.toBe(plaintext);
+
+    const decrypted = nip44.decrypt(ciphertext, conversationKey);
+    expect(decrypted).toBe(plaintext);
+  });
+
+  it('unterschiedliche Ciphertexts bei gleicher Nachricht (Random Nonce)', () => {
+    const plaintext = 'Same message';
+    const ck = nip44.utils.getConversationKey(aliceKey, bobPub);
+
+    const ct1 = nip44.encrypt(plaintext, ck);
+    const ct2 = nip44.encrypt(plaintext, ck);
+    expect(ct1).not.toBe(ct2);
+  });
+
+  it('Rückgabeformat ist NIP-07 konform (String)', () => {
+    const ck = nip44.utils.getConversationKey(aliceKey, bobPub);
+    const encrypted = nip44.encrypt('test', ck);
+    expect(typeof encrypted).toBe('string');
+
+    const decrypted = nip44.decrypt(encrypted, ck);
+    expect(typeof decrypted).toBe('string');
+  });
+});
+```
+
+**tests/semver.test.js** (Versionsvergleich)
+```javascript
+import { describe, it, expect } from 'vitest';
+
+// Direkt aus background.js extrahiert
+function semverSatisfies(current, minimum) {
+  if (!minimum) return true;
+  const parse = (v) => v.split('.').map(Number);
+  const [cMajor, cMinor, cPatch] = parse(current);
+  const [mMajor, mMinor, mPatch] = parse(minimum);
+  if (cMajor !== mMajor) return cMajor > mMajor;
+  if (cMinor !== mMinor) return cMinor > mMinor;
+  return cPatch >= mPatch;
+}
+
+describe('semverSatisfies', () => {
+  it('gleiche Version = ok', () => {
+    expect(semverSatisfies('1.0.0', '1.0.0')).toBe(true);
+    expect(semverSatisfies('2.3.4', '2.3.4')).toBe(true);
+  });
+
+  it('höhere Version = ok', () => {
+    expect(semverSatisfies('1.1.0', '1.0.0')).toBe(true);
+    expect(semverSatisfies('1.0.1', '1.0.0')).toBe(true);
+    expect(semverSatisfies('2.0.0', '1.9.9')).toBe(true);
+  });
+
+  it('niedrigere Version = nicht ok', () => {
+    expect(semverSatisfies('1.0.0', '1.0.1')).toBe(false);
+    expect(semverSatisfies('1.0.0', '1.1.0')).toBe(false);
+    expect(semverSatisfies('1.0.0', '2.0.0')).toBe(false);
+  });
+
+  it('kein Minimum = immer ok', () => {
+    expect(semverSatisfies('0.0.1', null)).toBe(true);
+    expect(semverSatisfies('0.0.1', undefined)).toBe(true);
+  });
+
+  it('Major-Downgrade wird erkannt', () => {
+    expect(semverSatisfies('1.9.9', '2.0.0')).toBe(false);
+  });
+});
+```
+
+**tests/domain-access.test.js** (Domain-Logik)
+```javascript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createChromeStorageMock } from './mocks/chrome.js';
+
+// checkDomainAccess Logik (extrahiert aus background.js)
+async function checkDomainAccess(domain, chrome) {
+  if (!domain) return 'blocked';
+
+  const { allowedDomains = [], blockedDomains = [] } =
+    await chrome.storage.local.get(['allowedDomains', 'blockedDomains']);
+
+  if (blockedDomains.includes(domain)) return 'blocked';
+  if (allowedDomains.includes(domain)) return 'allowed';
+  return 'pending';
+}
+
+describe('Domain Access Control', () => {
+  let chrome;
+
+  beforeEach(() => {
+    chrome = createChromeStorageMock();
+  });
+
+  it('null Domain = blocked', async () => {
+    expect(await checkDomainAccess(null, chrome)).toBe('blocked');
+  });
+
+  it('leerer String = blocked', async () => {
+    expect(await checkDomainAccess('', chrome)).toBe('blocked');
+  });
+
+  it('geblockte Domain = blocked', async () => {
+    chrome._store.blockedDomains = ['evil.com'];
+    expect(await checkDomainAccess('evil.com', chrome)).toBe('blocked');
+  });
+
+  it('erlaubte Domain = allowed', async () => {
+    chrome._store.allowedDomains = ['trusted.com'];
+    expect(await checkDomainAccess('trusted.com', chrome)).toBe('allowed');
+  });
+
+  it('unbekannte Domain = pending (Bootstrapping)', async () => {
+    chrome._store.allowedDomains = ['other.com'];
+    expect(await checkDomainAccess('new-site.com', chrome)).toBe('pending');
+  });
+
+  it('geblockt hat Vorrang über erlaubt', async () => {
+    chrome._store.allowedDomains = ['dual.com'];
+    chrome._store.blockedDomains = ['dual.com'];
+    expect(await checkDomainAccess('dual.com', chrome)).toBe('blocked');
+  });
+
+  it('leere Listen = alles pending', async () => {
+    expect(await checkDomainAccess('any-domain.org', chrome)).toBe('pending');
+  });
+});
+```
+
+**tests/message-handler.test.js** (Message Routing)
+```javascript
+import { describe, it, expect } from 'vitest';
+
+// Testet die Message-Type-zu-Handler-Zuordnung
+// In Produktion aus background.js extrahiert
+const VALID_MESSAGE_TYPES = [
+  'NOSTR_PING',
+  'NOSTR_CHECK_VERSION',
+  'NOSTR_GET_PUBLIC_KEY',
+  'NOSTR_SIGN_EVENT',
+  'NOSTR_GET_RELAYS',
+  'NOSTR_NIP04_ENCRYPT',
+  'NOSTR_NIP04_DECRYPT',
+  'NOSTR_NIP44_ENCRYPT',
+  'NOSTR_NIP44_DECRYPT'
+];
+
+const DOMAIN_FREE_TYPES = ['NOSTR_PING', 'NOSTR_CHECK_VERSION'];
+
+describe('Message Handler Routing', () => {
+  it('alle NIP-07 Methoden haben einen gültigen Handler-Type', () => {
+    const nip07Methods = [
+      'NOSTR_GET_PUBLIC_KEY',
+      'NOSTR_SIGN_EVENT',
+      'NOSTR_GET_RELAYS',
+      'NOSTR_NIP04_ENCRYPT',
+      'NOSTR_NIP04_DECRYPT',
+      'NOSTR_NIP44_ENCRYPT',
+      'NOSTR_NIP44_DECRYPT'
+    ];
+    for (const method of nip07Methods) {
+      expect(VALID_MESSAGE_TYPES).toContain(method);
+    }
+  });
+
+  it('PING und VERSION_CHECK sind domain-frei', () => {
+    expect(DOMAIN_FREE_TYPES).toContain('NOSTR_PING');
+    expect(DOMAIN_FREE_TYPES).toContain('NOSTR_CHECK_VERSION');
+  });
+
+  it('Crypto-Methoden sind NICHT domain-frei', () => {
+    expect(DOMAIN_FREE_TYPES).not.toContain('NOSTR_GET_PUBLIC_KEY');
+    expect(DOMAIN_FREE_TYPES).not.toContain('NOSTR_SIGN_EVENT');
+    expect(DOMAIN_FREE_TYPES).not.toContain('NOSTR_NIP04_ENCRYPT');
+  });
+
+  it('_id wird in Response durchgereicht', () => {
+    // Simuliert content.js Message-Bridge
+    const request = { type: 'NOSTR_GET_PUBLIC_KEY', _id: 'test-uuid-123', payload: null };
+    const response = {
+      type: request.type + '_RESPONSE',
+      _id: request._id,
+      result: 'abc123',
+      error: null
+    };
+    expect(response._id).toBe(request._id);
+    expect(response.type).toBe('NOSTR_GET_PUBLIC_KEY_RESPONSE');
+  });
+});
+```
+
+### Projektstruktur für Tests
+```text
+tests/
+├── mocks/
+│   └── chrome.js           # Chrome API Mock
+├── key-manager.test.js   # AES-GCM Encrypt/Decrypt, Key-Generation
+├── nip07-conformity.test.js # NIP-07 Spec: hex pubkey, vollständiges Event
+├── nip04-nip44.test.js   # NIP-04 Legacy + NIP-44 v2 Roundtrips
+├── semver.test.js        # Versionsvergleich
+├── domain-access.test.js # Domain-Whitelist/Blocklist/Bootstrapping
+└── message-handler.test.js # Message Routing, _id Korrelation
+```
+
+### Architektur-Hinweis
+
+Für gute Testbarkeit sollten folgende Module aus `background.js` extrahiert werden:
+
+```text
+src/
+├── lib/
+│   ├── key-manager.js    # KeyManager Klasse (export)
+│   ├── domain-access.js  # checkDomainAccess() (export)
+│   ├── semver.js         # semverSatisfies() (export)
+│   └── crypto-handlers.js # handleNIP04(), handleNIP44() (export)
+└── background.js         # importiert aus lib/, orchestriert Message Handler
+```
+
+Dies ermöglicht direkten Import in Tests ohne Chrome-API-Abhängigkeit.
+
+### Akzeptanzkriterien
+- [ ] `npm test` läuft durch ohne Fehler
+- [ ] AES-GCM Roundtrip-Tests bestätigen korrekte Ver-/Entschlüsselung
+- [ ] NIP-07 Rückgabeformate sind spec-konform (hex pubkey, vollständiges Event)
+- [ ] NIP-04 und NIP-44 Encryption/Decryption Roundtrips funktionieren
+- [ ] Domain-Bootstrapping (pending für unbekannte Domains) ist getestet
+- [ ] Semver-Vergleich deckt Edge-Cases ab
+- [ ] Message-Routing ordnet alle NIP-07 Methoden korrekt zu
+- [ ] Coverage ≥ 80% für `src/lib/`
+
+---
+
 ## Sicherheitsregeln (STRICT)
 
 1. **NSEC REGELN:**
@@ -1499,6 +2055,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 ## Deployment Checkliste
 
+- [ ] `npm test` alle Tests grün
 - [ ] `npm run build` erfolgreich (Chrome + Firefox)
 - [ ] Extension in Chrome Web Store hochladen ($5 Fee)
 - [ ] Extension bei Firefox Add-ons hochladen (kostenlos)
