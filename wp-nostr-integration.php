@@ -135,7 +135,12 @@ function nostr_get_domains() {
     
     // Stelle sicher, dass domains ein Array ist
     if (!is_array($domains)) {
-        $domains = array_filter(array_map('trim', explode("\n", $domains)));
+        $domains = preg_split('/\r\n|\r|\n/', (string) $domains);
+        $domains = array_filter(array_map('trim', $domains));
+    }
+    $domains = array_values(array_unique($domains));
+    if (empty($domains)) {
+        $domains = [parse_url(home_url(), PHP_URL_HOST)];
     }
     
     $payload = json_encode($domains);
@@ -171,11 +176,44 @@ function nostr_admin_menu() {
     );
 }
 
+function nostr_sanitize_allowed_domains($value) {
+    if (is_array($value)) {
+        $lines = $value;
+    } else {
+        $lines = preg_split('/\r\n|\r|\n/', (string) $value);
+    }
+
+    $lines = array_filter(array_map('trim', $lines));
+    $lines = array_values(array_unique($lines));
+
+    return implode("\n", $lines);
+}
+
+function nostr_sanitize_primary_domain($value) {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return parse_url(home_url(), PHP_URL_HOST);
+    }
+    return untrailingslashit($value);
+}
+
 function nostr_admin_init() {
-    register_setting('nostr_options', 'nostr_allowed_domains');
-    register_setting('nostr_options', 'nostr_primary_domain');
-    register_setting('nostr_options', 'nostr_min_extension_version');
-    register_setting('nostr_options', 'nostr_extension_store_url');
+    register_setting('nostr_options', 'nostr_allowed_domains', [
+        'type' => 'string',
+        'sanitize_callback' => 'nostr_sanitize_allowed_domains'
+    ]);
+    register_setting('nostr_options', 'nostr_primary_domain', [
+        'type' => 'string',
+        'sanitize_callback' => 'nostr_sanitize_primary_domain'
+    ]);
+    register_setting('nostr_options', 'nostr_min_extension_version', [
+        'type' => 'string',
+        'sanitize_callback' => 'sanitize_text_field'
+    ]);
+    register_setting('nostr_options', 'nostr_extension_store_url', [
+        'type' => 'string',
+        'sanitize_callback' => 'esc_url_raw'
+    ]);
 }
 
 function nostr_settings_page() {
@@ -213,9 +251,11 @@ function nostr_settings_page() {
                                   rows="5" 
                                   cols="50"
                                   class="large-text"><?php 
-                            $domains = get_option('nostr_allowed_domains', []);
+                            $domains = get_option('nostr_allowed_domains', parse_url(home_url(), PHP_URL_HOST));
                             if (is_array($domains)) {
                                 echo esc_textarea(implode("\n", $domains));
+                            } else {
+                                echo esc_textarea((string) $domains);
                             }
                         ?></textarea>
                         <p class="description">

@@ -33,7 +33,7 @@ window.nostr = {
 
 function sendRequest(type, payload = null) {
   return new Promise((resolve, reject) => {
-    const id = crypto.randomUUID();
+    const id = createRequestId();
     const handler = (e) => {
       if (e.data.type === type + '_RESPONSE' && e.data._id === id) {
         window.removeEventListener('message', handler);
@@ -44,4 +44,18 @@ function sendRequest(type, payload = null) {
     window.addEventListener('message', handler);
     window.postMessage({ type, payload, _id: id }, '*');
   });
+}
+
+function createRequestId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
