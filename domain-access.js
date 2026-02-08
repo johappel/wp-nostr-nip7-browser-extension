@@ -51,4 +51,33 @@ export async function blockDomain(domain, storage = chrome.storage.local) {
   }
 }
 
+/**
+ * Verifiziert die HMAC-SHA256 Signatur der Domain-Liste
+ * @param {string[]} domains - Array der Domains
+ * @param {number} timestamp - Zeitstempel der Signatur
+ * @param {string} signature - Hex-String der Signatur
+ * @param {string} secret - Shared Secret
+ * @returns {Promise<boolean>}
+ */
+export async function verifyWhitelistSignature(domains, timestamp, signature, secret) {
+  if (!secret || !signature || !domains) return false;
+
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false, ['verify']
+  );
+
+  // Rekonstruktion des Payloads: JSON + '|' + timestamp
+  // PHP json_encode für String-Arrays ist kompatibel mit JSON.stringify
+  const payload = JSON.stringify(domains);
+  const data = enc.encode(payload + '|' + timestamp);
+
+  // Hex-Signatur in Uint8Array konvertieren
+  const signatureBytes = new Uint8Array(signature.match(/[\da-f]{2}/gi).map(h => parseInt(h, 16)));
+
+  return await crypto.subtle.verify('HMAC', key, signatureBytes, data);
+}
+
 export default checkDomainAccess;
