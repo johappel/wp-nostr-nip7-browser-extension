@@ -32,6 +32,7 @@ Object.defineProperty(wpNostrApi, '__wpNostrManaged', {
 });
 
 installNostrApi(wpNostrApi, preferLock);
+bootstrapDomainSyncConfig();
 
 function readPreferLockFromScriptSrc() {
   const src = document.currentScript?.src;
@@ -86,6 +87,21 @@ function installNostrApi(api, lockEnabled) {
     }
     console.warn('[wp-nostr] Could not enforce lock on this page.', err);
   }
+}
+
+function bootstrapDomainSyncConfig() {
+  const config = window.nostrConfig;
+  if (!config || typeof config !== 'object') return;
+
+  const primaryDomain = String(config.primaryDomain || '').trim();
+  const domainSecret = String(config.domainSecret || '').trim();
+  if (!primaryDomain || !domainSecret) return;
+
+  sendRequest('NOSTR_SET_DOMAIN_CONFIG', { primaryDomain, domainSecret })
+    .catch((err) => {
+      // Normal auf Nicht-Primary-Domains; der Fehler soll den Seitenfluss nicht stoeren.
+      console.debug('[wp-nostr] Domain config bootstrap skipped:', err?.message || err);
+    });
 }
 
 function sendRequest(type, payload = null) {

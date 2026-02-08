@@ -4,7 +4,13 @@
  */
 class NostrWPIntegration {
   constructor() {
-    this.config = window.nostrConfig || {};
+    const legacyConfigObject = (
+      window.nostrWP &&
+      typeof window.nostrWP === 'object' &&
+      typeof window.nostrWP.configureDomainSync !== 'function'
+    ) ? window.nostrWP : null;
+
+    this.config = window.nostrConfig || legacyConfigObject || {};
     this.hasExtension = false;
     this.npub = null;
     this.init();
@@ -362,8 +368,15 @@ class NostrWPIntegration {
 }
 
 function initNostrWPIntegration() {
-  if (window.nostrWP) return;
-  window.nostrWP = new NostrWPIntegration();
+  if (window.__nostrWPIntegration) return;
+
+  const instance = new NostrWPIntegration();
+  window.__nostrWPIntegration = instance;
+
+  // Backward compatibility: expose on window.nostrWP unless occupied by another object.
+  if (!window.nostrWP || typeof window.nostrWP.configureDomainSync === 'function') {
+    window.nostrWP = instance;
+  }
 }
 
 // Robust gegen spaet geladenes Script (z. B. durch Caching/Optimierungs-Plugins).
