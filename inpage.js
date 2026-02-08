@@ -1,35 +1,79 @@
-// NIP-07 Standard API
-window.nostr = {
-  getPublicKey: async () => {
-    return sendRequest('NOSTR_GET_PUBLIC_KEY');
-  },
-  
-  signEvent: async (event) => {
-    return sendRequest('NOSTR_SIGN_EVENT', event);
-  },
-  
-  getRelays: async () => {
-    return sendRequest('NOSTR_GET_RELAYS');
-  },
-  
-  nip04: {
-    encrypt: async (pubkey, plaintext) => {
-      return sendRequest('NOSTR_NIP04_ENCRYPT', { pubkey, plaintext });
+function createNostrApi() {
+  return {
+    getPublicKey: async () => sendRequest('NOSTR_GET_PUBLIC_KEY'),
+
+    signEvent: async (event) => sendRequest('NOSTR_SIGN_EVENT', event),
+
+    getRelays: async () => sendRequest('NOSTR_GET_RELAYS'),
+
+    nip04: {
+      encrypt: async (pubkey, plaintext) =>
+        sendRequest('NOSTR_NIP04_ENCRYPT', { pubkey, plaintext }),
+      decrypt: async (pubkey, ciphertext) =>
+        sendRequest('NOSTR_NIP04_DECRYPT', { pubkey, ciphertext })
     },
-    decrypt: async (pubkey, ciphertext) => {
-      return sendRequest('NOSTR_NIP04_DECRYPT', { pubkey, ciphertext });
+
+    nip44: {
+      encrypt: async (pubkey, plaintext) =>
+        sendRequest('NOSTR_NIP44_ENCRYPT', { pubkey, plaintext }),
+      decrypt: async (pubkey, ciphertext) =>
+        sendRequest('NOSTR_NIP44_DECRYPT', { pubkey, ciphertext })
     }
-  },
-  
-  nip44: {
-    encrypt: async (pubkey, plaintext) => {
-      return sendRequest('NOSTR_NIP44_ENCRYPT', { pubkey, plaintext });
-    },
-    decrypt: async (pubkey, ciphertext) => {
-      return sendRequest('NOSTR_NIP44_DECRYPT', { pubkey, ciphertext });
+  };
+}
+
+const preferLock = window.__WP_NOSTR_PREFER_LOCK__ !== false;
+const wpNostrApi = createNostrApi();
+Object.defineProperty(wpNostrApi, '__wpNostrManaged', {
+  value: true,
+  configurable: false,
+  enumerable: false,
+  writable: false
+});
+
+installNostrApi(wpNostrApi, preferLock);
+
+function installNostrApi(api, lockEnabled) {
+  if (!lockEnabled) {
+    try {
+      window.nostr = api;
+    } catch (err) {
+      console.warn('[wp-nostr] Could not assign window.nostr while lock is disabled.', err);
     }
+    return;
   }
-};
+
+  const existingDescriptor = Object.getOwnPropertyDescriptor(window, 'nostr');
+  if (existingDescriptor && existingDescriptor.configurable === false) {
+    const current = window.nostr;
+    if (!current || !current.__wpNostrManaged) {
+      console.warn('[wp-nostr] Another extension already locked window.nostr.');
+    }
+    return;
+  }
+
+  try {
+    Object.defineProperty(window, 'nostr', {
+      configurable: false,
+      enumerable: true,
+      get() {
+        return api;
+      },
+      set(value) {
+        if (value && value.__wpNostrManaged) return;
+        console.warn('[wp-nostr] Ignored overwrite of window.nostr because lock is enabled.');
+      }
+    });
+  } catch (err) {
+    // Fallback if the property cannot be redefined in this page context.
+    try {
+      window.nostr = api;
+    } catch {
+      // ignore
+    }
+    console.warn('[wp-nostr] Could not enforce lock on this page.', err);
+  }
+}
 
 function sendRequest(type, payload = null) {
   return new Promise((resolve, reject) => {

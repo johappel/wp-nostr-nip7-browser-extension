@@ -3,9 +3,27 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nostr Signer</title>
+  <title>WP Nostr Signer</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <p>Popup wird in TASK-08 implementiert</p>
+  <main class="popup">
+    <h1>WP Nostr Signer</h1>
+
+    <label class="row">
+      <input type="checkbox" id="prefer-lock" />
+      <span>Prefer WP Nostr Lock</span>
+    </label>
+
+    <p class="hint">
+      Wenn aktiv, versucht die Extension, <code>window.nostr</code> gegen Ueberschreiben
+      durch andere Extensions zu schuetzen.
+    </p>
+
+    <p class="hint warn">Aenderung wirkt nach Tab-Reload.</p>
+    <p id="status" class="status"></p>
+  </main>
+
+  <script src="popup.js"></script>
 </body>
 </html>

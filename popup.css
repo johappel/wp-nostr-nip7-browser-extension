@@ -1,0 +1,46 @@
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  background: #f7f8fa;
+  color: #1d242f;
+}
+
+.popup {
+  width: 320px;
+  padding: 14px;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #3b4656;
+  line-height: 1.35;
+}
+
+.warn {
+  color: #8a3e00;
+}
+
+.status {
+  min-height: 18px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #0a5c2e;
+}
+
+code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+}

@@ -98,3 +98,8 @@ Hinweis:
 6. UI/JS des WordPress-Plugins wird nicht geladen.
 - Prüfe im Frontend-Quelltext, ob `nostr-integration.js` und `nostr-integration.css` eingebunden sind.
 - Prüfe den Plugin-Ordnerinhalt: `wp-nostr-integration.php`, `nostr-integration.js`, `nostr-integration.css`.
+
+7. Eine andere NIP-07 Extension (z. B. nos2x) ueberschreibt window.nostr.
+- Oeffne das Popup der WP Nostr Extension und aktiviere Prefer WP Nostr Lock.
+- Lade den Tab neu, damit die Inpage-API mit Lock neu injiziert wird.
+- Wenn du bewusst die andere Extension bevorzugen willst, deaktiviere den Lock wieder.
