@@ -30,6 +30,19 @@ describe('KeyManager', () => {
     expect(secretKey.length).toBe(32);
   });
 
+  it('should support no-password mode when requested', async () => {
+    const { pubkey } = await keyManager.generateKey(null);
+
+    expect(await keyManager.isPasswordProtected()).toBe(false);
+
+    const secretKey = await keyManager.getKey(null);
+    expect(secretKey).toBeInstanceOf(Uint8Array);
+    expect(secretKey.length).toBe(32);
+
+    const pubkey2 = await keyManager.getPublicKey(null);
+    expect(pubkey2).toBe(pubkey);
+  });
+
   it('should fail to retrieve key with wrong password', async () => {
     await keyManager.generateKey(password);
     

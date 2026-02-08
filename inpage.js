@@ -35,10 +35,13 @@ function sendRequest(type, payload = null) {
   return new Promise((resolve, reject) => {
     const id = createRequestId();
     const handler = (e) => {
-      if (e.data.type === type + '_RESPONSE' && e.data._id === id) {
+      const data = e?.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === type + '_RESPONSE' && data._id === id) {
         window.removeEventListener('message', handler);
-        if (e.data.error) reject(new Error(e.data.error));
-        else resolve(e.data.result);
+        if (data.error) reject(new Error(data.error));
+        else resolve(data.result);
       }
     };
     window.addEventListener('message', handler);

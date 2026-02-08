@@ -12,8 +12,27 @@ const CURRENT_VERSION = '1.0.0';
 // Global KeyManager Instance
 const keyManager = new KeyManager();
 
-// Passwort-Cache (nur für laufende Session, wird bei SW-Stop gelöscht)
+// Passwort-Cache (nur fÃ¼r laufende Session, wird bei SW-Stop gelÃ¶scht)
 let cachedPassword = null;
+
+function extractPasswordFromDialogResult(result) {
+  if (!result) return null;
+  if (typeof result === 'string') return result; // backward compatibility
+  if (result.noPassword === true) return null;
+  return typeof result.password === 'string' ? result.password : null;
+}
+
+async function ensurePasswordIfNeeded(passwordProtected) {
+  if (!passwordProtected) return null;
+  if (cachedPassword) return cachedPassword;
+
+  const unlockResult = await promptPassword('unlock');
+  const password = extractPasswordFromDialogResult(unlockResult);
+  if (!password) throw new Error('Password required');
+
+  cachedPassword = password;
+  return cachedPassword;
+}
 
 // ============================================================
 // Message Handler
@@ -28,7 +47,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function handleMessage(request, sender) {
   const domain = sender.tab?.url ? new URL(sender.tab.url).hostname : null;
 
-  // PING erfordert keine Domain-Validierung (für Extension-Detection)
+  // PING erfordert keine Domain-Validierung (fÃ¼r Extension-Detection)
   if (request.type === 'NOSTR_PING') {
     return { pong: true, version: CURRENT_VERSION };
   }
@@ -41,42 +60,53 @@ async function handleMessage(request, sender) {
     };
   }
 
-  // NOSTR_LOCK - Passwort-Cache löschen
+  // NOSTR_LOCK - Passwort-Cache lÃ¶schen
   if (request.type === 'NOSTR_LOCK') {
     cachedPassword = null;
     return { locked: true };
   }
 
-  // NOSTR_GET_STATUS - Status für Popup (benötigt keine Domain)
+  // NOSTR_GET_STATUS - Status fÃ¼r Popup (benÃ¶tigt keine Domain)
   if (request.type === 'NOSTR_GET_STATUS') {
     const hasKey = await keyManager.hasKey();
+    const passwordProtected = hasKey ? await keyManager.isPasswordProtected() : false;
     let npub = null;
     
-    // Wenn entsperrt, Npub berechnen und zurückgeben
-    if (hasKey && cachedPassword) {
+    // Wenn entsperrt, Npub berechnen und zurÃ¼ckgeben
+    if (hasKey && (!passwordProtected || cachedPassword)) {
        try {
-         const pubkey = await keyManager.getPublicKey(cachedPassword);
+         const pubkey = await keyManager.getPublicKey(passwordProtected ? cachedPassword : null);
          npub = nip19.npubEncode(pubkey);
        } catch (e) {
-         // Falls Passwort falsch/veraltet im Cache
-         cachedPassword = null;
+         if (passwordProtected) cachedPassword = null;
        }
     }
     
     return {
       hasKey,
-      locked: hasKey && !cachedPassword,
-      npub
+      locked: hasKey && passwordProtected && !cachedPassword,
+      passwordProtected,
+      npub,
+      noPasswordMode: hasKey && !passwordProtected
     };
   }
 
-  // NOSTR_SET_DOMAIN_CONFIG - Konfiguration für Domain-Sync setzen
+  // NOSTR_SET_DOMAIN_CONFIG - Konfiguration fÃ¼r Domain-Sync setzen
   if (request.type === 'NOSTR_SET_DOMAIN_CONFIG') {
-    const { primaryDomain, domainSecret } = request.payload;
+    const { primaryDomain, domainSecret } = request.payload || {};
+    if (!primaryDomain || !domainSecret) {
+      throw new Error('Invalid domain sync config');
+    }
+    // Domain-Config darf nur von der Primary Domain selbst gesetzt werden.
+    const primaryHost = extractHostFromPrimaryDomain(primaryDomain);
+    if (!domain || !primaryHost || domain.toLowerCase() !== primaryHost.toLowerCase()) {
+      throw new Error('Domain config can only be set from primary domain');
+    }
     await chrome.storage.local.set({ primaryDomain, domainSecret });
-    // Sofortiges Update anstoßen
-    updateDomainWhitelist();
-    return { success: true };
+    // Sofortiges Update ausf?hren
+    await updateDomainWhitelist();
+    const { allowedDomains = [] } = await chrome.storage.local.get('allowedDomains');
+    return { success: true, allowedDomains };
   }
 
   // Domain-Validierung mit Bootstrapping
@@ -85,7 +115,7 @@ async function handleMessage(request, sender) {
     throw new Error('Domain not authorized');
   }
   if (domainStatus === DOMAIN_STATUS.PENDING) {
-    // User muss Domain erst bestätigen
+    // User muss Domain erst bestÃ¤tigen
     const allowed = await promptDomainApproval(domain);
     if (!allowed) throw new Error('Domain rejected by user');
   }
@@ -93,34 +123,39 @@ async function handleMessage(request, sender) {
   switch (request.type) {
     case 'NOSTR_GET_PUBLIC_KEY': {
       if (!await keyManager.hasKey()) {
-        cachedPassword = await promptPassword('create');
-        if (!cachedPassword) throw new Error('Password required');
-        const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(cachedPassword);
+        const createResult = await promptPassword('create');
+        if (!createResult) throw new Error('Password setup canceled');
+
+        const useNoPassword = typeof createResult === 'object' && createResult.noPassword === true;
+        const password = extractPasswordFromDialogResult(createResult);
+        if (!useNoPassword && !password) throw new Error('Password required');
+
+        cachedPassword = useNoPassword ? null : password;
+
+        const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(
+          useNoPassword ? null : password
+        );
         await openBackupDialog(npub, nsecBech32);
         return pubkey;
       }
-      if (!cachedPassword) {
-        cachedPassword = await promptPassword('unlock');
-        if (!cachedPassword) throw new Error('Password required');
-      }
-      const secretKey = await keyManager.getKey(cachedPassword);
-      if (!secretKey) throw new Error('Invalid password');
+      const passwordProtected = await keyManager.isPasswordProtected();
+      const password = await ensurePasswordIfNeeded(passwordProtected);
+      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
+      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
       const pubkey = getPublicKey(secretKey);
       secretKey.fill(0);
       return pubkey;
     }
 
     case 'NOSTR_SIGN_EVENT': {
-      if (!cachedPassword) {
-        cachedPassword = await promptPassword('unlock');
-        if (!cachedPassword) throw new Error('Password required');
-      }
+      const passwordProtected = await keyManager.isPasswordProtected();
+      const password = await ensurePasswordIfNeeded(passwordProtected);
       const sensitiveKinds = [0, 3, 4];
       if (sensitiveKinds.includes(request.payload?.kind)) {
         const confirmed = await promptSignConfirmation(request.payload, domain);
         if (!confirmed) throw new Error('Signing rejected by user');
       }
-      return await keyManager.signEvent(request.payload, cachedPassword);
+      return await keyManager.signEvent(request.payload, passwordProtected ? password : null);
     }
 
     case 'NOSTR_GET_RELAYS': {
@@ -130,12 +165,10 @@ async function handleMessage(request, sender) {
 
     case 'NOSTR_NIP04_ENCRYPT':
     case 'NOSTR_NIP04_DECRYPT': {
-      if (!cachedPassword) {
-        cachedPassword = await promptPassword('unlock');
-        if (!cachedPassword) throw new Error('Password required');
-      }
-      const secretKey = await keyManager.getKey(cachedPassword);
-      if (!secretKey) throw new Error('Invalid password');
+      const passwordProtected = await keyManager.isPasswordProtected();
+      const password = await ensurePasswordIfNeeded(passwordProtected);
+      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
+      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
       try {
         const { pubkey, plaintext, ciphertext } = request.payload;
         if (request.type === 'NOSTR_NIP04_ENCRYPT') return await handleNIP04Encrypt(secretKey, pubkey, plaintext);
@@ -145,12 +178,10 @@ async function handleMessage(request, sender) {
 
     case 'NOSTR_NIP44_ENCRYPT':
     case 'NOSTR_NIP44_DECRYPT': {
-      if (!cachedPassword) {
-        cachedPassword = await promptPassword('unlock');
-        if (!cachedPassword) throw new Error('Password required');
-      }
-      const secretKey = await keyManager.getKey(cachedPassword);
-      if (!secretKey) throw new Error('Invalid password');
+      const passwordProtected = await keyManager.isPasswordProtected();
+      const password = await ensurePasswordIfNeeded(passwordProtected);
+      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
+      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
       try {
         const { pubkey, plaintext, ciphertext } = request.payload;
         if (request.type === 'NOSTR_NIP44_ENCRYPT') return handleNIP44Encrypt(secretKey, pubkey, plaintext);
@@ -235,7 +266,7 @@ function getPrimaryDomainBaseUrl(primaryDomain) {
   const value = String(primaryDomain || '').trim();
   if (!value) return null;
 
-  // Wenn ein vollständiger Origin übergeben wurde, nutze ihn direkt.
+  // Wenn ein vollstÃ¤ndiger Origin Ã¼bergeben wurde, nutze ihn direkt.
   if (/^https?:\/\//i.test(value)) {
     try {
       const url = new URL(value);
@@ -249,6 +280,41 @@ function getPrimaryDomainBaseUrl(primaryDomain) {
   const isLocalDev = /^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(value);
   const protocol = isLocalDev ? 'http' : 'https';
   return `${protocol}://${value}`;
+}
+
+function extractHostFromPrimaryDomain(primaryDomain) {
+  const baseUrl = getPrimaryDomainBaseUrl(primaryDomain);
+  if (!baseUrl) return null;
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeDomainEntry(value) {
+  const input = String(value || '').trim();
+  if (!input) return null;
+
+  if (/^https?:\/\//i.test(input)) {
+    try {
+      return new URL(input).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+
+  const host = input
+    .replace(/^\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '')
+    .toLowerCase();
+  return host || null;
+}
+
+function normalizeDomainList(domains) {
+  if (!Array.isArray(domains)) return [];
+  return Array.from(new Set(domains.map(normalizeDomainEntry).filter(Boolean)));
 }
 
 async function updateDomainWhitelist() {
@@ -266,9 +332,9 @@ async function updateDomainWhitelist() {
       console.error('Domain list signature invalid');
       return;
     }
-
+    const normalizedDomains = normalizeDomainList(data.domains);
     await chrome.storage.local.set({
-      allowedDomains: data.domains,
+      allowedDomains: normalizedDomains,
       lastDomainUpdate: Date.now()
     });
   } catch (e) {
@@ -283,3 +349,4 @@ chrome.alarms.create('domainSync', { periodInMinutes: 5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'domainSync') updateDomainWhitelist();
 });
+

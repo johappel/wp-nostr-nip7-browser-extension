@@ -15,6 +15,13 @@ const storageMock = {
     Object.assign(storageMock.data, items);
     return Promise.resolve();
   }),
+  remove: vi.fn((keys) => {
+    const list = Array.isArray(keys) ? keys : [keys];
+    for (const key of list) {
+      delete storageMock.data[key];
+    }
+    return Promise.resolve();
+  }),
   clear: vi.fn(() => {
     storageMock.data = {};
     return Promise.resolve();

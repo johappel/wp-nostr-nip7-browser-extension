@@ -1,4 +1,4 @@
-// Dialog-Logik für Backup, Password und Confirmation
+// Dialog logic for backup, password, domain approval and sign confirmation.
 
 const params = new URLSearchParams(window.location.search);
 const type = params.get('type');
@@ -18,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
       showConfirmDialog(params.get('domain'), Number(params.get('kind')));
       break;
     default:
-      document.getElementById('app').innerHTML = '<p>Unbekannter Dialog-Typ</p>';
+      document.getElementById('app').innerHTML = '<p>Unknown dialog type</p>';
   }
 });
 
@@ -26,49 +26,46 @@ function showBackupDialog(npub, nsec) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog backup">
-      <h2>🔐 Dein Nostr Schlüsselpaar</h2>
-      <p class="warning">⚠️ WICHTIG: Speichere deinen privaten Schlüssel JETZT!
-      Er wird nach Schließen dieses Dialogs nicht mehr angezeigt.</p>
-      
+      <h2>Your Nostr keypair</h2>
+      <p class="warning">
+        Important: save your private key now. It will not be shown again after this dialog is closed.
+      </p>
+
       <div class="key-box">
-        <label>Öffentlicher Schlüssel (Npub):</label>
+        <label>Public key (npub):</label>
         <code id="npub-display">${escapeHtml(npub)}</code>
-        <button onclick="copyToClipboard('npub-display')" class="btn-secondary">Kopieren</button>
+        <button onclick="copyToClipboard('npub-display')" class="btn-secondary">Copy</button>
       </div>
-      
+
       <div class="key-box nsec-box">
-        <label>Privater Schlüssel (Nsec) – GEHEIM HALTEN:</label>
+        <label>Private key (nsec) - keep secret:</label>
         <code id="nsec-display" class="blurred">${escapeHtml(nsec)}</code>
         <div class="btn-group">
-          <button onclick="toggleVisibility('nsec-display')" class="btn-secondary">Anzeigen</button>
-          <button onclick="copyToClipboard('nsec-display')" class="btn-secondary">Kopieren</button>
+          <button onclick="toggleVisibility('nsec-display')" class="btn-secondary">Show</button>
+          <button onclick="copyToClipboard('nsec-display')" class="btn-secondary">Copy</button>
         </div>
       </div>
-      
+
       <div class="actions">
-        <button id="download" class="btn-primary">
-          💾 Schlüssel als Datei speichern
-        </button>
+        <button id="download" class="btn-primary">Save key as file</button>
         <label class="checkbox-label">
           <input type="checkbox" id="confirm-saved" />
-          Ich habe meinen privaten Schlüssel sicher gespeichert
+          I saved my private key securely
         </label>
-        <button id="close" class="btn-primary" disabled>🔒 Weiter</button>
+        <button id="close" class="btn-primary" disabled>Continue</button>
       </div>
-      
-      <p class="hint">Ohne den privaten Schlüssel kannst du dein Konto
-      nicht wiederherstellen. Es gibt keinen "Passwort vergessen"-Mechanismus.</p>
+
+      <p class="hint">There is no password reset for your private key.</p>
     </div>
   `;
 
-  // Weiter-Button erst nach Checkbox aktiv
   document.getElementById('confirm-saved').onchange = (e) => {
     document.getElementById('close').disabled = !e.target.checked;
   };
-  
+
   document.getElementById('download').onclick = () => {
     const blob = new Blob(
-      [`Nostr Schlüssel-Backup\n==================\n\nNpub: ${npub}\nNsec: ${nsec}\n\n⚠️ NIEMALS TEILEN!\n`],
+      [`Nostr Backup\n===========\n\nnpub: ${npub}\nnsec: ${nsec}\n\nDO NOT SHARE.\n`],
       { type: 'text/plain' }
     );
     const url = URL.createObjectURL(blob);
@@ -78,78 +75,103 @@ function showBackupDialog(npub, nsec) {
     a.click();
     URL.revokeObjectURL(url);
   };
-  
+
   document.getElementById('close').onclick = () => window.close();
 }
 
 function showPasswordDialog(mode) {
   const app = document.getElementById('app');
   const isCreate = mode === 'create';
+
   app.innerHTML = `
     <div class="dialog password">
-      <h2>${isCreate ? '🔑 Passwort festlegen' : '🔓 Extension entsperren'}</h2>
+      <h2>${isCreate ? 'Set password' : 'Unlock extension'}</h2>
       <p>${isCreate
-        ? 'Dieses Passwort schützt deinen privaten Schlüssel. Mindestens 8 Zeichen.'
-        : 'Gib dein Passwort ein, um fortzufahren.'}</p>
-      
+        ? 'This password protects your private key. Minimum 8 characters.'
+        : 'Enter your password to continue.'}</p>
+
       <div class="input-group">
-        <input type="password" id="password" placeholder="Passwort" autofocus />
+        <input type="password" id="password" placeholder="Password" autofocus />
       </div>
-      
+
       ${isCreate ? `
         <div class="input-group">
-          <input type="password" id="password-confirm" placeholder="Passwort wiederholen" />
+          <input type="password" id="password-confirm" placeholder="Repeat password" />
         </div>
+        <label class="checkbox-label">
+          <input type="checkbox" id="no-password" />
+          Store without password (less secure)
+        </label>
+        <p class="hint">Use only on private devices. Private key will be stored unencrypted.</p>
       ` : ''}
-      
+
       <p id="error" class="error" hidden></p>
-      
+
       <div class="actions">
-        <button id="submit" class="btn-primary">${isCreate ? 'Festlegen' : 'Entsperren'}</button>
-        <button id="cancel" class="btn-secondary">Abbrechen</button>
+        <button id="submit" class="btn-primary">${isCreate ? 'Save' : 'Unlock'}</button>
+        <button id="cancel" class="btn-secondary">Cancel</button>
       </div>
     </div>
   `;
 
+  const passwordEl = document.getElementById('password');
+  const confirmEl = isCreate ? document.getElementById('password-confirm') : null;
+  const noPasswordEl = isCreate ? document.getElementById('no-password') : null;
+
+  if (isCreate && noPasswordEl) {
+    const toggleInputs = () => {
+      const disabled = noPasswordEl.checked;
+      passwordEl.disabled = disabled;
+      if (confirmEl) confirmEl.disabled = disabled;
+    };
+    noPasswordEl.onchange = toggleInputs;
+    toggleInputs();
+  }
+
   document.getElementById('submit').onclick = async () => {
-    const pw = document.getElementById('password').value;
+    const pw = passwordEl.value;
     const errorEl = document.getElementById('error');
-    
+
     if (isCreate) {
-      const pw2 = document.getElementById('password-confirm').value;
+      if (noPasswordEl?.checked) {
+        await chrome.storage.session.set({ passwordResult: { noPassword: true } });
+        window.close();
+        return;
+      }
+
+      const pw2 = confirmEl.value;
       if (pw !== pw2) {
-        errorEl.textContent = '❌ Passwörter stimmen nicht überein';
+        errorEl.textContent = 'Passwords do not match';
         errorEl.hidden = false;
         return;
       }
       if (pw.length < 8) {
-        errorEl.textContent = '❌ Mindestens 8 Zeichen erforderlich';
+        errorEl.textContent = 'Minimum 8 characters required';
         errorEl.hidden = false;
         return;
       }
     }
-    
+
     if (!pw) {
-      errorEl.textContent = '❌ Passwort erforderlich';
+      errorEl.textContent = 'Password required';
       errorEl.hidden = false;
       return;
     }
-    
-    await chrome.storage.session.set({ passwordResult: pw });
+
+    await chrome.storage.session.set({ passwordResult: { password: pw } });
     window.close();
   };
-  
+
   document.getElementById('cancel').onclick = () => {
     chrome.storage.session.set({ passwordResult: null });
     window.close();
   };
-  
-  // Enter-Taste unterstützt
-  document.getElementById('password').onkeypress = (e) => {
+
+  passwordEl.onkeypress = (e) => {
     if (e.key === 'Enter') document.getElementById('submit').click();
   };
-  if (isCreate) {
-    document.getElementById('password-confirm').onkeypress = (e) => {
+  if (confirmEl) {
+    confirmEl.onkeypress = (e) => {
       if (e.key === 'Enter') document.getElementById('submit').click();
     };
   }
@@ -159,16 +181,16 @@ function showDomainApprovalDialog(domain) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog domain">
-      <h2>🌐 Neue Domain</h2>
-      <p>Die Webseite <strong>${escapeHtml(domain)}</strong> möchte auf deine Nostr-Identität zugreifen.</p>
-      <p>Möchtest du dieser Domain vertrauen?</p>
-      
+      <h2>New domain</h2>
+      <p>The website <strong>${escapeHtml(domain)}</strong> wants to access your Nostr identity.</p>
+      <p>Do you trust this domain?</p>
+
       <div class="actions">
-        <button id="allow" class="btn-primary">✓ Erlauben</button>
-        <button id="deny" class="btn-secondary">✗ Ablehnen</button>
+        <button id="allow" class="btn-primary">Allow</button>
+        <button id="deny" class="btn-secondary">Deny</button>
         <label class="checkbox-label">
           <input type="checkbox" id="remember" checked />
-          Entscheidung für diese Domain merken
+          Remember decision for this domain
         </label>
       </div>
     </div>
@@ -176,7 +198,7 @@ function showDomainApprovalDialog(domain) {
 
   const respond = async (allowed) => {
     const remember = document.getElementById('remember').checked;
-    
+
     if (remember) {
       const storageKey = allowed ? 'allowedDomains' : 'blockedDomains';
       const { [storageKey]: list = [] } = await chrome.storage.local.get(storageKey);
@@ -185,7 +207,7 @@ function showDomainApprovalDialog(domain) {
         await chrome.storage.local.set({ [storageKey]: list });
       }
     }
-    
+
     await chrome.storage.local.set({
       domainApprovalResult: { domain, allowed }
     });
@@ -197,31 +219,31 @@ function showDomainApprovalDialog(domain) {
 }
 
 function showConfirmDialog(domain, kind) {
-  const kindNames = { 
-    0: 'Profil-Metadaten', 
-    1: 'Text-Notiz',
-    3: 'Kontaktliste', 
-    4: 'Verschlüsselte Nachricht',
-    5: 'Verschlüsselter Event (NIP-17)',
+  const kindNames = {
+    0: 'Profile metadata',
+    1: 'Text note',
+    3: 'Contact list',
+    4: 'Encrypted message',
+    5: 'Encrypted event (NIP-17)',
     6: 'Repost',
     7: 'Reaction',
-    9735: 'Zap Request'
+    9735: 'Zap request'
   };
-  const kindName = kindNames[kind] || `Unbekannt (Kind ${kind})`;
-  
+  const kindName = kindNames[kind] || `Unknown (kind ${kind})`;
+
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog confirm">
-      <h2>✍️ Signatur-Anfrage</h2>
-      <p><strong>${escapeHtml(domain)}</strong> möchte ein Event signieren:</p>
+      <h2>Signing request</h2>
+      <p><strong>${escapeHtml(domain)}</strong> wants to sign an event:</p>
       <div class="event-info">
         <span class="kind">${kindName}</span>
       </div>
-      <p class="warning">⚠️ Dies ist ein sensitiver Event-Typ. Bitte prüfe sorgfältig, ob du dieser Domain vertraust.</p>
-      
+      <p class="warning">This is a sensitive event type. Confirm only if you trust this domain.</p>
+
       <div class="actions">
-        <button id="confirm" class="btn-primary">Signieren</button>
-        <button id="reject" class="btn-secondary">Ablehnen</button>
+        <button id="confirm" class="btn-primary">Sign</button>
+        <button id="reject" class="btn-secondary">Reject</button>
       </div>
     </div>
   `;
@@ -230,30 +252,31 @@ function showConfirmDialog(domain, kind) {
     await chrome.storage.local.set({ signConfirmResult: true });
     window.close();
   };
-  
+
   document.getElementById('reject').onclick = async () => {
     await chrome.storage.local.set({ signConfirmResult: false });
     window.close();
   };
 }
 
-// --- Hilfsfunktionen ---
+// Helpers
 window.copyToClipboard = function(elementId) {
   const text = document.getElementById(elementId).textContent;
   navigator.clipboard.writeText(text).then(() => {
-    // Visuelles Feedback
-    const btn = event.target;
-    const originalText = btn.textContent;
-    btn.textContent = '✓ Kopiert!';
-    setTimeout(() => btn.textContent = originalText, 1500);
+    const btn = window.event?.target;
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
   });
 };
 
 window.toggleVisibility = function(elementId) {
   const el = document.getElementById(elementId);
   el.classList.toggle('blurred');
-  const btn = event.target;
-  btn.textContent = el.classList.contains('blurred') ? 'Anzeigen' : 'Verbergen';
+  const btn = window.event?.target;
+  if (!btn) return;
+  btn.textContent = el.classList.contains('blurred') ? 'Show' : 'Hide';
 };
 
 function escapeHtml(text) {

@@ -18,6 +18,34 @@ add_action('rest_api_init', 'nostr_register_endpoints');
 add_action('admin_menu', 'nostr_admin_menu');
 add_action('admin_init', 'nostr_admin_init');
 
+function nostr_get_or_create_domain_secret() {
+    $secret = get_option('nostr_domain_secret');
+    if (!$secret) {
+        $secret = wp_generate_password(64, true, true);
+        update_option('nostr_domain_secret', $secret);
+    }
+    return $secret;
+}
+
+function nostr_normalize_domain($value) {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+
+    // Falls eine URL eingetragen wurde, Host extrahieren.
+    if (preg_match('/^https?:\/\//i', $value)) {
+        $host = parse_url($value, PHP_URL_HOST);
+        return $host ? strtolower($host) : '';
+    }
+
+    // Host-only Eingaben (ggf. mit Pfad/Port) normalisieren.
+    $value = preg_replace('/^\/\//', '', $value);
+    $value = preg_replace('/\/.*$/', '', $value);
+    $value = preg_replace('/:\d+$/', '', $value);
+    return strtolower(trim($value));
+}
+
 // ============================================================
 // Frontend Scripts
 // ============================================================
@@ -40,7 +68,10 @@ function nostr_enqueue_scripts() {
         'restUrl' => rest_url('nostr/v1/'),
         'nonce' => wp_create_nonce('wp_rest'),
         'siteDomain' => parse_url(home_url(), PHP_URL_HOST),
-        'isLoggedIn' => is_user_logged_in()
+        'isLoggedIn' => is_user_logged_in(),
+        'primaryDomain' => get_option('nostr_primary_domain', parse_url(home_url(), PHP_URL_HOST)),
+        'domainSecret' => nostr_get_or_create_domain_secret(),
+        'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]')
     ]);
     
     // CSS für Modal
@@ -144,13 +175,7 @@ function nostr_get_domains() {
     }
     
     $payload = json_encode($domains);
-    $secret  = get_option('nostr_domain_secret');
-    
-    // Secret beim ersten Aufruf generieren
-    if (!$secret) {
-        $secret = wp_generate_password(64, true, true);
-        update_option('nostr_domain_secret', $secret);
-    }
+    $secret  = nostr_get_or_create_domain_secret();
     
     $timestamp = time();
     $signature = hash_hmac('sha256', $payload . '|' . $timestamp, $secret);
@@ -183,6 +208,7 @@ function nostr_sanitize_allowed_domains($value) {
         $lines = preg_split('/\r\n|\r|\n/', (string) $value);
     }
 
+    $lines = array_map('nostr_normalize_domain', $lines);
     $lines = array_filter(array_map('trim', $lines));
     $lines = array_values(array_unique($lines));
 
