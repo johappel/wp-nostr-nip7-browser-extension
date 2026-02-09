@@ -143,12 +143,31 @@ function nostr_handle_register(WP_REST_Request $request) {
     if (!preg_match('/^[a-f0-9]{64}$/', $pubkey)) {
         return new WP_Error(
             'invalid_pubkey', 
-            'Ungültiges Pubkey Format', 
+            'Ungueltiges Pubkey Format', 
             ['status' => 400]
         );
     }
+
+    // Bestehenden Key dieses Users nicht stillschweigend ueberschreiben.
+    $current_pubkey = (string) get_user_meta($user_id, 'nostr_pubkey', true);
+    if ($current_pubkey !== '') {
+        if (strtolower($current_pubkey) === strtolower($pubkey)) {
+            return [
+                'success' => true,
+                'pubkey' => strtolower($current_pubkey),
+                'registered' => get_user_meta($user_id, 'nostr_registered', true),
+                'unchanged' => true
+            ];
+        }
+
+        return new WP_Error(
+            'pubkey_already_registered',
+            'Fuer diesen Account ist bereits ein anderer Nostr-Pubkey registriert. Bitte zuerst bewusst wechseln (Key-Rotation), statt zu ueberschreiben.',
+            ['status' => 409, 'currentPubkey' => strtolower($current_pubkey)]
+        );
+    }
     
-    // Prüfe ob dieser Pubkey bereits einem anderen User zugeordnet ist
+    // Pruefe ob dieser Pubkey bereits einem anderen User zugeordnet ist
     $existing_user = get_users([
         'meta_key' => 'nostr_pubkey',
         'meta_value' => $pubkey,
@@ -164,13 +183,13 @@ function nostr_handle_register(WP_REST_Request $request) {
         );
     }
     
-    // Speichere hex-pubkey (Server könnte optional npub ableiten)
-    update_user_meta($user_id, 'nostr_pubkey', $pubkey);
+    // Speichere hex-pubkey (Server koennte optional npub ableiten)
+    update_user_meta($user_id, 'nostr_pubkey', strtolower($pubkey));
     update_user_meta($user_id, 'nostr_registered', current_time('mysql'));
     
     return [
         'success' => true, 
-        'pubkey' => $pubkey,
+        'pubkey' => strtolower($pubkey),
         'registered' => current_time('mysql')
     ];
 }
