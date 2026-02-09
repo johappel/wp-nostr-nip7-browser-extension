@@ -32,6 +32,10 @@ Passkey-Assertions sollen ueber eine stabile Primary-Domain-Origin laufen, auch 
 7. Sicherheitsgurt im Runtime-Flow:
    - Broker-Nutzung ist aktuell Opt-in (`useAuthBroker=1`) statt Default.
    - Standard bleibt lokaler Passkey-Unlock, bis Credential-Enrollment fuer Broker produktiv vorhanden ist.
+8. Robustheit beim lokalen Unlock:
+   - Unlock versucht zuerst die gespeicherte Credential-ID.
+   - Bei typischen Fehlern (`NotAllowedError`, `UnknownError`, transient) erfolgt genau ein Discoverable-Fallback.
+   - Erfolgreich gefundene Credential-ID wird im aktiven Scope wieder gespeichert (self-healing).
 
 ## Aktueller Sicherheitsstatus
 1. Challenge/Origin-Checks sind serverseitig aktiv.

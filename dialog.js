@@ -270,12 +270,12 @@ async function createPasskeyCredential() {
   const userId = crypto.getRandomValues(new Uint8Array(16));
   const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
   const publicKey = {
-    challenge,
+    challenge: challenge.buffer,
     rp: {
       name: 'WP Nostr Signer'
     },
     user: {
-      id: userId,
+      id: userId.buffer,
       name: 'wp-nostr-user',
       displayName: 'WP Nostr User'
     },
@@ -325,29 +325,43 @@ async function runPasskeyAssertion(options = {}) {
 }
 
 async function runLocalPasskeyAssertion(knownCredentialId = '') {
-  const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
+  const isChromium = /\b(?:Chrome|Chromium|Edg)\//i.test(navigator.userAgent);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const request = {
-    challenge,
+    challenge: challenge.buffer,
     userVerification: 'preferred',
     timeout: PASSKEY_TIMEOUT_MS
   };
+  if (isChromium) {
+    // Hint Chromium towards local device passkeys (Windows Hello / Touch ID).
+    request.hints = ['client-device'];
+  }
   let assertion = null;
 
   if (knownCredentialId) {
     const descriptor = {
       type: 'public-key',
-      id: fromBase64Url(knownCredentialId)
+      id: fromBase64Url(knownCredentialId).buffer
     };
-    if (!isFirefox) {
+    if (isChromium) {
       descriptor.transports = ['internal'];
     }
-    assertion = await navigator.credentials.get({
-      publicKey: {
-        ...request,
-        allowCredentials: [descriptor]
+    try {
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          ...request,
+          allowCredentials: [descriptor]
+        }
+      });
+    } catch (error) {
+      if (!shouldRetryPasskeyWithoutAllowCredentials(error)) {
+        throw error;
       }
-    });
+      // Fallback for stale credential ids / authenticator migration.
+      assertion = await navigator.credentials.get({
+        publicKey: request
+      });
+    }
   } else {
     assertion = await navigator.credentials.get({
       publicKey: request
@@ -358,9 +372,21 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
     throw new Error('Passkey unlock failed');
   }
 
-  return {
-    credentialId: toBase64Url(assertion.rawId)
-  };
+  const resolvedCredentialId = toBase64Url(assertion.rawId);
+  const credentialStorageKey = keyName('passkey_credential_id');
+  await chrome.storage.local.set({ [credentialStorageKey]: resolvedCredentialId });
+
+  return { credentialId: resolvedCredentialId };
+}
+
+function shouldRetryPasskeyWithoutAllowCredentials(error) {
+  const name = String(error?.name || '').trim();
+  const message = String(error?.message || '').trim();
+  if (name === 'NotAllowedError') return true;
+  if (name === 'UnknownError') return true;
+  if (name === 'InvalidStateError') return true;
+  if (/unknown transient reason/i.test(message)) return true;
+  return false;
 }
 
 function normalizeBrokerOptions(options) {
@@ -495,7 +521,7 @@ function mapPasskeyError(error, phase) {
 
   if (name === 'NotAllowedError') {
     if (phase === 'unlock') {
-      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identitaet gefunden. Bitte erneut versuchen und in Chrome nach Moeglichkeit Windows Hello waehlen.';
+      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identitaet gefunden. In Chrome bitte pruefen, ob fuer diese Extension bereits eine lokale Passkey-Identitaet (Windows Hello) existiert.';
     }
     return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geraete-Passkey (z. B. Windows Hello) waehlen.';
   }
