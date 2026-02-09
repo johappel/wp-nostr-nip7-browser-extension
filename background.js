@@ -451,6 +451,20 @@ async function computeKeyFingerprint(pubkeyHex) {
   return bytesToBase64(new Uint8Array(digest));
 }
 
+async function computePasskeyCredentialFingerprint(credentialId) {
+  const id = String(credentialId || '').trim();
+  if (!id) return null;
+  const encoder = new TextEncoder();
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(id));
+  return bytesToBase64(new Uint8Array(digest));
+}
+
+async function getStoredPasskeyCredentialIdForActiveScope() {
+  const credentialStorageKey = keyManager.keyName(KeyManager.PASSKEY_ID_KEY);
+  const storage = await chrome.storage.local.get([credentialStorageKey]);
+  return String(storage[credentialStorageKey] || '').trim() || null;
+}
+
 async function configureProtectionAndStoreSecretKey(secretKey) {
   const setupResult = await promptPassword('create');
   if (!setupResult) {
@@ -689,7 +703,29 @@ async function handleMessage(request, sender) {
     if (!isInternalExtensionRequest) {
       throw new Error('Backup status is only available from extension UI');
     }
-    return await wpApiPostJson(request.payload?.wpApi, 'backup/metadata', {});
+    const metadata = await wpApiPostJson(request.payload?.wpApi, 'backup/metadata', {});
+    if (!metadata?.hasBackup) {
+      return metadata;
+    }
+
+    const backupFingerprint = String(metadata?.passkeyCredentialFingerprint || '').trim() || null;
+    const localCredentialId = await getStoredPasskeyCredentialIdForActiveScope();
+    const localFingerprint = await computePasskeyCredentialFingerprint(localCredentialId);
+
+    let restoreLikelyAvailable = true;
+    let restoreUnavailableReason = null;
+    if (backupFingerprint && localFingerprint && backupFingerprint !== localFingerprint) {
+      restoreLikelyAvailable = false;
+      restoreUnavailableReason = 'credential_mismatch';
+    }
+
+    return {
+      ...metadata,
+      passkeyCredentialFingerprint: backupFingerprint,
+      localPasskeyCredentialFingerprint: localFingerprint,
+      restoreLikelyAvailable,
+      restoreUnavailableReason
+    };
   }
 
   if (request.type === 'NOSTR_BACKUP_ENABLE') {
@@ -739,6 +775,7 @@ async function handleMessage(request, sender) {
       dek.fill(0);
 
       const wrappedDekPack = concatBytes(wrappedDekEncrypted.iv, wrappedDekEncrypted.ciphertext);
+      const passkeyCredentialFingerprint = await computePasskeyCredentialFingerprint(credentialId);
 
       return await wpApiPostJson(request.payload?.wpApi, 'backup/upload', {
         version: 1,
@@ -748,7 +785,8 @@ async function handleMessage(request, sender) {
         blobAad: bytesToBase64(aadBytes),
         wrappedDekPasskey: bytesToBase64(wrappedDekPack),
         wrappedDekRecovery: null,
-        keyFingerprint: await computeKeyFingerprint(pubkey)
+        keyFingerprint: await computeKeyFingerprint(pubkey),
+        passkeyCredentialFingerprint
       });
     } finally {
       secretKey.fill(0);
@@ -1002,7 +1040,11 @@ async function handleMessage(request, sender) {
 
   switch (request.type) {
     case 'NOSTR_GET_PUBLIC_KEY': {
+      const allowCreateIfMissing = request?.payload?.createIfMissing !== false;
       if (!await keyManager.hasKey()) {
+        if (!allowCreateIfMissing) {
+          throw new Error('No local key found for this scope.');
+        }
         const createResult = await promptPassword('create');
         if (!createResult) throw new Error('Password setup canceled');
 

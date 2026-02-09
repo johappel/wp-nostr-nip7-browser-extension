@@ -351,7 +351,9 @@ class NostrWPIntegration {
     return defaultChromeStoreUrl;
   }
 
-  async getPublicKey() {
+  async getPublicKey(options = {}) {
+    const createIfMissing = options?.createIfMissing !== false;
+
     // Prefer our managed signer API if it is active.
     if (this.isManagedNostrApiAvailable()) {
       return await window.nostr.getPublicKey();
@@ -359,7 +361,8 @@ class NostrWPIntegration {
 
     // If bridge is available, force bridge path to avoid taking keys from third-party signers.
     if (this.isBridgeAvailable()) {
-      const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', null, 30000);
+      const payload = createIfMissing ? null : { createIfMissing: false };
+      const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', payload, 30000);
       if (typeof pubkey !== 'string' || pubkey.length < 10) {
         throw new Error('Extension returned invalid public key');
       }
@@ -737,16 +740,128 @@ class NostrWPIntegration {
       return;
     }
 
+    const expected = String(expectedPubkey || '').trim().toLowerCase();
+    const signerStatus = await this.getScopedSignerStatus();
+    if (signerStatus && signerStatus.hasKey === false) {
+      await this.showMissingLocalKeyWarning(expected);
+      return;
+    }
+
     try {
-      const currentPubkey = await this.getPublicKey();
-      if (currentPubkey !== expectedPubkey) {
-        this.showKeyMismatchWarning(expectedPubkey, currentPubkey);
+      const currentPubkey = String(await this.getPublicKey({ createIfMissing: false }) || '').trim().toLowerCase();
+      if (currentPubkey !== expected) {
+        this.showKeyMismatchWarning(expected, currentPubkey);
       } else {
         console.log('[Nostr] Key verified successfully');
+        const warning = document.querySelector('.nostr-warning');
+        if (warning) warning.remove();
         this.showVerifiedStatus();
       }
     } catch (error) {
+      if (this.isMissingLocalKeyError(error)) {
+        await this.showMissingLocalKeyWarning(expected);
+        return;
+      }
       console.error('[Nostr] Verification failed:', error);
+    }
+  }
+
+  async getScopedSignerStatus() {
+    try {
+      const status = await this.sendExtensionMessage('NOSTR_GET_STATUS', null, 5000);
+      if (!status || typeof status !== 'object') return null;
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  isMissingLocalKeyError(error) {
+    const message = String(error?.message || error || '').toLowerCase();
+    if (!message) return false;
+    return message.includes('no key found')
+      || message.includes('no key available')
+      || message.includes('no local key found');
+  }
+
+  async getCloudBackupStatus() {
+    const restUrl = String(this.config.restUrl || '').trim();
+    const nonce = String(this.config.nonce || '').trim();
+    if (!restUrl || !nonce) return null;
+
+    try {
+      const status = await this.sendExtensionMessage('NOSTR_BACKUP_STATUS', {
+        wpApi: { restUrl, nonce }
+      }, 10000);
+      if (!status || typeof status !== 'object') return null;
+      return status;
+    } catch {
+      return null;
+    }
+  }
+
+  async showMissingLocalKeyWarning(expectedPubkey) {
+    console.warn('[Nostr] No local signer key found for scoped WP user');
+    const existingWarning = document.querySelector('.nostr-warning');
+    if (existingWarning) {
+      existingWarning.remove();
+    }
+
+    const expected = String(expectedPubkey || '').trim().toLowerCase();
+    const expectedShort = this.formatShortPubkey(expected);
+    const backupStatus = await this.getCloudBackupStatus();
+    const hasBackup = backupStatus?.hasBackup === true;
+    const backupPubkey = String(backupStatus?.pubkey || '').trim().toLowerCase();
+    const backupMatches = hasBackup && backupPubkey !== '' && (!expected || backupPubkey === expected);
+    const restoreBlockedByCredential = backupStatus?.restoreLikelyAvailable === false
+      && String(backupStatus?.restoreUnavailableReason || '') === 'credential_mismatch';
+
+    const backupInfo = !backupStatus
+      ? 'Cloud-Backup-Status konnte nicht automatisch geprueft werden. Du kannst Restore im Popup trotzdem direkt versuchen.'
+      : hasBackup
+        ? backupMatches
+          ? `Cloud-Backup mit passendem Pubkey gefunden (${this.formatShortPubkey(backupPubkey)}).`
+          : `Cloud-Backup gefunden, aber mit anderem Pubkey (${this.formatShortPubkey(backupPubkey)}).`
+        : 'Kein Cloud-Backup fuer diesen User vorhanden.';
+
+    const restoreHint = restoreBlockedByCredential
+      ? '<p>Hinweis: Restore ist in diesem Browser vermutlich blockiert (Passkey-Credential stammt aus einem anderen Browser-Profil).</p>'
+      : '';
+
+    const warning = document.createElement('div');
+    warning.className = 'nostr-warning';
+    warning.innerHTML = `
+      <p>Dieser WordPress-Account ist bereits mit Nostr verknuepft, aber im aktuellen Browser-Scope ist noch kein lokaler Schluessel vorhanden.</p>
+      <p>Registriert: <code>${expectedShort}</code></p>
+      <p>${backupInfo}</p>
+      ${restoreHint}
+      <p><strong>Empfohlener Ablauf:</strong></p>
+      <p>1) Extension-Popup oeffnen -> <strong>WP Cloud Backup</strong> -> <strong>Aus Cloud wiederherstellen</strong>.</p>
+      <p>2) Falls Restore nicht funktioniert: nsec im alten Browser exportieren und hier importieren (Popup -> Backup / Restore).</p>
+      <p>3) Seite neu laden oder unten auf <strong>Neu pruefen</strong> klicken.</p>
+      <p>4) Nur wenn du bewusst rotieren willst: neuen lokalen Key erzeugen und explizit uebernehmen.</p>
+      <div class="nostr-modal-actions">
+        <button type="button" class="nostr-btn nostr-btn-secondary" id="nostr-recheck-key">
+          Jetzt neu pruefen
+        </button>
+      </div>
+    `;
+
+    const target = document.querySelector('.entry-content') ||
+      document.querySelector('main') ||
+      document.body;
+    target.insertBefore(warning, target.firstChild);
+
+    const recheckButton = warning.querySelector('#nostr-recheck-key');
+    if (recheckButton) {
+      recheckButton.onclick = async () => {
+        recheckButton.disabled = true;
+        try {
+          await this.verifyExistingUser(expected);
+        } finally {
+          recheckButton.disabled = false;
+        }
+      };
     }
   }
 
@@ -765,13 +880,13 @@ class NostrWPIntegration {
       <p>Dein Nostr-Schluessel stimmt nicht mit dem registrierten Schluessel ueberein.</p>
       <p>Registriert: <code>${expectedShort}</code></p>
       <p>Aktueller Browser: <code>${actualShort}</code></p>
-      <p>Bitte denselben privaten Schluessel in beiden Browsern importieren (Backup/Restore), damit beide dieselbe Identitaet nutzen.</p>
+      <p>Empfohlen: denselben privaten Schluessel aus dem Browser mit dem registrierten Pubkey uebernehmen (Cloud-Restore oder nsec-Import).</p>
       <div class="nostr-modal-actions">
         <button type="button" class="nostr-btn nostr-btn-primary" id="nostr-adopt-browser-key">
-          Aktuelles Browser-Profil uebernehmen
+          Lokalen Key bewusst uebernehmen
         </button>
         <button type="button" class="nostr-btn nostr-btn-secondary" id="nostr-recheck-key">
-          Neu pruefen
+          Jetzt neu pruefen
         </button>
       </div>
     `;

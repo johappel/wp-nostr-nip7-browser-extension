@@ -473,9 +473,18 @@ async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
     const updatedText = typeof data.updatedAt === 'number'
       ? new Date(data.updatedAt * 1000).toLocaleString()
       : 'unbekannt';
-    metaNode.textContent = `Backup vorhanden fuer ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.`;
+    const hasMatchInfo = typeof data.restoreLikelyAvailable === 'boolean';
+    const restoreLikelyAvailable = data.restoreLikelyAvailable !== false;
+    let restoreHint = '';
+    if (hasMatchInfo && !restoreLikelyAvailable && data.restoreUnavailableReason === 'credential_mismatch') {
+      restoreHint = ' Wiederherstellen ist fuer diesen Browser deaktiviert (Passkey-Credential stammt vermutlich aus anderem Browser).';
+    } else if (!hasMatchInfo || !data.passkeyCredentialFingerprint) {
+      restoreHint = ' Restore-Kompatibilitaet kann nicht vorab geprueft werden.';
+    }
+
+    metaNode.textContent = `Backup vorhanden fuer ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.${restoreHint}`;
     if (buttons?.enableButton) buttons.enableButton.disabled = false;
-    if (buttons?.restoreButton) buttons.restoreButton.disabled = false;
+    if (buttons?.restoreButton) buttons.restoreButton.disabled = !restoreLikelyAvailable;
     if (buttons?.deleteButton) buttons.deleteButton.disabled = false;
   } catch (error) {
     metaNode.textContent = `Cloud-Status konnte nicht geladen werden: ${error.message || error}`;

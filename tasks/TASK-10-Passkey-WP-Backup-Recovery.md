@@ -139,6 +139,8 @@ Nach Abschluss dieses Tasks:
 Hinweis:
 - Firefox und Chrome koennen unter Windows unterschiedliche Passkey-Stores nutzen.
 - Dadurch kann ein in Firefox erzeugtes Backup-Wrap in Chrome ggf. nicht direkt entschluesselt werden.
+- Das Popup vergleicht den gespeicherten Backup-Credential-Fingerprint mit der lokalen Scope-Credential.
+- Bei Mismatch wird "Aus WP wiederherstellen" praeventiv deaktiviert.
 - Pragmatiker-Flow:
   - nsec im Quell-Browser exportieren
   - nsec im Ziel-Browser importieren

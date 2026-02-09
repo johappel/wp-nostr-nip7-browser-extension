@@ -771,6 +771,8 @@ function nostr_backup_upload(WP_REST_Request $request) {
 
     $key_fingerprint = nostr_backup_validate_base64_field($params['keyFingerprint'] ?? null, 'keyFingerprint', 16, 1024, false);
     if (is_wp_error($key_fingerprint)) return $key_fingerprint;
+    $passkey_credential_fingerprint = nostr_backup_validate_base64_field($params['passkeyCredentialFingerprint'] ?? null, 'passkeyCredentialFingerprint', 16, 1024, true);
+    if (is_wp_error($passkey_credential_fingerprint)) return $passkey_credential_fingerprint;
 
     $existing = nostr_backup_get_record($user_id);
     $created_at = $existing && isset($existing['createdAt']) ? (int) $existing['createdAt'] : time();
@@ -785,6 +787,7 @@ function nostr_backup_upload(WP_REST_Request $request) {
         'wrappedDekPasskey' => $wrapped_dek_passkey,
         'wrappedDekRecovery' => $wrapped_dek_recovery,
         'keyFingerprint' => $key_fingerprint,
+        'passkeyCredentialFingerprint' => $passkey_credential_fingerprint,
         'createdAt' => $created_at,
         'updatedAt' => $updated_at
     ];
@@ -797,7 +800,8 @@ function nostr_backup_upload(WP_REST_Request $request) {
         'version' => 1,
         'pubkey' => $pubkey,
         'updatedAt' => $updated_at,
-        'hasRecoveryWrap' => $wrapped_dek_recovery !== null
+        'hasRecoveryWrap' => $wrapped_dek_recovery !== null,
+        'passkeyCredentialFingerprint' => $passkey_credential_fingerprint
     ];
 }
 
@@ -816,7 +820,8 @@ function nostr_backup_metadata() {
             'version' => null,
             'pubkey' => null,
             'updatedAt' => null,
-            'hasRecoveryWrap' => false
+            'hasRecoveryWrap' => false,
+            'passkeyCredentialFingerprint' => null
         ];
     }
 
@@ -825,7 +830,8 @@ function nostr_backup_metadata() {
         'version' => (int) ($record['version'] ?? 1),
         'pubkey' => (string) ($record['pubkey'] ?? ''),
         'updatedAt' => isset($record['updatedAt']) ? (int) $record['updatedAt'] : null,
-        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery'])
+        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery']),
+        'passkeyCredentialFingerprint' => isset($record['passkeyCredentialFingerprint']) ? (string) $record['passkeyCredentialFingerprint'] : null
     ];
 }
 
@@ -861,7 +867,8 @@ function nostr_backup_download(WP_REST_Request $request) {
         'wrappedDekRecovery' => isset($record['wrappedDekRecovery']) ? $record['wrappedDekRecovery'] : null,
         'keyFingerprint' => (string) ($record['keyFingerprint'] ?? ''),
         'updatedAt' => isset($record['updatedAt']) ? (int) $record['updatedAt'] : null,
-        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery'])
+        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery']),
+        'passkeyCredentialFingerprint' => isset($record['passkeyCredentialFingerprint']) ? (string) $record['passkeyCredentialFingerprint'] : null
     ];
 }
 
