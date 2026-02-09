@@ -29,6 +29,7 @@ let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
 let activeKeyScope = KEY_SCOPE_DEFAULT;
 const DIALOG_TIMEOUT_MS = 25000;
+const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
 let domainSyncMigrationDone = false;
 
 function extractPasswordFromDialogResult(result) {
@@ -1142,6 +1143,10 @@ async function promptPassword(mode, passkeyAuthOptions = null) {
   await chrome.storage.session.remove('passwordResult');
   return new Promise((resolve) => {
     let timeoutId = null;
+    const normalizedMode = String(mode || '').trim();
+    const isPasskeyMode = normalizedMode === 'unlock-passkey';
+    const timeoutMs = isPasskeyMode ? PASSKEY_DIALOG_TIMEOUT_MS : DIALOG_TIMEOUT_MS;
+    const dialogWindowSize = getPasswordDialogWindowSize(normalizedMode);
 
     const cleanup = () => {
       if (timeoutId) clearTimeout(timeoutId);
@@ -1161,7 +1166,7 @@ async function promptPassword(mode, passkeyAuthOptions = null) {
     timeoutId = setTimeout(() => {
       cleanup();
       resolve(null);
-    }, DIALOG_TIMEOUT_MS);
+    }, timeoutMs);
 
     const query = new URLSearchParams({
       type: 'password',
@@ -1182,9 +1187,24 @@ async function promptPassword(mode, passkeyAuthOptions = null) {
 
     chrome.windows.create({
       url: `dialog.html?${query.toString()}`,
-      type: 'popup', width: 400, height: 350, focused: true
+      type: 'popup',
+      width: dialogWindowSize.width,
+      height: dialogWindowSize.height,
+      focused: true
     });
   });
+}
+
+function getPasswordDialogWindowSize(mode) {
+  switch (mode) {
+    case 'create':
+      return { width: 520, height: 640 };
+    case 'unlock-passkey':
+      return { width: 560, height: 760 };
+    case 'unlock':
+    default:
+      return { width: 420, height: 420 };
+  }
 }
 
 async function promptSignConfirmation(event, domain) {

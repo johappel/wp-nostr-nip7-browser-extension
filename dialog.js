@@ -269,6 +269,7 @@ async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
   const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
+  const passkeyIdentity = buildPasskeyIdentity(keyScope, userId);
   const publicKey = {
     challenge: challenge.buffer,
     rp: {
@@ -276,8 +277,8 @@ async function createPasskeyCredential() {
     },
     user: {
       id: userId.buffer,
-      name: 'wp-nostr-user',
-      displayName: 'WP Nostr User'
+      name: passkeyIdentity.name,
+      displayName: passkeyIdentity.displayName
     },
     pubKeyCredParams: [
       { type: 'public-key', alg: -7 }, // ES256
@@ -562,6 +563,33 @@ function normalizeKeyScope(scope) {
   if (!value || value === 'global') return 'global';
   if (!/^[a-zA-Z0-9:._-]{1,120}$/.test(value)) return 'global';
   return value;
+}
+
+function buildPasskeyIdentity(scope, userIdBytes) {
+  const normalizedScope = normalizeKeyScope(scope);
+  const suffix = shortHex(userIdBytes, 2);
+  const wpMatch = normalizedScope.match(/^wp:(.+):u:(\d+)$/i);
+
+  let accountLabel = 'global';
+  if (wpMatch) {
+    const host = String(wpMatch[1] || '').toLowerCase().replace(/[^a-z0-9.:-]/g, '-');
+    const wpUserId = String(wpMatch[2] || '').trim();
+    accountLabel = `u${wpUserId}@${host || 'site'}`;
+  } else if (normalizedScope !== 'global') {
+    accountLabel = normalizedScope.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+  }
+
+  const compactLabel = accountLabel.slice(0, 36) || 'global';
+  return {
+    name: `wp-nostr-${compactLabel}-${suffix}`.slice(0, 64),
+    displayName: `WP Nostr ${compactLabel} #${suffix}`.slice(0, 64)
+  };
+}
+
+function shortHex(bytes, takeBytes = 2) {
+  const source = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  const max = Math.max(1, Math.min(source.length, Number(takeBytes) || 2));
+  return Array.from(source.subarray(0, max), (value) => value.toString(16).padStart(2, '0')).join('');
 }
 
 function keyName(baseKey) {
