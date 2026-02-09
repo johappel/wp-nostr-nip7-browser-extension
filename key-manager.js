@@ -9,6 +9,7 @@ export class KeyManager {
   static SALT_KEY = 'encryption_salt';
   static IV_KEY = 'encryption_iv';
   static PLAIN_KEY = 'plain_nsec';
+  static PUBKEY_KEY = 'pubkey_hex';
   static PASSKEY_ID_KEY = 'passkey_credential_id';
   static MODE_KEY = 'key_protection';
   static CREATED_KEY = 'created';
@@ -64,6 +65,7 @@ export class KeyManager {
       KeyManager.SALT_KEY,
       KeyManager.IV_KEY,
       KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
       KeyManager.PASSKEY_ID_KEY,
       KeyManager.CREATED_KEY,
       KeyManager.LEGACY_MIGRATED_KEY
@@ -92,6 +94,7 @@ export class KeyManager {
       KeyManager.SALT_KEY,
       KeyManager.IV_KEY,
       KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
       KeyManager.PASSKEY_ID_KEY,
       KeyManager.CREATED_KEY
     ]);
@@ -112,6 +115,7 @@ export class KeyManager {
       KeyManager.SALT_KEY,
       KeyManager.IV_KEY,
       KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
       KeyManager.PASSKEY_ID_KEY,
       KeyManager.CREATED_KEY
     ];
@@ -193,6 +197,7 @@ export class KeyManager {
   async storeKey(secretKey, password = null, options = {}) {
     const requestedMode = typeof options.mode === 'string' ? options.mode : null;
     const mode = requestedMode || (password ? KeyManager.MODE_PASSWORD : KeyManager.MODE_NONE);
+    const publicKeyHex = getPublicKey(secretKey);
 
     if (mode === KeyManager.MODE_PASSKEY) {
       const passkeyCredentialId = String(options.passkeyCredentialId || '').trim();
@@ -202,6 +207,7 @@ export class KeyManager {
 
       await this.storage.set({
         [this.keyName(KeyManager.PLAIN_KEY)]: Array.from(secretKey),
+        [this.keyName(KeyManager.PUBKEY_KEY)]: publicKeyHex,
         [this.keyName(KeyManager.PASSKEY_ID_KEY)]: passkeyCredentialId,
         [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_PASSKEY,
         [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
@@ -213,6 +219,7 @@ export class KeyManager {
     if (!password) {
       await this.storage.set({
         [this.keyName(KeyManager.PLAIN_KEY)]: Array.from(secretKey),
+        [this.keyName(KeyManager.PUBKEY_KEY)]: publicKeyHex,
         [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_NONE,
         [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
       });
@@ -237,6 +244,7 @@ export class KeyManager {
       [this.keyName(KeyManager.STORAGE_KEY)]: Array.from(new Uint8Array(ciphertext)),
       [this.keyName(KeyManager.SALT_KEY)]: Array.from(salt),
       [this.keyName(KeyManager.IV_KEY)]: Array.from(iv),
+      [this.keyName(KeyManager.PUBKEY_KEY)]: publicKeyHex,
       [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_PASSWORD,
       [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
     });
@@ -319,6 +327,25 @@ export class KeyManager {
     const pubkey = getPublicKey(secretKey);
     secretKey.fill(0);
     return pubkey;
+  }
+
+  normalizeStoredPubkey(pubkey) {
+    const value = String(pubkey || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(value)) return null;
+    return value;
+  }
+
+  async getStoredPublicKey() {
+    const key = this.keyName(KeyManager.PUBKEY_KEY);
+    const result = await this.storage.get([key]);
+    return this.normalizeStoredPubkey(result[key]);
+  }
+
+  async setStoredPublicKey(pubkeyHex) {
+    const normalized = this.normalizeStoredPubkey(pubkeyHex);
+    if (!normalized) return null;
+    await this.storage.set({ [this.keyName(KeyManager.PUBKEY_KEY)]: normalized });
+    return normalized;
   }
 }
 

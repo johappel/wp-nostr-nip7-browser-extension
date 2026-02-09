@@ -90,6 +90,12 @@ describe('KeyManager', () => {
     expect(retrievedPubkey).toBe(originalPubkey);
   });
 
+  it('should provide stored public key without unlock', async () => {
+    const { pubkey: originalPubkey } = await keyManager.generateKey(password);
+    const storedPubkey = await keyManager.getStoredPublicKey();
+    expect(storedPubkey).toBe(originalPubkey);
+  });
+
   it('should return false for hasKey if empty', async () => {
     expect(await keyManager.hasKey()).toBe(false);
   });

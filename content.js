@@ -114,7 +114,11 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
       userId: snapshot.userId,
       displayName: snapshot.displayName,
       avatarUrl: snapshot.avatarUrl,
-      pubkey: snapshot.pubkey
+      pubkey: snapshot.pubkey,
+      userLogin: snapshot.userLogin,
+      profileRelayUrl: snapshot.profileRelayUrl,
+      profileNip05: snapshot.profileNip05,
+      primaryDomain: snapshot.primaryDomain
     },
     pending: false,
     source: 'dom',
@@ -131,9 +135,25 @@ function readViewerFromDom() {
   const displayName = String(root?.getAttribute('data-wp-nostr-display-name') || '').trim() || null;
   const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
   const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
+  const userLogin = String(root?.getAttribute('data-wp-nostr-user-login') || '').trim() || null;
+  const profileRelayUrl = String(root?.getAttribute('data-wp-nostr-profile-relay-url') || '').trim() || null;
+  const profileNip05 = String(root?.getAttribute('data-wp-nostr-profile-nip05') || '').trim() || null;
+  const primaryDomain = String(root?.getAttribute('data-wp-nostr-primary-domain') || '').trim() || null;
   const wpApi = readWpApiFromDom();
   const authBroker = readAuthBrokerFromDom();
-  return { configReady, userId, displayName, avatarUrl, pubkey, wpApi, authBroker };
+  return {
+    configReady,
+    userId,
+    displayName,
+    avatarUrl,
+    pubkey,
+    userLogin,
+    profileRelayUrl,
+    profileNip05,
+    primaryDomain,
+    wpApi,
+    authBroker
+  };
 }
 
 function readWpApiFromDom() {
@@ -192,6 +212,10 @@ async function fetchViewerFromPageContext() {
       displayName: data.displayName || null,
       avatarUrl: data.avatarUrl || null,
       pubkey: data.pubkey || null,
+      userLogin: data.userLogin || null,
+      profileRelayUrl: data.profileRelayUrl || null,
+      profileNip05: data.profileNip05 || null,
+      primaryDomain: data.primaryDomain || null,
       authBroker: sanitizeAuthBroker({
         enabled: data.authBrokerEnabled,
         url: data.authBrokerUrl,

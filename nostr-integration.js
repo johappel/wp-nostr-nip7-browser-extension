@@ -40,6 +40,10 @@ class NostrWPIntegration {
       root.removeAttribute('data-wp-nostr-display-name');
       root.removeAttribute('data-wp-nostr-avatar-url');
       root.removeAttribute('data-wp-nostr-pubkey');
+      root.removeAttribute('data-wp-nostr-user-login');
+      root.removeAttribute('data-wp-nostr-profile-relay-url');
+      root.removeAttribute('data-wp-nostr-profile-nip05');
+      root.removeAttribute('data-wp-nostr-primary-domain');
       root.removeAttribute('data-wp-nostr-rest-url');
       root.removeAttribute('data-wp-nostr-nonce');
       root.removeAttribute('data-wp-nostr-auth-broker-enabled');
@@ -53,6 +57,10 @@ class NostrWPIntegration {
     root.setAttribute('data-wp-nostr-display-name', String(this.config.wpDisplayName || ''));
     root.setAttribute('data-wp-nostr-avatar-url', String(this.config.wpAvatarUrl || ''));
     root.setAttribute('data-wp-nostr-pubkey', String(this.config.wpPubkey || ''));
+    root.setAttribute('data-wp-nostr-user-login', String(this.config.wpUserLogin || ''));
+    root.setAttribute('data-wp-nostr-profile-relay-url', String(this.config.profileRelayUrl || ''));
+    root.setAttribute('data-wp-nostr-profile-nip05', String(this.config.profileNip05 || ''));
+    root.setAttribute('data-wp-nostr-primary-domain', String(this.config.primaryDomain || ''));
     root.setAttribute('data-wp-nostr-rest-url', String(this.config.restUrl || ''));
     root.setAttribute('data-wp-nostr-nonce', String(this.config.nonce || ''));
     root.setAttribute('data-wp-nostr-auth-broker-enabled', this.config.authBrokerEnabled ? '1' : '0');

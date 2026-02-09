@@ -29,6 +29,17 @@
       </div>
     </section>
 
+    <section class="profile-section">
+      <div class="section-head">
+        <h2>Oeffentliches Nostr Profil</h2>
+        <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
+      </div>
+      <div id="profile-card" class="wp-user-card">
+        <p class="empty">Profil wird geladen...</p>
+      </div>
+      <p id="profile-hint" class="hint"></p>
+    </section>
+
     <label class="row">
       <input type="checkbox" id="prefer-lock" />
       <span>Prefer WP Nostr Lock</span>
@@ -55,6 +66,7 @@
         <option value="session">Bis Browser-Ende (Session)</option>
       </select>
       <p id="unlock-cache-hint" class="hint"></p>
+      <p class="hint">Sperrung gilt fuer sensible Aktionen: Signieren, Export/Import und Cloud-Backup/Restore von nsec.</p>
     </section>
 
     <section class="backup-section">

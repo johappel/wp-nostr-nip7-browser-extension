@@ -460,6 +460,161 @@ async function computePasskeyCredentialFingerprint(credentialId) {
   return bytesToBase64(new Uint8Array(digest));
 }
 
+function normalizePubkeyHex(pubkeyHex) {
+  const value = String(pubkeyHex || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(value)) return null;
+  return value;
+}
+
+function toNpub(pubkeyHex) {
+  const normalized = normalizePubkeyHex(pubkeyHex);
+  if (!normalized) return null;
+  try {
+    return nip19.npubEncode(normalized);
+  } catch {
+    return null;
+  }
+}
+
+async function getKnownPublicKeyHex(password = null) {
+  const storedPubkey = await keyManager.getStoredPublicKey();
+  if (storedPubkey) return storedPubkey;
+
+  if (!await keyManager.hasKey()) return null;
+
+  const protectionMode = await keyManager.getProtectionMode();
+  if (protectionMode === KeyManager.MODE_PASSWORD && !password) {
+    return null;
+  }
+
+  try {
+    const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!secretKey) return null;
+    const pubkey = getPublicKey(secretKey);
+    secretKey.fill(0);
+    return await keyManager.setStoredPublicKey(pubkey);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRelayUrl(input) {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  let candidate = value;
+  if (/^https?:\/\//i.test(candidate)) {
+    candidate = candidate.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
+  }
+
+  if (!/^wss?:\/\//i.test(candidate)) {
+    candidate = `wss://${candidate.replace(/^\/+/, '')}`;
+  }
+
+  try {
+    const url = new URL(candidate);
+    if (!/^wss?:$/i.test(url.protocol)) return null;
+    return `${url.protocol}//${url.host}${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRelayList(rawRelays) {
+  const list = Array.isArray(rawRelays)
+    ? rawRelays
+    : String(rawRelays || '').split(/[\s,;]+/g);
+
+  const normalized = list
+    .map((entry) => normalizeRelayUrl(entry))
+    .filter(Boolean);
+
+  return Array.from(new Set(normalized));
+}
+
+function sanitizeKind0ProfileContent(rawProfile, fallbackWebsite = null) {
+  const profile = (rawProfile && typeof rawProfile === 'object') ? rawProfile : {};
+  const result = {};
+
+  const name = String(profile.name || '').trim();
+  const displayName = String(profile.display_name || profile.displayName || '').trim();
+  const picture = String(profile.picture || profile.avatarUrl || '').trim();
+  const nip05 = String(profile.nip05 || '').trim();
+  const website = String(profile.website || fallbackWebsite || '').trim();
+
+  if (name) result.name = name;
+  if (displayName) result.display_name = displayName;
+  if (picture) result.picture = picture;
+  if (nip05) result.nip05 = nip05;
+  if (website) result.website = website;
+
+  return result;
+}
+
+async function publishEventToRelay(relayUrl, event, timeoutMs = 9000) {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let socket;
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        try {
+          socket.close();
+        } catch {
+          // ignore close errors
+        }
+      }
+      if (error) reject(error);
+      else resolve(true);
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error('Relay timeout while publishing profile event'));
+    }, timeoutMs);
+
+    try {
+      socket = new WebSocket(relayUrl);
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+
+    socket.onopen = () => {
+      socket.send(JSON.stringify(['EVENT', event]));
+    };
+
+    socket.onerror = () => {
+      finish(new Error(`Relay connection failed: ${relayUrl}`));
+    };
+
+    socket.onmessage = (messageEvent) => {
+      let data;
+      try {
+        data = JSON.parse(messageEvent.data);
+      } catch {
+        return;
+      }
+
+      if (!Array.isArray(data) || data.length < 2) return;
+      if (data[0] !== 'OK') return;
+      if (data[1] !== event.id) return;
+
+      const accepted = data[2] === true;
+      if (accepted) {
+        finish(null);
+        return;
+      }
+
+      const reason = String(data[3] || 'Relay rejected event');
+      finish(new Error(reason));
+    };
+  });
+}
+
 async function getStoredPasskeyCredentialIdForActiveScope() {
   const credentialStorageKey = keyManager.keyName(KeyManager.PASSKEY_ID_KEY);
   const storage = await chrome.storage.local.get([credentialStorageKey]);
@@ -570,6 +725,7 @@ async function handleMessage(request, sender) {
     'NOSTR_BACKUP_DELETE',
     'NOSTR_EXPORT_NSEC',
     'NOSTR_IMPORT_NSEC',
+    'NOSTR_PUBLISH_PROFILE',
     'NOSTR_GET_PUBLIC_KEY',
     'NOSTR_SIGN_EVENT',
     'NOSTR_NIP04_ENCRYPT',
@@ -646,26 +802,29 @@ async function handleMessage(request, sender) {
     const protectionMode = hasKey ? await keyManager.getProtectionMode() : null;
     const passwordProtected = protectionMode === KeyManager.MODE_PASSWORD;
     const passkeyProtected = protectionMode === KeyManager.MODE_PASSKEY;
-    let npub = null;
-    let pubkeyHex = null;
-    
-    // Wenn entsperrt, Npub berechnen und zur????ckgeben
-    const unlocked = hasKey && (
+    const unlockedByPolicy = hasKey && (
       protectionMode === KeyManager.MODE_NONE ||
       (passwordProtected && currentCachedPassword) ||
       (passkeyProtected && currentPasskeyAuth)
     );
+    let unlocked = unlockedByPolicy;
+    let pubkeyHex = null;
+    let npub = null;
 
-    if (unlocked) {
-       try {
-         const pubkey = await keyManager.getPublicKey(passwordProtected ? currentCachedPassword : null);
-         pubkeyHex = pubkey;
-         npub = nip19.npubEncode(pubkey);
-       } catch (e) {
-         await clearUnlockCaches();
-       }
+    if (unlocked && passwordProtected && currentCachedPassword) {
+      try {
+        const testKey = await keyManager.getKey(currentCachedPassword);
+        if (!testKey) throw new Error('Unlock validation failed');
+        testKey.fill(0);
+      } catch {
+        await clearUnlockCaches();
+        unlocked = false;
+      }
     }
-    
+
+    pubkeyHex = await getKnownPublicKeyHex(passwordProtected ? currentCachedPassword : null);
+    npub = toNpub(pubkeyHex);
+
     return {
       hasKey,
       locked: hasKey && !unlocked,
@@ -937,6 +1096,71 @@ async function handleMessage(request, sender) {
     }
   }
 
+  if (request.type === 'NOSTR_PUBLISH_PROFILE') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Profile publish is only allowed from extension UI');
+    }
+
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const relays = normalizeRelayList(request.payload?.relays);
+    if (!relays.length) {
+      throw new Error('No valid relay URL configured for profile publish.');
+    }
+
+    const content = sanitizeKind0ProfileContent(request.payload?.profile, request.payload?.origin);
+    if (!Object.keys(content).length) {
+      throw new Error('Profile payload is empty.');
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const unlockPassword = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const signedEvent = await keyManager.signEvent(
+      {
+        kind: 0,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [],
+        content: JSON.stringify(content)
+      },
+      protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null
+    );
+    await keyManager.setStoredPublicKey(signedEvent.pubkey);
+
+    const expectedPubkey = normalizePubkeyHex(request.payload?.expectedPubkey);
+    const signerPubkey = normalizePubkeyHex(signedEvent.pubkey);
+    if (expectedPubkey && signerPubkey && expectedPubkey !== signerPubkey) {
+      throw new Error('Signer key does not match expected profile key.');
+    }
+
+    let publishedRelay = null;
+    let lastError = null;
+    for (const relayUrl of relays) {
+      try {
+        await publishEventToRelay(relayUrl, signedEvent, 9000);
+        publishedRelay = relayUrl;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (!publishedRelay) {
+      throw (lastError || new Error('Profile publish failed on all relays.'));
+    }
+
+    return {
+      success: true,
+      relay: publishedRelay,
+      eventId: signedEvent.id,
+      pubkey: signerPubkey,
+      npub: toNpub(signerPubkey),
+      createdAt: signedEvent.created_at
+    };
+  }
+
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen
   if (request.type === 'NOSTR_SET_DOMAIN_CONFIG') {
     const { primaryDomain, domainSecret, authBroker } = request.payload || {};
@@ -1076,12 +1300,20 @@ async function handleMessage(request, sender) {
         await openBackupDialog(npub, nsecBech32);
         return pubkey;
       }
+      const storedPubkey = await keyManager.getStoredPublicKey();
+      if (storedPubkey) {
+        return storedPubkey;
+      }
+
       const protectionMode = await keyManager.getProtectionMode();
-      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+      const password = protectionMode === KeyManager.MODE_PASSWORD
+        ? await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions())
+        : null;
       const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
       if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       const pubkey = getPublicKey(secretKey);
       secretKey.fill(0);
+      await keyManager.setStoredPublicKey(pubkey);
       return pubkey;
     }
 

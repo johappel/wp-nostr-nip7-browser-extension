@@ -7,6 +7,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const refreshUserButton = document.getElementById('refresh-user');
   const wpUserCard = document.getElementById('wp-user-card');
   const signerCard = document.getElementById('signer-card');
+  const profileCard = document.getElementById('profile-card');
+  const profileHint = document.getElementById('profile-hint');
+  const publishProfileButton = document.getElementById('publish-profile');
   const unlockCacheSelect = document.getElementById('unlock-cache-policy');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
@@ -26,6 +29,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
+  let activeViewer = null;
+  let activeRuntimeStatus = null;
 
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
@@ -39,11 +44,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const initialViewer = await loadViewerContext(wpUserCard, status);
+  activeViewer = initialViewer;
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
   const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
+  activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
+  renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
   await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
   await refreshCloudBackupState(cloudBackupMeta, {
     enableButton: cloudBackupEnableButton,
@@ -66,11 +74,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     refreshUserButton.disabled = true;
     try {
       const viewer = await loadViewerContext(wpUserCard, status);
+      activeViewer = viewer;
       activeScope = viewer?.scope || 'global';
       activeWpApi = sanitizeWpApi(viewer?.wpApi);
       activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
       const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
+      activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
@@ -88,6 +99,46 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = `WP-User konnte nicht geladen werden: ${e.message || e}`;
     } finally {
       refreshUserButton.disabled = false;
+    }
+  });
+
+  publishProfileButton.addEventListener('click', async () => {
+    if (!activeViewer?.isLoggedIn) {
+      status.textContent = 'Kein eingeloggter WordPress-User im aktiven Tab.';
+      return;
+    }
+
+    const profilePayload = buildProfilePublishPayload(activeViewer);
+    if (!profilePayload.relays.length) {
+      status.textContent = 'Kein Profil-Relay konfiguriert. Bitte in WordPress "Profil-Relay (kind:0)" setzen.';
+      return;
+    }
+
+    publishProfileButton.disabled = true;
+    status.textContent = 'Sende Profil-Event (kind:0) an Relay...';
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_PUBLISH_PROFILE',
+        payload: {
+          scope: activeScope,
+          relays: profilePayload.relays,
+          profile: profilePayload.profile,
+          expectedPubkey: activeRuntimeStatus?.pubkeyHex || null,
+          origin: activeViewer?.origin || null,
+          authBroker: activeAuthBroker
+        }
+      });
+      if (response?.error) throw new Error(response.error);
+      const result = response?.result || {};
+      const relay = String(result.relay || profilePayload.relays[0] || '').trim();
+      const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
+      status.textContent = relay
+        ? `Profil veroeffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
+        : `Profil veroeffentlicht (${formatShortHex(pubkey)}).`;
+    } catch (e) {
+      status.textContent = `Profil-Publish fehlgeschlagen: ${e.message || e}`;
+    } finally {
+      publishProfileButton.disabled = false;
     }
   });
 
@@ -161,7 +212,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       importNsecInput.value = '';
       backupOutput.value = '';
       const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       status.textContent = pubkey
         ? `Schluessel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknuepfen.`
@@ -231,7 +284,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         ? `Cloud-Restore erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
         : 'Cloud-Restore erfolgreich. Seite neu laden.';
       const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
@@ -326,6 +381,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = `Speichern fehlgeschlagen: ${e.message || e}`;
     } finally {
       manualAddButton.disabled = false;
+    }
+  });
+
+  document.addEventListener('click', async (event) => {
+    const copyButton = event.target?.closest?.('[data-copy-value]');
+    if (!copyButton) return;
+
+    const value = String(copyButton.getAttribute('data-copy-value') || '').trim();
+    if (!value) {
+      status.textContent = 'Kein Wert zum Kopieren vorhanden.';
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      status.textContent = 'In die Zwischenablage kopiert.';
+    } catch {
+      status.textContent = 'Kopieren fehlgeschlagen.';
     }
   });
 
@@ -548,7 +621,7 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
   const npub = String(runtimeStatus.npub || '').trim();
   const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
   const mode = formatProtectionMode(runtimeStatus.protectionMode);
-  const lockState = locked ? 'gesperrt' : 'entsperrt';
+  const lockState = locked ? 'gesperrt fuer sensible Aktionen' : 'entsperrt';
   const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
 
   cardNode.innerHTML = `
@@ -556,10 +629,158 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
     <div class="wp-user-meta"><strong>Technisch:</strong> <code>${escapeHtml(normalizedScope)}</code></div>
     <div class="wp-user-meta"><strong>Schutz:</strong> ${escapeHtml(mode)}</div>
     <div class="wp-user-meta"><strong>Status:</strong> ${escapeHtml(lockState)}</div>
-    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'gesperrt (zum Anzeigen erst entsperren)')}</div>
-    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'gesperrt')}</div>
+    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfuegbar')}</div>
+    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfuegbar')}</div>
+    <div class="signer-badges">
+      <span class="badge">Public Key ist immer sichtbar</span>
+      <span class="badge warn">Unlock nur fuer Signatur/nsec-Zugriff</span>
+    </div>
     ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil oeffnen (njump)</a></div>` : ''}
   `;
+}
+
+function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
+  if (!cardNode) return;
+
+  if (!viewer?.isLoggedIn) {
+    cardNode.innerHTML = '<p class="empty">Kein eingeloggter WordPress-User erkannt.</p>';
+    if (hintNode) {
+      hintNode.textContent = 'Profil-Publish ist nur verfuegbar, wenn ein eingeloggter WP-Tab aktiv ist.';
+    }
+    return;
+  }
+
+  const avatarUrl = String(viewer.avatarUrl || '').trim();
+  const displayName = String(viewer.displayName || `User #${viewer.userId || ''}`).trim();
+  const userLogin = String(viewer.userLogin || '').trim();
+  const pubkeyHex = String(runtimeStatus?.pubkeyHex || '').trim();
+  const npub = String(runtimeStatus?.npub || '').trim();
+  const scopeLabel = formatScopeLabel(scope);
+  const nip05 = String(viewer.profileNip05 || '').trim();
+  const relays = parseRelayList(viewer.profileRelayUrl);
+
+  cardNode.innerHTML = `
+    <div class="profile-main">
+      ${avatarUrl
+        ? `<img class="wp-user-avatar" src="${escapeHtml(avatarUrl)}" alt="Avatar" />`
+        : '<div class="wp-user-avatar"></div>'}
+      <div>
+        <div class="wp-user-name">${escapeHtml(displayName || '-')}</div>
+        <div class="wp-user-meta"><strong>Login:</strong> ${escapeHtml(userLogin || '-')}</div>
+        <div class="wp-user-meta"><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
+      </div>
+    </div>
+    <div class="profile-copy-grid">
+      ${renderCopyLine('Npub', npub)}
+      ${renderCopyLine('Pubkey (hex)', pubkeyHex)}
+    </div>
+    <div class="wp-user-meta"><strong>NIP-05:</strong> ${escapeHtml(nip05 || '(nicht gesetzt)')}</div>
+    <div class="wp-user-meta"><strong>Relay(s):</strong> ${escapeHtml(relays.length ? relays.join(', ') : '(kein Profil-Relay konfiguriert)')}</div>
+  `;
+
+  if (!hintNode) return;
+  const nip05Warning = buildNip05PrimaryDomainHint(viewer);
+  if (nip05Warning) {
+    hintNode.textContent = nip05Warning;
+  } else if (!nip05) {
+    hintNode.textContent = 'NIP-05 ist optional. Empfohlen ist ein Identifier auf der Primary Domain.';
+  } else {
+    hintNode.textContent = 'Profildaten koennen mit "Profil an Nostr senden" als kind:0 Event veroeffentlicht werden.';
+  }
+}
+
+function renderCopyLine(label, value) {
+  const text = String(value || '').trim();
+  const display = text || '(nicht verfuegbar)';
+  const copyAttr = text ? ` data-copy-value="${escapeHtml(text)}"` : '';
+  const disabledAttr = text ? '' : ' disabled';
+  return `
+    <div class="copy-line">
+      <div class="copy-value"><strong>${escapeHtml(label)}:</strong> ${escapeHtml(display)}</div>
+      <button class="btn-copy" type="button"${copyAttr}${disabledAttr}>Kopieren</button>
+    </div>
+  `;
+}
+
+function buildProfilePublishPayload(viewer) {
+  const relays = parseRelayList(viewer?.profileRelayUrl);
+  const profile = {};
+
+  const userLogin = String(viewer?.userLogin || '').trim();
+  const displayName = String(viewer?.displayName || '').trim();
+  const avatarUrl = String(viewer?.avatarUrl || '').trim();
+  const nip05 = String(viewer?.profileNip05 || '').trim();
+  const website = String(viewer?.origin || '').trim();
+
+  if (userLogin) profile.name = userLogin;
+  if (displayName) profile.display_name = displayName;
+  if (avatarUrl) profile.picture = avatarUrl;
+  if (nip05) profile.nip05 = nip05;
+  if (website) profile.website = website;
+
+  return { relays, profile };
+}
+
+function parseRelayList(rawRelays) {
+  const items = String(rawRelays || '')
+    .split(/[\s,;]+/g)
+    .map((value) => normalizeRelayUrl(value))
+    .filter(Boolean);
+  return Array.from(new Set(items));
+}
+
+function normalizeRelayUrl(input) {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  let candidate = value;
+  if (/^https?:\/\//i.test(candidate)) {
+    candidate = candidate.replace(/^http:\/\//i, 'ws://').replace(/^https:\/\//i, 'wss://');
+  }
+  if (!/^wss?:\/\//i.test(candidate)) {
+    candidate = `wss://${candidate.replace(/^\/+/, '')}`;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    if (!/^wss?:$/i.test(parsed.protocol)) return null;
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildNip05PrimaryDomainHint(viewer) {
+  const nip05 = String(viewer?.profileNip05 || '').trim();
+  if (!nip05) return '';
+
+  const nip05Domain = extractNip05Domain(nip05);
+  if (!nip05Domain) return 'NIP-05 Format ungueltig. Erwartet wird z. B. name@example.com.';
+
+  const primaryHost = extractHost(viewer?.primaryDomain || viewer?.origin || '');
+  if (!primaryHost) return '';
+  if (nip05Domain === primaryHost) return '';
+
+  return `NIP-05 nutzt aktuell ${nip05Domain}. Empfohlen ist die Primary Domain ${primaryHost}.`;
+}
+
+function extractNip05Domain(nip05) {
+  const value = String(nip05 || '').trim().toLowerCase();
+  if (!value.includes('@')) return null;
+  const parts = value.split('@');
+  const domain = String(parts[parts.length - 1] || '').trim();
+  if (!domain || /\s/.test(domain)) return null;
+  return domain;
+}
+
+function extractHost(input) {
+  const value = String(input || '').trim();
+  if (!value) return '';
+  try {
+    return String(new URL(value).host || '').trim().toLowerCase();
+  } catch {
+    return value.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+  }
 }
 
 function normalizeScope(scope) {
@@ -717,6 +938,10 @@ async function getViewerFromActiveTab(tabId) {
         displayName: viewer.displayName || null,
         avatarUrl: viewer.avatarUrl || null,
         pubkey: viewer.pubkey || null,
+        userLogin: viewer.userLogin || null,
+        profileRelayUrl: viewer.profileRelayUrl || null,
+        profileNip05: viewer.profileNip05 || null,
+        primaryDomain: viewer.primaryDomain || null,
         authBroker: sanitizeAuthBroker(viewer?.authBroker)
       }
     };
@@ -745,6 +970,10 @@ async function fetchWpViewer(origin) {
     origin: viewer.authBrokerOrigin,
     rpId: viewer.authBrokerRpId
   });
+  viewer.userLogin = viewer.userLogin || null;
+  viewer.profileRelayUrl = viewer.profileRelayUrl || null;
+  viewer.profileNip05 = viewer.profileNip05 || null;
+  viewer.primaryDomain = viewer.primaryDomain || null;
   return viewer;
 }
 
@@ -784,6 +1013,7 @@ function renderViewerCard(cardNode, viewer, origin, error = null) {
   const avatarUrl = String(viewer.avatarUrl || '').trim();
   const displayName = String(viewer.displayName || `User #${viewer.userId}`);
   const pubkey = String(viewer.pubkey || '');
+  const userLogin = String(viewer.userLogin || '').trim();
   const userId = Number(viewer.userId) || 0;
 
   cardNode.innerHTML = `
@@ -797,8 +1027,9 @@ function renderViewerCard(cardNode, viewer, origin, error = null) {
       </div>
     </div>
     <div class="wp-user-meta"><strong>Domain:</strong> ${escapeHtml(origin || '-')}</div>
+    <div class="wp-user-meta"><strong>Login:</strong> ${escapeHtml(userLogin || '-')}</div>
     <div class="wp-user-meta"><strong>Avatar URL:</strong> ${escapeHtml(avatarUrl || '-')}</div>
-    <div class="wp-user-meta"><strong>Pubkey:</strong> ${escapeHtml(pubkey || 'noch nicht registriert')}</div>
+    <div class="wp-user-meta"><strong>WP registrierter Pubkey:</strong> ${escapeHtml(pubkey || 'noch nicht registriert')}</div>
   `;
 }
 
@@ -832,7 +1063,7 @@ function formatUnlockCacheHint(runtimeStatus) {
   }
 
   if (policy === 'off') {
-    return 'Unlock-Cache ist aus. Bei jeder Operation wird erneut nach dem Passwort gefragt.';
+    return 'Unlock-Cache ist aus. Bei jeder sensiblen Aktion wird erneut nach Passwort/Passkey gefragt.';
   }
 
   if (policy === 'session') {

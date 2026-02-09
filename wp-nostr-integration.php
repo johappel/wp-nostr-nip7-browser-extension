@@ -354,6 +354,10 @@ function nostr_handle_replace_register(WP_REST_Request $request) {
 }
 
 function nostr_get_viewer() {
+    $profile_relay_url = trim((string) get_option('nostr_profile_relay_url', ''));
+    $profile_nip05 = trim((string) get_option('nostr_profile_nip05', ''));
+    $primary_domain = trim((string) get_option('nostr_primary_domain', nostr_get_default_primary_domain()));
+
     if (!is_user_logged_in()) {
         return [
             'isLoggedIn' => false,
@@ -361,6 +365,10 @@ function nostr_get_viewer() {
             'displayName' => null,
             'avatarUrl' => null,
             'pubkey' => null,
+            'userLogin' => null,
+            'profileRelayUrl' => $profile_relay_url !== '' ? $profile_relay_url : null,
+            'profileNip05' => $profile_nip05 !== '' ? $profile_nip05 : null,
+            'primaryDomain' => $primary_domain !== '' ? $primary_domain : null,
             'authBrokerEnabled' => nostr_is_auth_broker_enabled(),
             'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
             'authBrokerOrigin' => nostr_get_auth_broker_origin(),
@@ -379,6 +387,10 @@ function nostr_get_viewer() {
         'displayName' => $user ? $user->display_name : '',
         'avatarUrl' => $avatar ? $avatar : '',
         'pubkey' => $pubkey !== '' ? $pubkey : null,
+        'userLogin' => $user ? $user->user_login : null,
+        'profileRelayUrl' => $profile_relay_url !== '' ? $profile_relay_url : null,
+        'profileNip05' => $profile_nip05 !== '' ? $profile_nip05 : null,
+        'primaryDomain' => $primary_domain !== '' ? $primary_domain : null,
         'authBrokerEnabled' => nostr_is_auth_broker_enabled(),
         'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
         'authBrokerOrigin' => nostr_get_auth_broker_origin(),
