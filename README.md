@@ -30,7 +30,7 @@ Weitere Details finden sich im Konzept und der API-Referenz.
 - [x] TASK-12: Primary-Domain-Auth-Broker
 - [x] TASK-13: CSS-Design-UTF8-Dark-Light-Blue-Glow
 - [ ] TASK-14: e2e-Test
-- [ ] TASK-15: Deoloyment
+- [ ] TASK-15: Deployment
 
 ## Lokales E2E-Testing (ohne SSL)
 
