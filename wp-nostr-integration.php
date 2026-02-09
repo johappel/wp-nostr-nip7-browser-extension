@@ -133,6 +133,28 @@ function nostr_register_endpoints() {
         'callback' => 'nostr_get_domains',
         'permission_callback' => '__return_true'
     ]);
+
+    // Encrypted key backup endpoints (user-scoped)
+    register_rest_route('nostr/v1', '/backup/upload', [
+        'methods' => 'POST',
+        'callback' => 'nostr_backup_upload',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+    register_rest_route('nostr/v1', '/backup/metadata', [
+        'methods' => 'POST',
+        'callback' => 'nostr_backup_metadata',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+    register_rest_route('nostr/v1', '/backup/download', [
+        'methods' => 'POST',
+        'callback' => 'nostr_backup_download',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+    register_rest_route('nostr/v1', '/backup/delete', [
+        'methods' => 'POST',
+        'callback' => 'nostr_backup_delete',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
 }
 
 function nostr_handle_register(WP_REST_Request $request) {
@@ -228,6 +250,238 @@ function nostr_get_domains() {
         'domains'   => array_values($domains),
         'updated'   => $timestamp,
         'signature' => $signature
+    ];
+}
+
+function nostr_backup_meta_key() {
+    return 'nostr_encrypted_backup_v1';
+}
+
+function nostr_backup_is_hex_pubkey($value) {
+    return is_string($value) && preg_match('/^[a-f0-9]{64}$/', strtolower($value)) === 1;
+}
+
+function nostr_backup_normalize_base64($value) {
+    if (!is_string($value)) {
+        return null;
+    }
+    $normalized = str_replace(["\r", "\n", "\t", " "], '', trim($value));
+    return $normalized === '' ? null : $normalized;
+}
+
+function nostr_backup_validate_base64_field($value, $field_name, $min_len = 16, $max_len = 200000, $allow_null = false) {
+    if ($allow_null && ($value === null || $value === '')) {
+        return null;
+    }
+
+    $normalized = nostr_backup_normalize_base64($value);
+    if ($normalized === null) {
+        return new WP_Error('invalid_backup_field', $field_name . ' is required', ['status' => 400]);
+    }
+
+    if (strlen($normalized) < $min_len || strlen($normalized) > $max_len) {
+        return new WP_Error('invalid_backup_field', $field_name . ' has invalid length', ['status' => 400]);
+    }
+
+    // Accept standard/base64url chars and optional '=' padding.
+    if (!preg_match('/^[A-Za-z0-9+\/=_-]+$/', $normalized)) {
+        return new WP_Error('invalid_backup_field', $field_name . ' must be base64-like encoded', ['status' => 400]);
+    }
+
+    return $normalized;
+}
+
+function nostr_backup_rate_limit($action, $limit, $window_seconds) {
+    $user_id = get_current_user_id();
+    $ip = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '';
+    $bucket_key = 'nostr_rl_' . md5($action . '|' . $user_id . '|' . $ip);
+    $now = time();
+
+    $bucket = get_transient($bucket_key);
+    if (!is_array($bucket) || !isset($bucket['count'], $bucket['reset_at']) || (int) $bucket['reset_at'] <= $now) {
+        $bucket = [
+            'count' => 0,
+            'reset_at' => $now + $window_seconds
+        ];
+    }
+
+    if ((int) $bucket['count'] >= $limit) {
+        $retry_after = max(1, ((int) $bucket['reset_at']) - $now);
+        return new WP_Error(
+            'rate_limited',
+            'Too many requests, please retry later',
+            [
+                'status' => 429,
+                'retryAfter' => $retry_after
+            ]
+        );
+    }
+
+    $bucket['count'] = (int) $bucket['count'] + 1;
+    $ttl = max(1, ((int) $bucket['reset_at']) - $now);
+    set_transient($bucket_key, $bucket, $ttl);
+    return true;
+}
+
+function nostr_backup_get_record($user_id) {
+    $record = get_user_meta($user_id, nostr_backup_meta_key(), true);
+    return is_array($record) ? $record : null;
+}
+
+function nostr_backup_upload(WP_REST_Request $request) {
+    $rate_limit = nostr_backup_rate_limit('backup_upload', 20, 300);
+    if (is_wp_error($rate_limit)) {
+        return $rate_limit;
+    }
+
+    $user_id = get_current_user_id();
+    $params = $request->get_json_params();
+    if (!is_array($params)) {
+        return new WP_Error('invalid_payload', 'Expected JSON payload', ['status' => 400]);
+    }
+
+    $version = isset($params['version']) ? (int) $params['version'] : 0;
+    if ($version !== 1) {
+        return new WP_Error('invalid_version', 'Unsupported backup version', ['status' => 400]);
+    }
+
+    $pubkey = isset($params['pubkey']) ? strtolower(trim((string) $params['pubkey'])) : '';
+    if (!nostr_backup_is_hex_pubkey($pubkey)) {
+        return new WP_Error('invalid_pubkey', 'Invalid pubkey format', ['status' => 400]);
+    }
+
+    $registered_pubkey = strtolower((string) get_user_meta($user_id, 'nostr_pubkey', true));
+    if ($registered_pubkey !== '' && $registered_pubkey !== $pubkey) {
+        return new WP_Error(
+            'pubkey_mismatch',
+            'Backup pubkey does not match currently registered account pubkey',
+            ['status' => 409, 'currentPubkey' => $registered_pubkey]
+        );
+    }
+
+    $backup_blob = nostr_backup_validate_base64_field($params['backupBlob'] ?? null, 'backupBlob', 32, 400000, false);
+    if (is_wp_error($backup_blob)) return $backup_blob;
+
+    $blob_iv = nostr_backup_validate_base64_field($params['blobIv'] ?? null, 'blobIv', 12, 512, false);
+    if (is_wp_error($blob_iv)) return $blob_iv;
+
+    $blob_aad = nostr_backup_validate_base64_field($params['blobAad'] ?? null, 'blobAad', 8, 8192, false);
+    if (is_wp_error($blob_aad)) return $blob_aad;
+
+    $wrapped_dek_passkey = nostr_backup_validate_base64_field($params['wrappedDekPasskey'] ?? null, 'wrappedDekPasskey', 16, 400000, false);
+    if (is_wp_error($wrapped_dek_passkey)) return $wrapped_dek_passkey;
+
+    $wrapped_dek_recovery = nostr_backup_validate_base64_field($params['wrappedDekRecovery'] ?? null, 'wrappedDekRecovery', 16, 400000, true);
+    if (is_wp_error($wrapped_dek_recovery)) return $wrapped_dek_recovery;
+
+    $key_fingerprint = nostr_backup_validate_base64_field($params['keyFingerprint'] ?? null, 'keyFingerprint', 16, 1024, false);
+    if (is_wp_error($key_fingerprint)) return $key_fingerprint;
+
+    $existing = nostr_backup_get_record($user_id);
+    $created_at = $existing && isset($existing['createdAt']) ? (int) $existing['createdAt'] : time();
+    $updated_at = time();
+
+    $record = [
+        'version' => 1,
+        'pubkey' => $pubkey,
+        'backupBlob' => $backup_blob,
+        'blobIv' => $blob_iv,
+        'blobAad' => $blob_aad,
+        'wrappedDekPasskey' => $wrapped_dek_passkey,
+        'wrappedDekRecovery' => $wrapped_dek_recovery,
+        'keyFingerprint' => $key_fingerprint,
+        'createdAt' => $created_at,
+        'updatedAt' => $updated_at
+    ];
+
+    update_user_meta($user_id, nostr_backup_meta_key(), $record);
+
+    return [
+        'success' => true,
+        'hasBackup' => true,
+        'version' => 1,
+        'pubkey' => $pubkey,
+        'updatedAt' => $updated_at,
+        'hasRecoveryWrap' => $wrapped_dek_recovery !== null
+    ];
+}
+
+function nostr_backup_metadata() {
+    $rate_limit = nostr_backup_rate_limit('backup_metadata', 60, 300);
+    if (is_wp_error($rate_limit)) {
+        return $rate_limit;
+    }
+
+    $user_id = get_current_user_id();
+    $record = nostr_backup_get_record($user_id);
+
+    if (!$record) {
+        return [
+            'hasBackup' => false,
+            'version' => null,
+            'pubkey' => null,
+            'updatedAt' => null,
+            'hasRecoveryWrap' => false
+        ];
+    }
+
+    return [
+        'hasBackup' => true,
+        'version' => (int) ($record['version'] ?? 1),
+        'pubkey' => (string) ($record['pubkey'] ?? ''),
+        'updatedAt' => isset($record['updatedAt']) ? (int) $record['updatedAt'] : null,
+        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery'])
+    ];
+}
+
+function nostr_backup_download(WP_REST_Request $request) {
+    $rate_limit = nostr_backup_rate_limit('backup_download', 20, 300);
+    if (is_wp_error($rate_limit)) {
+        return $rate_limit;
+    }
+
+    $user_id = get_current_user_id();
+    $record = nostr_backup_get_record($user_id);
+    if (!$record) {
+        return new WP_Error('backup_not_found', 'No backup found', ['status' => 404]);
+    }
+
+    $expected_pubkey = strtolower(trim((string) $request->get_param('expectedPubkey')));
+    if ($expected_pubkey !== '' && (!nostr_backup_is_hex_pubkey($expected_pubkey) || $expected_pubkey !== (string) $record['pubkey'])) {
+        return new WP_Error(
+            'backup_pubkey_mismatch',
+            'Stored backup pubkey does not match expected pubkey',
+            ['status' => 409, 'storedPubkey' => (string) $record['pubkey']]
+        );
+    }
+
+    return [
+        'hasBackup' => true,
+        'version' => (int) ($record['version'] ?? 1),
+        'pubkey' => (string) ($record['pubkey'] ?? ''),
+        'backupBlob' => (string) ($record['backupBlob'] ?? ''),
+        'blobIv' => (string) ($record['blobIv'] ?? ''),
+        'blobAad' => (string) ($record['blobAad'] ?? ''),
+        'wrappedDekPasskey' => (string) ($record['wrappedDekPasskey'] ?? ''),
+        'wrappedDekRecovery' => isset($record['wrappedDekRecovery']) ? $record['wrappedDekRecovery'] : null,
+        'keyFingerprint' => (string) ($record['keyFingerprint'] ?? ''),
+        'updatedAt' => isset($record['updatedAt']) ? (int) $record['updatedAt'] : null,
+        'hasRecoveryWrap' => !empty($record['wrappedDekRecovery'])
+    ];
+}
+
+function nostr_backup_delete() {
+    $rate_limit = nostr_backup_rate_limit('backup_delete', 20, 300);
+    if (is_wp_error($rate_limit)) {
+        return $rate_limit;
+    }
+
+    $user_id = get_current_user_id();
+    $deleted = delete_user_meta($user_id, nostr_backup_meta_key());
+
+    return [
+        'success' => true,
+        'deleted' => (bool) $deleted
     ];
 }
 
