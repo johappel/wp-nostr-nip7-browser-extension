@@ -14,6 +14,7 @@
 | TASK-07 | TASK-07-Build-Pipeline.md | TASK-01 |
 | TASK-08 | TASK-08-Popup-UI.md | TASK-03 |
 | TASK-09 | TASK-09-Unit-Tests.md | TASK-03, TASK-04 |
+| TASK-10 | TASK-10-Passkey-WP-Backup-Recovery.md | TASK-02, TASK-03, TASK-08, TASK-09 |
 
 ## Validierung der Sicherheitsregeln
 
@@ -63,6 +64,8 @@
 | Salt und IV separat gespeichert | TASK-03 |
 | Passwort nur Memory-Cache | TASK-03 |
 | SW Neustart = Passwort neu eingeben | TASK-03 |
+| Cloud-Backup nur verschluesselt (kein Klartext-nsec) | TASK-10 |
+| Passkey/Recovery fuer Restore statt Pflicht-Passphrase | TASK-10 |
 
 ## Empfohlene Ausführungsreihenfolge
 
@@ -76,3 +79,4 @@
 8. **TASK-05** - Domain Whitelist
 9. **TASK-06** - Update Mechanismus
 10. **TASK-09** - Unit Tests
+11. **TASK-10** - Passkey + WP Backup Recovery
