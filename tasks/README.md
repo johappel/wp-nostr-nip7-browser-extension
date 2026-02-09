@@ -15,6 +15,9 @@
 | TASK-08 | TASK-08-Popup-UI.md | TASK-03 |
 | TASK-09 | TASK-09-Unit-Tests.md | TASK-03, TASK-04 |
 | TASK-10 | TASK-10-Passkey-WP-Backup-Recovery.md | TASK-02, TASK-03, TASK-08, TASK-09 |
+| TASK-11 | TASK-11-WP-Backup-Restore-Routines.md | TASK-10 |
+| TASK-12 | TASK-12-Primary-Domain-Auth-Broker.md | TASK-10 |
+| TASK-13 | TASK-13-CSS-Design-UTF8-Dark-Light-Blue-Glow.md | TASK-08, TASK-12 |
 
 ## Validierung der Sicherheitsregeln
 
@@ -80,3 +83,6 @@
 9. **TASK-06** - Update Mechanismus
 10. **TASK-09** - Unit Tests
 11. **TASK-10** - Passkey + WP Backup Recovery
+12. **TASK-11** - WP Backup Restore Routinen
+13. **TASK-12** - Primary-Domain Auth Broker
+14. **TASK-13** - CSS/Design + UTF8 + Dark/Light + Blue Glow
