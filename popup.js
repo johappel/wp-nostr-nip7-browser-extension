@@ -133,8 +133,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       const relay = String(result.relay || profilePayload.relays[0] || '').trim();
       const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
       status.textContent = relay
-        ? `Profil veroeffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
-        : `Profil veroeffentlicht (${formatShortHex(pubkey)}).`;
+        ? `Profil veröffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
+        : `Profil veröffentlicht (${formatShortHex(pubkey)}).`;
     } catch (e) {
       status.textContent = `Profil-Publish fehlgeschlagen: ${e.message || e}`;
     } finally {
@@ -180,9 +180,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       backupOutput.value = nsec;
       try {
         await navigator.clipboard.writeText(nsec);
-        status.textContent = 'Schluessel exportiert und in die Zwischenablage kopiert.';
+        status.textContent = 'Schlüssel exportiert und in die Zwischenablage kopiert.';
       } catch {
-        status.textContent = 'Schluessel exportiert. Bitte sicher speichern.';
+        status.textContent = 'Schlüssel exportiert. Bitte sicher speichern.';
       }
     } catch (e) {
       status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
@@ -198,7 +198,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const confirmed = confirm('Import ueberschreibt den bestehenden Schluessel im aktiven WP-User-Scope. Fortfahren?');
+    const confirmed = confirm('Import überschreibt den bestehenden Schlüssel im aktiven WP-User-Scope. Fortfahren?');
     if (!confirmed) return;
 
     importKeyButton.disabled = true;
@@ -217,8 +217,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       status.textContent = pubkey
-        ? `Schluessel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknuepfen.`
-        : 'Schluessel importiert. Seite neu laden.';
+        ? `Schlüssel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
+        : 'Schlüssel importiert. Seite neu laden.';
     } catch (e) {
       status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
     } finally {
@@ -228,7 +228,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   cloudBackupEnableButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Cloud-Backup ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      status.textContent = 'Cloud-Backup ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
     setCloudButtonsDisabled({
@@ -261,10 +261,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   cloudBackupRestoreButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Restore ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      status.textContent = 'Restore ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
-    const confirmed = confirm('Cloud-Restore ersetzt den lokalen Schluessel im aktiven Scope. Fortfahren?');
+    const confirmed = confirm('Cloud-Restore ersetzt den lokalen Schlüssel im aktiven Scope. Fortfahren?');
     if (!confirmed) return;
 
     setCloudButtonsDisabled({
@@ -305,10 +305,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   cloudBackupDeleteButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Cloud-Backup-Loeschen ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      status.textContent = 'Cloud-Backup-Löschen ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
-    const confirmed = confirm('Cloud-Backup fuer diesen WP-User wirklich loeschen?');
+    const confirmed = confirm('Cloud-Backup für diesen WP-User wirklich löschen?');
     if (!confirmed) return;
 
     setCloudButtonsDisabled({
@@ -316,21 +316,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       restoreButton: cloudBackupRestoreButton,
       deleteButton: cloudBackupDeleteButton
     }, true);
-    status.textContent = 'Loesche Cloud-Backup...';
+    status.textContent = 'Lösche Cloud-Backup...';
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_DELETE',
         payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
-      status.textContent = 'Cloud-Backup geloescht.';
+      status.textContent = 'Cloud-Backup gelöscht.';
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
     } catch (e) {
-      status.textContent = `Cloud-Backup konnte nicht geloescht werden: ${e.message || e}`;
+      status.textContent = `Cloud-Backup konnte nicht gelöscht werden: ${e.message || e}`;
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -523,7 +523,7 @@ function setCloudButtonsDisabled(buttons, disabled) {
 async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
   if (!metaNode) return;
   if (!wpApi) {
-    metaNode.textContent = 'Cloud-Backup nur auf aktivem, eingeloggtem WordPress-Tab verfuegbar.';
+    metaNode.textContent = 'Cloud-Backup nur auf aktivem, eingeloggtem WordPress-Tab verfügbar.';
     setCloudButtonsDisabled(buttons, true);
     return;
   }
@@ -550,12 +550,12 @@ async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
     const restoreLikelyAvailable = data.restoreLikelyAvailable !== false;
     let restoreHint = '';
     if (hasMatchInfo && !restoreLikelyAvailable && data.restoreUnavailableReason === 'credential_mismatch') {
-      restoreHint = ' Wiederherstellen ist fuer diesen Browser deaktiviert (Passkey-Credential stammt vermutlich aus anderem Browser).';
+      restoreHint = ' Wiederherstellen ist für diesen Browser deaktiviert (Passkey-Credential stammt vermutlich aus anderem Browser).';
     } else if (!hasMatchInfo || !data.passkeyCredentialFingerprint) {
       restoreHint = ' Restore-Kompatibilitaet kann nicht vorab geprueft werden.';
     }
 
-    metaNode.textContent = `Backup vorhanden fuer ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.${restoreHint}`;
+    metaNode.textContent = `Backup vorhanden für ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.${restoreHint}`;
     if (buttons?.enableButton) buttons.enableButton.disabled = false;
     if (buttons?.restoreButton) buttons.restoreButton.disabled = !restoreLikelyAvailable;
     if (buttons?.deleteButton) buttons.deleteButton.disabled = false;
@@ -611,7 +611,7 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
   const normalizedScope = normalizeScope(scope);
   if (!runtimeStatus || !runtimeStatus.hasKey) {
     cardNode.innerHTML = `
-      <p class="empty">Kein Schluessel im Scope <strong>${escapeHtml(formatScopeLabel(normalizedScope))}</strong> gefunden.</p>
+      <p class="empty">Kein Schlüssel im Scope <strong>${escapeHtml(formatScopeLabel(normalizedScope))}</strong> gefunden.</p>
       <p class="hint">Scope: <code>${escapeHtml(normalizedScope)}</code></p>
     `;
     return;
@@ -621,7 +621,7 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
   const npub = String(runtimeStatus.npub || '').trim();
   const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
   const mode = formatProtectionMode(runtimeStatus.protectionMode);
-  const lockState = locked ? 'gesperrt fuer sensible Aktionen' : 'entsperrt';
+  const lockState = locked ? 'gesperrt für sensible Aktionen' : 'entsperrt';
   const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
 
   cardNode.innerHTML = `
@@ -629,13 +629,13 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
     <div class="wp-user-meta"><strong>Technisch:</strong> <code>${escapeHtml(normalizedScope)}</code></div>
     <div class="wp-user-meta"><strong>Schutz:</strong> ${escapeHtml(mode)}</div>
     <div class="wp-user-meta"><strong>Status:</strong> ${escapeHtml(lockState)}</div>
-    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfuegbar')}</div>
-    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfuegbar')}</div>
+    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfügbar')}</div>
+    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfügbar')}</div>
     <div class="signer-badges">
       <span class="badge">Public Key ist immer sichtbar</span>
-      <span class="badge warn">Unlock nur fuer Signatur/nsec-Zugriff</span>
+      <span class="badge warn">Unlock nur für Signatur/nsec-Zugriff</span>
     </div>
-    ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil oeffnen (njump)</a></div>` : ''}
+    ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil öffnen (njump)</a></div>` : ''}
   `;
 }
 
@@ -645,7 +645,7 @@ function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
   if (!viewer?.isLoggedIn) {
     cardNode.innerHTML = '<p class="empty">Kein eingeloggter WordPress-User erkannt.</p>';
     if (hintNode) {
-      hintNode.textContent = 'Profil-Publish ist nur verfuegbar, wenn ein eingeloggter WP-Tab aktiv ist.';
+      hintNode.textContent = 'Profil-Publish ist nur verfügbar, wenn ein eingeloggter WP-Tab aktiv ist.';
     }
     return;
   }
@@ -685,13 +685,13 @@ function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
   } else if (!nip05) {
     hintNode.textContent = 'NIP-05 ist optional. Empfohlen ist ein Identifier auf der Primary Domain.';
   } else {
-    hintNode.textContent = 'Profildaten koennen mit "Profil an Nostr senden" als kind:0 Event veroeffentlicht werden.';
+    hintNode.textContent = 'Profildaten können mit "Profil an Nostr senden" als kind:0 Event veröffentlicht werden.';
   }
 }
 
 function renderCopyLine(label, value) {
   const text = String(value || '').trim();
-  const display = text || '(nicht verfuegbar)';
+  const display = text || '(nicht verfügbar)';
   const copyAttr = text ? ` data-copy-value="${escapeHtml(text)}"` : '';
   const disabledAttr = text ? '' : ' disabled';
   return `
@@ -755,7 +755,7 @@ function buildNip05PrimaryDomainHint(viewer) {
   if (!nip05) return '';
 
   const nip05Domain = extractNip05Domain(nip05);
-  if (!nip05Domain) return 'NIP-05 Format ungueltig. Erwartet wird z. B. name@example.com.';
+  if (!nip05Domain) return 'NIP-05-Format ungültig. Erwartet wird z. B. name@example.com.';
 
   const primaryHost = extractHost(viewer?.primaryDomain || viewer?.origin || '');
   if (!primaryHost) return '';
@@ -998,7 +998,7 @@ function renderViewerCard(cardNode, viewer, origin, error = null) {
 
   if (!viewer || !viewer.isLoggedIn) {
     const loggedOutText = viewer?.source === 'rest'
-      ? `Tab-Kontext nicht verfuegbar. REST meldet auf ${escapeHtml(origin || '-')} aktuell keinen WP-Login.`
+      ? `Tab-Kontext nicht verfügbar. REST meldet auf ${escapeHtml(origin || '-')} aktuell keinen WP-Login.`
       : (origin
           ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-User eingeloggt.`
           : 'Kein aktiver WordPress-Tab erkannt.');
@@ -1059,7 +1059,7 @@ function formatUnlockCacheHint(runtimeStatus) {
   const expiresAt = runtimeStatus?.cacheExpiresAt;
 
   if (!hasKey) {
-    return `Aktuelle Einstellung: ${formatUnlockPolicyLabel(policy)}. Ein Schluessel ist noch nicht eingerichtet.`;
+    return `Aktuelle Einstellung: ${formatUnlockPolicyLabel(policy)}. Ein Schlüssel ist noch nicht eingerichtet.`;
   }
 
   if (policy === 'off') {

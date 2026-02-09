@@ -1,4 +1,4 @@
-// Dialog logic for backup, password, domain approval and sign confirmation.
+// Dialog-Logik für Backup, Passwort, Domain-Freigabe und Signatur-Bestätigung.
 
 const params = new URLSearchParams(window.location.search);
 const type = params.get('type');
@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
       showConfirmDialog(params.get('domain'), Number(params.get('kind')));
       break;
     default:
-      document.getElementById('app').innerHTML = '<p>Unknown dialog type</p>';
+      document.getElementById('app').innerHTML = '<p>Unbekannter Dialog-Typ</p>';
   }
 });
 
@@ -32,36 +32,36 @@ function showBackupDialog(npub, nsec) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog backup">
-      <h2>Your Nostr keypair</h2>
+      <h2>Dein Nostr-Schlüsselpaar</h2>
       <p class="warning">
-        Important: save your private key now. It will not be shown again after this dialog is closed.
+        Wichtig: Speichere deinen privaten Schlüssel jetzt. Nach dem Schließen wird er nicht erneut angezeigt.
       </p>
 
       <div class="key-box">
-        <label>Public key (npub):</label>
+        <label>Öffentlicher Schlüssel (npub):</label>
         <code id="npub-display">${escapeHtml(npub)}</code>
-        <button onclick="copyToClipboard('npub-display')" class="btn-secondary">Copy</button>
+        <button onclick="copyToClipboard('npub-display')" class="btn-secondary">Kopieren</button>
       </div>
 
       <div class="key-box nsec-box">
-        <label>Private key (nsec) - keep secret:</label>
+        <label>Privater Schlüssel (nsec) - geheim halten:</label>
         <code id="nsec-display" class="blurred">${escapeHtml(nsec)}</code>
         <div class="btn-group">
-          <button onclick="toggleVisibility('nsec-display')" class="btn-secondary">Show</button>
-          <button onclick="copyToClipboard('nsec-display')" class="btn-secondary">Copy</button>
+          <button onclick="toggleVisibility('nsec-display')" class="btn-secondary">Anzeigen</button>
+          <button onclick="copyToClipboard('nsec-display')" class="btn-secondary">Kopieren</button>
         </div>
       </div>
 
       <div class="actions">
-        <button id="download" class="btn-primary">Save key as file</button>
+        <button id="download" class="btn-primary">Schlüssel als Datei speichern</button>
         <label class="checkbox-label">
           <input type="checkbox" id="confirm-saved" />
-          I saved my private key securely
+          Ich habe meinen privaten Schlüssel sicher gespeichert
         </label>
-        <button id="close" class="btn-primary" disabled>Continue</button>
+        <button id="close" class="btn-primary" disabled>Weiter</button>
       </div>
 
-      <p class="hint">There is no password reset for your private key.</p>
+      <p class="hint">Für den privaten Schlüssel gibt es kein Zurücksetzen.</p>
     </div>
   `;
 
@@ -94,12 +94,12 @@ function showPasswordDialog(mode) {
   if (isUnlockPasskey) {
     app.innerHTML = `
       <div class="dialog password">
-        <h2>Unlock with passkey</h2>
-        <p>Confirm with your device passkey (biometric/PIN).</p>
+        <h2>Mit Passkey entsperren</h2>
+        <p>Bestätige mit deinem Geräte-Passkey (Biometrie/PIN).</p>
         <p id="error" class="error" hidden></p>
         <div class="actions">
-          <button id="unlock-passkey-submit" class="btn-primary">Unlock</button>
-          <button id="cancel" class="btn-secondary">Cancel</button>
+          <button id="unlock-passkey-submit" class="btn-primary">Entsperren</button>
+          <button id="cancel" class="btn-secondary">Abbrechen</button>
         </div>
       </div>
     `;
@@ -109,7 +109,7 @@ function showPasswordDialog(mode) {
       errorEl.hidden = true;
       try {
         if (!passkeySupported) {
-          throw new Error('Passkey is not supported in this browser context');
+          throw new Error('Passkey wird in diesem Browser-Kontext nicht unterstützt');
         }
         const assertionResult = await runPasskeyAssertion({
           brokerUrl: passkeyBrokerUrl,
@@ -139,39 +139,39 @@ function showPasswordDialog(mode) {
 
   app.innerHTML = `
     <div class="dialog password">
-      <h2>${isCreate ? 'Set password' : 'Unlock extension'}</h2>
+      <h2>${isCreate ? 'Passwort festlegen' : 'Extension entsperren'}</h2>
       <p>${isCreate
-        ? 'This password protects your private key. Minimum 8 characters.'
-        : 'Enter your password to continue.'}</p>
+        ? 'Dieses Passwort schützt deinen privaten Schlüssel. Mindestens 8 Zeichen.'
+        : 'Bitte Passwort eingeben, um fortzufahren.'}</p>
 
       <div class="input-group">
-        <input type="password" id="password" placeholder="Password" autofocus />
+        <input type="password" id="password" placeholder="Passwort" autofocus />
       </div>
 
       ${isCreate ? `
         <div class="input-group">
-          <input type="password" id="password-confirm" placeholder="Repeat password" />
+          <input type="password" id="password-confirm" placeholder="Passwort wiederholen" />
         </div>
         <label class="checkbox-label">
           <input type="checkbox" id="no-password" />
-          Store without password (less secure)
+          Ohne Passwort speichern (weniger sicher)
         </label>
-        <p class="hint">Use only on private devices. Private key will be stored unencrypted.</p>
+        <p class="hint">Nur auf privaten Geräten verwenden. Der private Schlüssel wird unverschlüsselt gespeichert.</p>
         <div class="actions">
           <button id="setup-passkey" class="btn-secondary" type="button" ${passkeySupported ? '' : 'disabled'}>
-            Use passkey instead (recommended)
+            Stattdessen Passkey verwenden (empfohlen)
           </button>
         </div>
         <p class="hint">${passkeySupported
-          ? 'Passkey unlock uses biometric/PIN and keeps UX simple across devices.'
-          : 'Passkey is not available in this browser context.'}</p>
+          ? 'Passkey-Entsperrung nutzt Biometrie/PIN und vereinfacht die Nutzung über Geräte hinweg.'
+          : 'Passkey ist in diesem Browser-Kontext nicht verfügbar.'}</p>
       ` : ''}
 
       <p id="error" class="error" hidden></p>
 
       <div class="actions">
-        <button id="submit" class="btn-primary">${isCreate ? 'Save' : 'Unlock'}</button>
-        <button id="cancel" class="btn-secondary">Cancel</button>
+        <button id="submit" class="btn-primary">${isCreate ? 'Speichern' : 'Entsperren'}</button>
+        <button id="cancel" class="btn-secondary">Abbrechen</button>
       </div>
     </div>
   `;
@@ -198,7 +198,7 @@ function showPasswordDialog(mode) {
         errorEl.hidden = true;
         try {
           if (!passkeySupported) {
-            throw new Error('Passkey is not supported in this browser context');
+            throw new Error('Passkey wird in diesem Browser-Kontext nicht unterstützt');
           }
           const credentialId = await createPasskeyCredential();
           await chrome.storage.session.set({
@@ -229,19 +229,19 @@ function showPasswordDialog(mode) {
 
       const pw2 = confirmEl.value;
       if (pw !== pw2) {
-        errorEl.textContent = 'Passwords do not match';
+        errorEl.textContent = 'Passwörter stimmen nicht überein';
         errorEl.hidden = false;
         return;
       }
       if (pw.length < 8) {
-        errorEl.textContent = 'Minimum 8 characters required';
+        errorEl.textContent = 'Mindestens 8 Zeichen erforderlich';
         errorEl.hidden = false;
         return;
       }
     }
 
     if (!pw) {
-      errorEl.textContent = 'Password required';
+      errorEl.textContent = 'Passwort erforderlich';
       errorEl.hidden = false;
       return;
     }
@@ -298,7 +298,7 @@ async function createPasskeyCredential() {
   });
 
   if (!credential || !credential.rawId) {
-    throw new Error('Passkey setup was canceled');
+    throw new Error('Passkey-Einrichtung wurde abgebrochen');
   }
 
   return toBase64Url(credential.rawId);
@@ -374,7 +374,7 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
   }
 
   if (!assertion || !assertion.rawId) {
-    throw new Error('Passkey unlock failed');
+    throw new Error('Passkey-Entsperrung fehlgeschlagen');
   }
 
   const resolvedCredentialId = toBase64Url(assertion.rawId);
@@ -420,7 +420,7 @@ async function runPasskeyAssertionViaBroker(brokerOptions) {
   const features = 'popup=yes,width=560,height=740,resizable=yes,scrollbars=yes';
   const brokerWindow = window.open(brokerOptions.url, 'wp_nostr_auth_broker', features);
   if (!brokerWindow) {
-    throw new Error('Auth-Broker Fenster konnte nicht geoeffnet werden (Popup-Blocker?).');
+    throw new Error('Auth-Broker-Fenster konnte nicht geöffnet werden (Popup-Blocker?).');
   }
 
   return await new Promise((resolve, reject) => {
@@ -488,7 +488,7 @@ async function runPasskeyAssertionViaBroker(brokerOptions) {
 
       const credentialId = String(data?.result?.credentialId || '').trim();
       if (!credentialId) {
-        fail(new Error('Auth-Broker Antwort enthaelt keine Credential-ID.'));
+        fail(new Error('Auth-Broker-Antwort enthält keine Credential-ID.'));
         return;
       }
 
@@ -498,7 +498,7 @@ async function runPasskeyAssertionViaBroker(brokerOptions) {
     window.addEventListener('message', onMessage);
 
     const readyTimeout = setTimeout(() => {
-      fail(new Error('Auth-Broker antwortet nicht. Bitte Login auf der Primary Domain pruefen.'));
+      fail(new Error('Auth-Broker antwortet nicht. Bitte Login auf der Primary Domain prüfen.'));
     }, 30000);
 
     const resultTimeout = setTimeout(() => {
@@ -526,13 +526,13 @@ function mapPasskeyError(error, phase) {
 
   if (name === 'NotAllowedError') {
     if (phase === 'unlock') {
-      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identitaet gefunden. In Chrome bitte pruefen, ob fuer diese Extension bereits eine lokale Passkey-Identitaet (Windows Hello) existiert.';
+      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identität gefunden. In Chrome bitte prüfen, ob für diese Extension bereits eine lokale Passkey-Identität (Windows Hello) existiert.';
     }
-    return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geraete-Passkey (z. B. Windows Hello) waehlen.';
+    return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geräte-Passkey (z. B. Windows Hello) wählen.';
   }
 
   if (name === 'UnknownError' || /unknown transient reason/i.test(rawMessage)) {
-    return 'Temporarer Passkey-Fehler im Browser. Bitte Dialog erneut oeffnen und nochmal versuchen.';
+    return 'Temporärer Passkey-Fehler im Browser. Bitte Dialog erneut öffnen und noch einmal versuchen.';
   }
 
   if (name === 'SecurityError') {
@@ -543,7 +543,7 @@ function mapPasskeyError(error, phase) {
     return 'Passkey ist bereits registriert oder nicht im erwarteten Zustand. Bitte erneut versuchen.';
   }
 
-  return rawMessage || 'Passkey operation failed';
+  return rawMessage || 'Passkey-Vorgang fehlgeschlagen';
 }
 
 function createRequestId() {
@@ -621,16 +621,16 @@ function showDomainApprovalDialog(domain) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog domain">
-      <h2>New domain</h2>
-      <p>The website <strong>${escapeHtml(domain)}</strong> wants to access your Nostr identity.</p>
-      <p>Do you trust this domain?</p>
+      <h2>Neue Domain</h2>
+      <p>Die Website <strong>${escapeHtml(domain)}</strong> möchte auf deine Nostr-Identität zugreifen.</p>
+      <p>Vertraust du dieser Domain?</p>
 
       <div class="actions">
-        <button id="allow" class="btn-primary">Allow</button>
-        <button id="deny" class="btn-secondary">Deny</button>
+        <button id="allow" class="btn-primary">Erlauben</button>
+        <button id="deny" class="btn-secondary">Ablehnen</button>
         <label class="checkbox-label">
           <input type="checkbox" id="remember" checked />
-          Remember decision for this domain
+          Entscheidung für diese Domain merken
         </label>
       </div>
     </div>
@@ -660,30 +660,30 @@ function showDomainApprovalDialog(domain) {
 
 function showConfirmDialog(domain, kind) {
   const kindNames = {
-    0: 'Profile metadata',
-    1: 'Text note',
-    3: 'Contact list',
-    4: 'Encrypted message',
-    5: 'Encrypted event (NIP-17)',
+    0: 'Profil-Metadaten',
+    1: 'Textnotiz',
+    3: 'Kontaktliste',
+    4: 'Verschlüsselte Nachricht',
+    5: 'Verschlüsseltes Event (NIP-17)',
     6: 'Repost',
     7: 'Reaction',
-    9735: 'Zap request'
+    9735: 'Zap-Anfrage'
   };
-  const kindName = kindNames[kind] || `Unknown (kind ${kind})`;
+  const kindName = kindNames[kind] || `Unbekannt (Kind ${kind})`;
 
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog confirm">
-      <h2>Signing request</h2>
-      <p><strong>${escapeHtml(domain)}</strong> wants to sign an event:</p>
+      <h2>Signaturanfrage</h2>
+      <p><strong>${escapeHtml(domain)}</strong> möchte ein Event signieren:</p>
       <div class="event-info">
         <span class="kind">${kindName}</span>
       </div>
-      <p class="warning">This is a sensitive event type. Confirm only if you trust this domain.</p>
+      <p class="warning">Das ist ein sensibler Event-Typ. Bestätige nur, wenn du dieser Domain vertraust.</p>
 
       <div class="actions">
-        <button id="confirm" class="btn-primary">Sign</button>
-        <button id="reject" class="btn-secondary">Reject</button>
+        <button id="confirm" class="btn-primary">Signieren</button>
+        <button id="reject" class="btn-secondary">Ablehnen</button>
       </div>
     </div>
   `;
@@ -706,7 +706,7 @@ window.copyToClipboard = function(elementId) {
     const btn = window.event?.target;
     if (!btn) return;
     const original = btn.textContent;
-    btn.textContent = 'Copied';
+    btn.textContent = 'Kopiert';
     setTimeout(() => { btn.textContent = original; }, 1500);
   });
 };
@@ -716,7 +716,7 @@ window.toggleVisibility = function(elementId) {
   el.classList.toggle('blurred');
   const btn = window.event?.target;
   if (!btn) return;
-  btn.textContent = el.classList.contains('blurred') ? 'Show' : 'Hide';
+  btn.textContent = el.classList.contains('blurred') ? 'Anzeigen' : 'Verbergen';
 };
 
 function escapeHtml(text) {

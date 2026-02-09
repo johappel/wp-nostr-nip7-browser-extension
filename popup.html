@@ -12,7 +12,7 @@
 
     <section class="wp-user-section">
       <div class="section-head">
-        <h2>Aktiver WP User</h2>
+        <h2>Aktiver WP-Benutzer</h2>
         <button id="refresh-user" class="btn-secondary" type="button">Neu laden</button>
       </div>
       <div id="wp-user-card" class="wp-user-card">
@@ -22,7 +22,7 @@
 
     <section class="signer-section">
       <div class="section-head">
-        <h2>Aktive Signer Identitaet</h2>
+        <h2>Aktive Signer-Identität</h2>
       </div>
       <div id="signer-card" class="wp-user-card">
         <p class="empty">Signer-Status wird geladen...</p>
@@ -31,7 +31,7 @@
 
     <section class="profile-section">
       <div class="section-head">
-        <h2>Oeffentliches Nostr Profil</h2>
+        <h2>Öffentliches Nostr-Profil</h2>
         <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
       </div>
       <div id="profile-card" class="wp-user-card">
@@ -42,15 +42,15 @@
 
     <label class="row">
       <input type="checkbox" id="prefer-lock" />
-      <span>Prefer WP Nostr Lock</span>
+      <span>WP-Nostr-Lock bevorzugen</span>
     </label>
 
     <p class="hint">
-      Wenn aktiv, versucht die Extension, <code>window.nostr</code> gegen Ueberschreiben
-      durch andere Extensions zu schuetzen.
+      Wenn aktiv, versucht die Extension, <code>window.nostr</code> gegen Überschreiben
+      durch andere Extensions zu schützen.
     </p>
 
-    <p class="hint warn">Aenderung wirkt nach Tab-Reload.</p>
+    <p class="hint warn">Änderung wirkt nach Tab-Reload.</p>
 
     <section class="unlock-section">
       <div class="section-head">
@@ -66,7 +66,7 @@
         <option value="session">Bis Browser-Ende (Session)</option>
       </select>
       <p id="unlock-cache-hint" class="hint"></p>
-      <p class="hint">Sperrung gilt fuer sensible Aktionen: Signieren, Export/Import und Cloud-Backup/Restore von nsec.</p>
+      <p class="hint">Sperrung gilt für sensible Aktionen: Signieren, Export/Import und Cloud-Backup/Restore von nsec.</p>
     </section>
 
     <section class="backup-section">
@@ -74,12 +74,12 @@
         <h2>Backup / Restore</h2>
       </div>
       <div class="backup-actions">
-        <button id="export-key" class="btn-secondary" type="button">Schluessel exportieren</button>
+        <button id="export-key" class="btn-secondary" type="button">Schlüssel exportieren</button>
       </div>
       <textarea id="backup-output" class="backup-output" rows="3" readonly placeholder="Exportierter nsec erscheint hier."></textarea>
       <input id="import-nsec" type="text" placeholder="nsec1... (aus Backup importieren)" />
-      <button id="import-key" class="btn-secondary" type="button">Schluessel importieren</button>
-      <p class="hint">Der Import ueberschreibt den Schluessel fuer den aktiven WP-User-Scope.</p>
+      <button id="import-key" class="btn-secondary" type="button">Schlüssel importieren</button>
+      <p class="hint">Der Import überschreibt den Schlüssel für den aktiven WP-Benutzer-Scope.</p>
 
       <div class="cloud-backup">
         <div class="section-head">
@@ -89,7 +89,7 @@
         <div class="backup-actions">
           <button id="backup-enable-cloud" class="btn-secondary" type="button">Backup jetzt speichern</button>
           <button id="backup-restore-cloud" class="btn-secondary" type="button">Aus Cloud wiederherstellen</button>
-          <button id="backup-delete-cloud" class="btn-danger" type="button">Cloud-Backup loeschen</button>
+          <button id="backup-delete-cloud" class="btn-danger" type="button">Cloud-Backup löschen</button>
         </div>
       </div>
     </section>
@@ -102,7 +102,7 @@
       <div class="manual-config">
         <input id="manual-primary-domain" type="text" placeholder="Primary Domain (z. B. http://forums.test)" />
         <input id="manual-domain-secret" type="password" placeholder="Domain Secret" />
-        <button id="manual-add" class="btn-secondary" type="button">Hinzufuegen / Aktualisieren</button>
+        <button id="manual-add" class="btn-secondary" type="button">Hinzufügen / Aktualisieren</button>
       </div>
       <p id="sync-meta" class="hint"></p>
       <div id="sync-list" class="sync-list"></div>
