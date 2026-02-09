@@ -1,31 +1,27 @@
 const SETTING_KEY = 'preferWpNostrLock';
 const DEFAULT_VALUE = true;
+const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
 
 document.addEventListener('DOMContentLoaded', async () => {
   const checkbox = document.getElementById('prefer-lock');
   const status = document.getElementById('status');
   const refreshUserButton = document.getElementById('refresh-user');
-  const wpUserCard = document.getElementById('wp-user-card');
-  const signerCard = document.getElementById('signer-card');
   const profileCard = document.getElementById('profile-card');
   const profileHint = document.getElementById('profile-hint');
+  const instanceCard = document.getElementById('instance-card');
   const publishProfileButton = document.getElementById('publish-profile');
-  const unlockCacheSelect = document.getElementById('unlock-cache-policy');
+  const unlockCacheState = document.getElementById('unlock-cache-state');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
+  const backupOutputCopyButton = document.getElementById('backup-output-copy');
   const importKeyButton = document.getElementById('import-key');
+  const createKeyButton = document.getElementById('create-key');
   const importNsecInput = document.getElementById('import-nsec');
   const backupOutput = document.getElementById('backup-output');
   const cloudBackupMeta = document.getElementById('cloud-backup-meta');
   const cloudBackupEnableButton = document.getElementById('backup-enable-cloud');
   const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
   const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
-  const syncNowButton = document.getElementById('sync-now');
-  const syncList = document.getElementById('sync-list');
-  const syncMeta = document.getElementById('sync-meta');
-  const manualPrimaryDomain = document.getElementById('manual-primary-domain');
-  const manualDomainSecret = document.getElementById('manual-domain-secret');
-  const manualAddButton = document.getElementById('manual-add');
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
@@ -43,16 +39,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  const initialViewer = await loadViewerContext(wpUserCard, status);
+  const initialViewer = await loadViewerContext(null, status);
+  await persistViewerCache(initialViewer);
   activeViewer = initialViewer;
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
-  const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
+  const initialSigner = await refreshSignerIdentity(null, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
-  renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
-  await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+  renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+  renderInstanceCard(instanceCard, activeViewer);
+  await ensureFixedUnlockPolicy(activeScope);
+  await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
   await refreshCloudBackupState(cloudBackupMeta, {
     enableButton: cloudBackupEnableButton,
     restoreButton: cloudBackupRestoreButton,
@@ -73,38 +72,43 @@ document.addEventListener('DOMContentLoaded', async () => {
   refreshUserButton.addEventListener('click', async () => {
     refreshUserButton.disabled = true;
     try {
-      const viewer = await loadViewerContext(wpUserCard, status);
+      const viewer = await loadViewerContext(null, status);
+      await persistViewerCache(viewer);
       activeViewer = viewer;
       activeScope = viewer?.scope || 'global';
       activeWpApi = sanitizeWpApi(viewer?.wpApi);
       activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
+      const signerContext = await refreshSignerIdentity(null, activeScope, !viewer?.isLoggedIn);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
-      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+      renderInstanceCard(instanceCard, activeViewer);
+      await ensureFixedUnlockPolicy(activeScope);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
       if (viewer?.pending) {
-        status.textContent = 'WP-User-Kontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
+        status.textContent = 'Profilkontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
+      } else if (viewer?.isCached) {
+        status.textContent = 'Profil aus Extension-Speicher geladen.';
       } else {
         status.textContent = viewer?.isLoggedIn
-          ? 'WordPress-User aktualisiert.'
-          : 'Kein eingeloggter WordPress-User auf aktivem Tab.';
+          ? 'Profilinformationen aktualisiert.'
+          : 'Kein eingeloggter WordPress-Benutzer auf aktivem Tab.';
       }
     } catch (e) {
-      status.textContent = `WP-User konnte nicht geladen werden: ${e.message || e}`;
+      status.textContent = `Profilinformationen konnten nicht geladen werden: ${e.message || e}`;
     } finally {
       refreshUserButton.disabled = false;
     }
   });
 
   publishProfileButton.addEventListener('click', async () => {
-    if (!activeViewer?.isLoggedIn) {
-      status.textContent = 'Kein eingeloggter WordPress-User im aktiven Tab.';
+    if (!hasProfileContext(activeViewer)) {
+      status.textContent = 'Kein Profilkontext verfügbar. Öffne eine WordPress-Seite und lade das Popup neu.';
       return;
     }
 
@@ -142,30 +146,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  unlockCacheSelect.addEventListener('change', async () => {
-    const selectedPolicy = normalizeUnlockPolicy(unlockCacheSelect.value);
-    unlockCacheSelect.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_SET_UNLOCK_CACHE_POLICY',
-        payload: { policy: selectedPolicy, scope: activeScope }
-      });
-      if (response?.error) throw new Error(response.error);
-
-      unlockCacheSelect.value = normalizeUnlockPolicy(response?.result?.policy);
-      const statusResponseScoped = await chrome.runtime.sendMessage({
-        type: 'NOSTR_GET_STATUS',
-        payload: { scope: activeScope }
-      });
-      unlockCacheHint.textContent = formatUnlockCacheHint(statusResponseScoped?.result);
-      status.textContent = 'Unlock-Cache aktualisiert.';
-    } catch (e) {
-      status.textContent = `Unlock-Cache konnte nicht gespeichert werden: ${e.message || e}`;
-    } finally {
-      unlockCacheSelect.disabled = false;
-    }
-  });
-
   exportKeyButton.addEventListener('click', async () => {
     exportKeyButton.disabled = true;
     try {
@@ -178,16 +158,25 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!nsec) throw new Error('Export lieferte keinen nsec');
 
       backupOutput.value = nsec;
-      try {
-        await navigator.clipboard.writeText(nsec);
-        status.textContent = 'Schlüssel exportiert und in die Zwischenablage kopiert.';
-      } catch {
-        status.textContent = 'Schlüssel exportiert. Bitte sicher speichern.';
-      }
+      status.textContent = 'Schlüssel exportiert. Du kannst ihn im Feld kopieren.';
     } catch (e) {
       status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
     } finally {
       exportKeyButton.disabled = false;
+    }
+  });
+
+  backupOutputCopyButton.addEventListener('click', async () => {
+    const nsec = String(backupOutput.value || '').trim();
+    if (!nsec) {
+      status.textContent = 'Kein exportierter Schlüssel zum Kopieren vorhanden.';
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(nsec);
+      status.textContent = 'Exportierter Schlüssel wurde kopiert.';
+    } catch {
+      status.textContent = 'Kopieren des exportierten Schlüssels fehlgeschlagen.';
     }
   });
 
@@ -198,7 +187,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const confirmed = confirm('Import überschreibt den bestehenden Schlüssel im aktiven WP-User-Scope. Fortfahren?');
+    const confirmed = confirm('Das ersetzt den bestehenden Nostr-Schlüssel für dieses Profil. Fortfahren?');
     if (!confirmed) return;
 
     importKeyButton.disabled = true;
@@ -211,13 +200,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const pubkey = String(response?.result?.pubkey || '');
       importNsecInput.value = '';
       backupOutput.value = '';
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      const signerContext = await refreshSignerIdentity(null, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
-      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
       status.textContent = pubkey
-        ? `Schlüssel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
+        ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
         : 'Schlüssel importiert. Seite neu laden.';
     } catch (e) {
       status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
@@ -226,9 +215,46 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  createKeyButton.addEventListener('click', async () => {
+    const confirmed = confirm('Neue Schlüssel erstellen? Das ersetzt die aktuelle Nostr-Identität für dieses Profil.');
+    if (!confirmed) return;
+
+    createKeyButton.disabled = true;
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_CREATE_NEW_KEY',
+        payload: { scope: activeScope }
+      });
+      if (response?.error) throw new Error(response.error);
+      const pubkey = String(response?.result?.pubkey || '').trim();
+
+      importNsecInput.value = '';
+      backupOutput.value = '';
+
+      const signerContext = await refreshSignerIdentity(null, activeScope, false);
+      activeRuntimeStatus = signerContext?.runtimeStatus || null;
+      activeScope = signerContext?.scope || activeScope;
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+
+      status.textContent = pubkey
+        ? `Neue Schlüssel erstellt (${formatShortHex(pubkey)}).`
+        : 'Neue Schlüssel erstellt.';
+    } catch (e) {
+      status.textContent = `Neue Schlüssel konnten nicht erstellt werden: ${e.message || e}`;
+    } finally {
+      createKeyButton.disabled = false;
+    }
+  });
+
   cloudBackupEnableButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Cloud-Backup ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
+      status.textContent = 'Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
     setCloudButtonsDisabled({
@@ -236,21 +262,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       restoreButton: cloudBackupRestoreButton,
       deleteButton: cloudBackupDeleteButton
     }, true);
-    status.textContent = 'Speichere Cloud-Backup...';
+    status.textContent = 'Speichere Schlüsselkopie in WordPress...';
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_ENABLE',
         payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
-      status.textContent = 'Cloud-Backup gespeichert.';
+      status.textContent = 'Schlüsselkopie in WordPress gespeichert.';
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
     } catch (e) {
-      status.textContent = `Cloud-Backup fehlgeschlagen: ${e.message || e}`;
+      status.textContent = `Speichern der Schlüsselkopie fehlgeschlagen: ${e.message || e}`;
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -261,10 +287,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   cloudBackupRestoreButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Restore ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
+      status.textContent = 'Wiederherstellen ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
-    const confirmed = confirm('Cloud-Restore ersetzt den lokalen Schlüssel im aktiven Scope. Fortfahren?');
+    const confirmed = confirm('Wiederherstellen aus WordPress ersetzt den lokalen Nostr-Schlüssel. Fortfahren?');
     if (!confirmed) return;
 
     setCloudButtonsDisabled({
@@ -272,7 +298,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       restoreButton: cloudBackupRestoreButton,
       deleteButton: cloudBackupDeleteButton
     }, true);
-    status.textContent = 'Stelle aus Cloud-Backup wieder her...';
+    status.textContent = 'Stelle aus WordPress-Schlüsselkopie wieder her...';
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_RESTORE',
@@ -281,20 +307,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (response?.error) throw new Error(response.error);
       const pubkey = String(response?.result?.pubkey || '');
       status.textContent = pubkey
-        ? `Cloud-Restore erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
-        : 'Cloud-Restore erfolgreich. Seite neu laden.';
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+        ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
+        : 'Wiederherstellung erfolgreich. Seite neu laden.';
+      const signerContext = await refreshSignerIdentity(null, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus, activeScope);
-      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
     } catch (e) {
-      status.textContent = `Cloud-Restore fehlgeschlagen: ${e.message || e}`;
+      status.textContent = `Wiederherstellung fehlgeschlagen: ${e.message || e}`;
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -305,10 +331,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   cloudBackupDeleteButton.addEventListener('click', async () => {
     if (!activeWpApi) {
-      status.textContent = 'Cloud-Backup-Löschen ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
+      status.textContent = 'Löschen der Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
       return;
     }
-    const confirmed = confirm('Cloud-Backup für diesen WP-User wirklich löschen?');
+    const confirmed = confirm('Schlüsselkopie in WordPress wirklich löschen?');
     if (!confirmed) return;
 
     setCloudButtonsDisabled({
@@ -316,71 +342,26 @@ document.addEventListener('DOMContentLoaded', async () => {
       restoreButton: cloudBackupRestoreButton,
       deleteButton: cloudBackupDeleteButton
     }, true);
-    status.textContent = 'Lösche Cloud-Backup...';
+    status.textContent = 'Lösche Schlüsselkopie in WordPress...';
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_DELETE',
         payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
-      status.textContent = 'Cloud-Backup gelöscht.';
+      status.textContent = 'Schlüsselkopie in WordPress gelöscht.';
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
     } catch (e) {
-      status.textContent = `Cloud-Backup konnte nicht gelöscht werden: ${e.message || e}`;
+      status.textContent = `Schlüsselkopie konnte nicht gelöscht werden: ${e.message || e}`;
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
       }, activeScope, activeWpApi);
-    }
-  });
-
-  syncNowButton.addEventListener('click', async () => {
-    syncNowButton.disabled = true;
-    status.textContent = 'Synchronisiere Domains...';
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'NOSTR_SYNC_DOMAINS_NOW' });
-      if (response?.error) throw new Error(response.error);
-      const state = response?.result;
-      renderSyncState(state, syncList, syncMeta, status);
-      const configCount = Array.isArray(state?.configs) ? state.configs.length : 0;
-      status.textContent = configCount > 0
-        ? 'Domain-Sync abgeschlossen.'
-        : 'Keine Domain-Configs vorhanden.';
-    } catch (e) {
-      status.textContent = `Domain-Sync fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      syncNowButton.disabled = false;
-    }
-  });
-
-  manualAddButton.addEventListener('click', async () => {
-    const primaryDomain = manualPrimaryDomain.value.trim();
-    const domainSecret = manualDomainSecret.value.trim();
-    if (!primaryDomain || !domainSecret) {
-      status.textContent = 'Primary Domain und Secret sind erforderlich.';
-      return;
-    }
-
-    manualAddButton.disabled = true;
-    status.textContent = 'Speichere Domain-Config...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_UPSERT_DOMAIN_SYNC_CONFIG',
-        payload: { primaryDomain, domainSecret }
-      });
-      if (response?.error) throw new Error(response.error);
-      renderSyncState(response?.result, syncList, syncMeta, status);
-      status.textContent = 'Domain-Config gespeichert und synchronisiert.';
-      manualDomainSecret.value = '';
-    } catch (e) {
-      status.textContent = `Speichern fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      manualAddButton.disabled = false;
     }
   });
 
@@ -402,80 +383,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  await refreshSyncState(syncList, syncMeta, status);
 });
-
-async function refreshSyncState(syncList, syncMeta, status) {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'NOSTR_GET_DOMAIN_SYNC_STATE' });
-    if (response?.error) throw new Error(response.error);
-    renderSyncState(response?.result, syncList, syncMeta, status);
-  } catch (e) {
-    syncMeta.textContent = 'Domain-Sync-Status konnte nicht geladen werden.';
-    status.textContent = `Fehler: ${e.message || e}`;
-  }
-}
-
-function renderSyncState(state, container, metaNode, statusNode) {
-  const configs = Array.isArray(state?.configs) ? state.configs : [];
-  const allowedDomains = Array.isArray(state?.allowedDomains) ? state.allowedDomains : [];
-  const lastUpdate = state?.lastDomainUpdate ? formatDateTime(state.lastDomainUpdate) : 'nie';
-
-  metaNode.textContent = `Configs: ${configs.length} | Allowed: ${allowedDomains.length} | Letztes Update: ${lastUpdate}`;
-
-  if (!configs.length) {
-    container.innerHTML = '<p class="empty">Keine Primary-Domains konfiguriert.</p>';
-    return;
-  }
-
-  container.innerHTML = '';
-
-  for (const config of configs) {
-    const row = document.createElement('div');
-    row.className = 'sync-item';
-
-    const lastSync = config.lastSyncAt ? formatDateTime(config.lastSyncAt) : 'nie';
-    const statusText = config.lastSyncError
-      ? `Fehler: ${config.lastSyncError}`
-      : `Letzter Sync: ${lastSync}`;
-
-    row.innerHTML = `
-      <div class="sync-main">
-        <div class="sync-host">${escapeHtml(config.host)}</div>
-        <div class="sync-origin">${escapeHtml(config.primaryDomain || '')}</div>
-        <div class="sync-status">${escapeHtml(statusText)}</div>
-      </div>
-      <button class="btn-danger" type="button" data-host="${escapeHtml(config.host)}">Entfernen</button>
-    `;
-
-    const removeButton = row.querySelector('.btn-danger');
-    removeButton.addEventListener('click', async () => {
-      removeButton.disabled = true;
-      try {
-        const response = await chrome.runtime.sendMessage({
-          type: 'NOSTR_REMOVE_DOMAIN_SYNC_CONFIG',
-          payload: { host: config.host }
-        });
-        if (response?.error) throw new Error(response.error);
-        renderSyncState(response?.result, container, metaNode, statusNode);
-        if (statusNode) statusNode.textContent = `Config ${config.host} entfernt.`;
-      } catch (e) {
-        removeButton.disabled = false;
-        if (statusNode) statusNode.textContent = `Entfernen fehlgeschlagen: ${e.message || e}`;
-      }
-    });
-
-    container.appendChild(row);
-  }
-}
-
-function formatDateTime(timestampMs) {
-  try {
-    return new Date(timestampMs).toLocaleString();
-  } catch {
-    return 'unbekannt';
-  }
-}
 
 function escapeHtml(text) {
   const div = document.createElement('div');
@@ -513,6 +421,80 @@ function sanitizeAuthBroker(raw) {
   }
 }
 
+function hasProfileContext(viewer) {
+  if (!viewer || typeof viewer !== 'object') return false;
+  if (Number(viewer.userId) > 0) return true;
+  if (String(viewer.displayName || '').trim()) return true;
+  if (String(viewer.userLogin || '').trim()) return true;
+  if (String(viewer.avatarUrl || '').trim()) return true;
+  if (String(viewer.profileNip05 || '').trim()) return true;
+  if (String(viewer.primaryDomain || '').trim()) return true;
+  return false;
+}
+
+async function persistViewerCache(viewer) {
+  if (!hasProfileContext(viewer)) return;
+
+  const origin = String(viewer?.origin || '').trim();
+  const validOrigin = /^https?:\/\//i.test(origin) ? origin : null;
+  const userId = Number(viewer?.userId) || null;
+  const fallbackScope = validOrigin && userId ? buildWpScope(validOrigin, userId) : 'global';
+  const scope = normalizeScope(viewer?.scope || fallbackScope);
+
+  const cacheEntry = {
+    userId,
+    displayName: String(viewer?.displayName || '').trim() || null,
+    avatarUrl: String(viewer?.avatarUrl || '').trim() || null,
+    pubkey: String(viewer?.pubkey || '').trim() || null,
+    userLogin: String(viewer?.userLogin || '').trim() || null,
+    profileRelayUrl: String(viewer?.profileRelayUrl || '').trim() || null,
+    profileNip05: String(viewer?.profileNip05 || '').trim() || null,
+    primaryDomain: String(viewer?.primaryDomain || '').trim() || null,
+    origin: validOrigin,
+    scope,
+    updatedAt: Date.now()
+  };
+
+  try {
+    await chrome.storage.local.set({ [VIEWER_CACHE_KEY]: cacheEntry });
+  } catch {
+    // Optionaler UX-Cache - Fehler soll Popup nicht blockieren.
+  }
+}
+
+async function loadViewerCache() {
+  try {
+    const stored = await chrome.storage.local.get([VIEWER_CACHE_KEY]);
+    const raw = stored?.[VIEWER_CACHE_KEY];
+    if (!raw || typeof raw !== 'object') return null;
+
+    const origin = String(raw.origin || '').trim();
+    const validOrigin = /^https?:\/\//i.test(origin) ? origin : null;
+    const userId = Number(raw.userId) || null;
+    const fallbackScope = validOrigin && userId ? buildWpScope(validOrigin, userId) : 'global';
+
+    return {
+      isLoggedIn: false,
+      isCached: true,
+      source: 'cache',
+      userId,
+      displayName: String(raw.displayName || '').trim() || null,
+      avatarUrl: String(raw.avatarUrl || '').trim() || null,
+      pubkey: String(raw.pubkey || '').trim() || null,
+      userLogin: String(raw.userLogin || '').trim() || null,
+      profileRelayUrl: String(raw.profileRelayUrl || '').trim() || null,
+      profileNip05: String(raw.profileNip05 || '').trim() || null,
+      primaryDomain: String(raw.primaryDomain || '').trim() || null,
+      origin: validOrigin,
+      activeSiteOrigin: null,
+      scope: normalizeScope(raw.scope || fallbackScope),
+      updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : null
+    };
+  } catch {
+    return null;
+  }
+}
+
 function setCloudButtonsDisabled(buttons, disabled) {
   if (!buttons) return;
   if (buttons.enableButton) buttons.enableButton.disabled = disabled;
@@ -523,7 +505,7 @@ function setCloudButtonsDisabled(buttons, disabled) {
 async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
   if (!metaNode) return;
   if (!wpApi) {
-    metaNode.textContent = 'Cloud-Backup nur auf aktivem, eingeloggtem WordPress-Tab verfügbar.';
+    metaNode.textContent = 'Schlüsselkopie ist nur auf aktivem, eingeloggtem WordPress-Tab verfügbar.';
     setCloudButtonsDisabled(buttons, true);
     return;
   }
@@ -536,7 +518,7 @@ async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
     if (response?.error) throw new Error(response.error);
     const data = response?.result || {};
     if (!data.hasBackup) {
-      metaNode.textContent = 'Kein Cloud-Backup vorhanden.';
+      metaNode.textContent = 'Keine Schlüsselkopie in WordPress vorhanden.';
       if (buttons?.enableButton) buttons.enableButton.disabled = false;
       if (buttons?.restoreButton) buttons.restoreButton.disabled = true;
       if (buttons?.deleteButton) buttons.deleteButton.disabled = true;
@@ -552,15 +534,15 @@ async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
     if (hasMatchInfo && !restoreLikelyAvailable && data.restoreUnavailableReason === 'credential_mismatch') {
       restoreHint = ' Wiederherstellen ist für diesen Browser deaktiviert (Passkey-Credential stammt vermutlich aus anderem Browser).';
     } else if (!hasMatchInfo || !data.passkeyCredentialFingerprint) {
-      restoreHint = ' Restore-Kompatibilitaet kann nicht vorab geprueft werden.';
+      restoreHint = ' Restore-Kompatibilität kann nicht vorab geprüft werden.';
     }
 
-    metaNode.textContent = `Backup vorhanden für ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.${restoreHint}`;
+    metaNode.textContent = `Schlüsselkopie vorhanden für ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.${restoreHint}`;
     if (buttons?.enableButton) buttons.enableButton.disabled = false;
     if (buttons?.restoreButton) buttons.restoreButton.disabled = !restoreLikelyAvailable;
     if (buttons?.deleteButton) buttons.deleteButton.disabled = false;
   } catch (error) {
-    metaNode.textContent = `Cloud-Status konnte nicht geladen werden: ${error.message || error}`;
+    metaNode.textContent = `Status der Schlüsselkopie konnte nicht geladen werden: ${error.message || error}`;
     setCloudButtonsDisabled(buttons, false);
     if (buttons?.restoreButton) buttons.restoreButton.disabled = true;
     if (buttons?.deleteButton) buttons.deleteButton.disabled = true;
@@ -586,7 +568,7 @@ async function refreshSignerIdentity(cardNode, requestedScope, allowFallback = t
       }
     }
 
-    renderSignerCard(cardNode, runtimeStatus, activeScope);
+    renderSignerCard(cardNode, runtimeStatus);
     return { scope: activeScope, runtimeStatus };
   } catch (error) {
     if (cardNode) {
@@ -605,14 +587,13 @@ async function getScopedRuntimeStatus(scope) {
   return response?.result || null;
 }
 
-function renderSignerCard(cardNode, runtimeStatus, scope) {
+function renderSignerCard(cardNode, runtimeStatus) {
   if (!cardNode) return;
 
-  const normalizedScope = normalizeScope(scope);
   if (!runtimeStatus || !runtimeStatus.hasKey) {
     cardNode.innerHTML = `
-      <p class="empty">Kein Schlüssel im Scope <strong>${escapeHtml(formatScopeLabel(normalizedScope))}</strong> gefunden.</p>
-      <p class="hint">Scope: <code>${escapeHtml(normalizedScope)}</code></p>
+      <p class="empty">Kein lokaler Nostr-Schlüssel eingerichtet.</p>
+      <p class="hint">Importiere einen nsec oder richte zuerst einen Schlüssel ein.</p>
     `;
     return;
   }
@@ -621,43 +602,44 @@ function renderSignerCard(cardNode, runtimeStatus, scope) {
   const npub = String(runtimeStatus.npub || '').trim();
   const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
   const mode = formatProtectionMode(runtimeStatus.protectionMode);
-  const lockState = locked ? 'gesperrt für sensible Aktionen' : 'entsperrt';
+  const lockState = locked ? 'nicht aktiv' : 'aktiv';
   const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
 
   cardNode.innerHTML = `
-    <div class="wp-user-meta"><strong>Scope:</strong> ${escapeHtml(formatScopeLabel(normalizedScope))}</div>
-    <div class="wp-user-meta"><strong>Technisch:</strong> <code>${escapeHtml(normalizedScope)}</code></div>
-    <div class="wp-user-meta"><strong>Schutz:</strong> ${escapeHtml(mode)}</div>
-    <div class="wp-user-meta"><strong>Status:</strong> ${escapeHtml(lockState)}</div>
+    <div class="wp-user-meta"><strong>Schutzart:</strong> ${escapeHtml(mode)}</div>
+    <div class="wp-user-meta"><strong>Login für sensible Aktionen:</strong> ${escapeHtml(lockState)}</div>
     <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfügbar')}</div>
     <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfügbar')}</div>
     <div class="signer-badges">
       <span class="badge">Public Key ist immer sichtbar</span>
-      <span class="badge warn">Unlock nur für Signatur/nsec-Zugriff</span>
+      <span class="badge warn">Login nur für Signieren und Schlüsseländerungen</span>
     </div>
     ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil öffnen (njump)</a></div>` : ''}
   `;
 }
 
-function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
+function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus) {
   if (!cardNode) return;
 
-  if (!viewer?.isLoggedIn) {
-    cardNode.innerHTML = '<p class="empty">Kein eingeloggter WordPress-User erkannt.</p>';
+  if (!hasProfileContext(viewer)) {
+    cardNode.innerHTML = '<p class="empty">Kein Profilkontext verfügbar.</p>';
     if (hintNode) {
-      hintNode.textContent = 'Profil-Publish ist nur verfügbar, wenn ein eingeloggter WP-Tab aktiv ist.';
+      hintNode.textContent = 'Öffne eine WordPress-Seite mit WP-Nostr, damit Profildaten geladen werden.';
     }
     return;
   }
 
   const avatarUrl = String(viewer.avatarUrl || '').trim();
-  const displayName = String(viewer.displayName || `User #${viewer.userId || ''}`).trim();
+  const displayName = String(viewer.displayName || viewer.userLogin || `User #${viewer.userId || ''}`).trim();
   const userLogin = String(viewer.userLogin || '').trim();
   const pubkeyHex = String(runtimeStatus?.pubkeyHex || '').trim();
   const npub = String(runtimeStatus?.npub || '').trim();
-  const scopeLabel = formatScopeLabel(scope);
   const nip05 = String(viewer.profileNip05 || '').trim();
   const relays = parseRelayList(viewer.profileRelayUrl);
+  const missingFields = getMissingProfileFields(viewer);
+  const fromCacheText = viewer?.isCached
+    ? '<div class="wp-user-meta"><strong>Quelle:</strong> Extension-Speicher (zuletzt geladenes WP-Profil)</div>'
+    : '';
 
   cardNode.innerHTML = `
     <div class="profile-main">
@@ -667,7 +649,7 @@ function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
       <div>
         <div class="wp-user-name">${escapeHtml(displayName || '-')}</div>
         <div class="wp-user-meta"><strong>Login:</strong> ${escapeHtml(userLogin || '-')}</div>
-        <div class="wp-user-meta"><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</div>
+        <div class="wp-user-meta"><strong>Status:</strong> ${missingFields.length ? 'Profil unvollständig' : 'Profil vollständig'}</div>
       </div>
     </div>
     <div class="profile-copy-grid">
@@ -676,17 +658,58 @@ function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus, scope) {
     </div>
     <div class="wp-user-meta"><strong>NIP-05:</strong> ${escapeHtml(nip05 || '(nicht gesetzt)')}</div>
     <div class="wp-user-meta"><strong>Relay(s):</strong> ${escapeHtml(relays.length ? relays.join(', ') : '(kein Profil-Relay konfiguriert)')}</div>
+    ${fromCacheText}
+    ${missingFields.length
+      ? `<div class="wp-user-meta"><strong>Fehlende Angaben:</strong> ${escapeHtml(missingFields.join(', '))}</div>`
+      : '<div class="wp-user-meta"><strong>Fehlende Angaben:</strong> keine</div>'}
   `;
 
   if (!hintNode) return;
-  const nip05Warning = buildNip05PrimaryDomainHint(viewer);
-  if (nip05Warning) {
-    hintNode.textContent = nip05Warning;
-  } else if (!nip05) {
-    hintNode.textContent = 'NIP-05 ist optional. Empfohlen ist ein Identifier auf der Primary Domain.';
-  } else {
-    hintNode.textContent = 'Profildaten können mit "Profil an Nostr senden" als kind:0 Event veröffentlicht werden.';
+  hintNode.textContent = viewer?.isCached
+    ? 'Profil stammt aus dem Extension-Speicher. Für aktuelle WP-Daten kurz auf einer WP-Seite neu laden.'
+    : 'Per Klick auf "Profil an Nostr senden" werden Anzeigename, Avatar und NIP-05 als kind:0 Event veröffentlicht.';
+}
+
+function renderInstanceCard(cardNode, viewer) {
+  if (!cardNode) return;
+
+  const activeOrigin = String(viewer?.activeSiteOrigin || '').trim();
+  const profileOrigin = String(viewer?.origin || '').trim();
+  const primaryDomain = String(viewer?.primaryDomain || '').trim();
+
+  if (!activeOrigin && !profileOrigin && !primaryDomain) {
+    cardNode.innerHTML = '<p class="empty">Keine Instanz-Informationen verfügbar.</p>';
+    return;
   }
+  const activeHost = extractHost(activeOrigin);
+  const primaryHost = extractHost(primaryDomain);
+  let statusText = 'Primary Domain nicht gesetzt';
+  if (primaryHost && !activeHost) {
+    statusText = 'Primary Domain gespeichert';
+  } else if (primaryHost) {
+    statusText = activeHost === primaryHost
+      ? 'Aktive Website entspricht der Primary Domain'
+      : 'Aktive Website weicht von der Primary Domain ab';
+  }
+
+  cardNode.innerHTML = `
+    <div class="wp-user-meta"><strong>Aktive Website:</strong> ${escapeHtml(activeOrigin || '(kein WP-Tab aktiv)')}</div>
+    <div class="wp-user-meta"><strong>Zuletzt geladen aus:</strong> ${escapeHtml(profileOrigin || '(nicht verfügbar)')}</div>
+    <div class="wp-user-meta"><strong>Primary Domain:</strong> ${escapeHtml(primaryDomain || '(nicht gesetzt)')}</div>
+    <div class="wp-user-meta"><strong>Status:</strong> ${escapeHtml(statusText)}</div>
+  `;
+}
+
+function getMissingProfileFields(viewer) {
+  const missing = [];
+  const displayName = String(viewer?.displayName || '').trim();
+  const avatarUrl = String(viewer?.avatarUrl || '').trim();
+  const nip05 = String(viewer?.profileNip05 || '').trim();
+
+  if (!displayName) missing.push('Anzeigename');
+  if (!avatarUrl) missing.push('Avatar');
+  if (!nip05) missing.push('NIP-05 (empfohlen)');
+  return missing;
 }
 
 function renderCopyLine(label, value) {
@@ -750,28 +773,6 @@ function normalizeRelayUrl(input) {
   }
 }
 
-function buildNip05PrimaryDomainHint(viewer) {
-  const nip05 = String(viewer?.profileNip05 || '').trim();
-  if (!nip05) return '';
-
-  const nip05Domain = extractNip05Domain(nip05);
-  if (!nip05Domain) return 'NIP-05-Format ungültig. Erwartet wird z. B. name@example.com.';
-
-  const primaryHost = extractHost(viewer?.primaryDomain || viewer?.origin || '');
-  if (!primaryHost) return '';
-  if (nip05Domain === primaryHost) return '';
-
-  return `NIP-05 nutzt aktuell ${nip05Domain}. Empfohlen ist die Primary Domain ${primaryHost}.`;
-}
-
-function extractNip05Domain(nip05) {
-  const value = String(nip05 || '').trim().toLowerCase();
-  if (!value.includes('@')) return null;
-  const parts = value.split('@');
-  const domain = String(parts[parts.length - 1] || '').trim();
-  if (!domain || /\s/.test(domain)) return null;
-  return domain;
-}
 
 function extractHost(input) {
   const value = String(input || '').trim();
@@ -790,17 +791,6 @@ function normalizeScope(scope) {
   return value;
 }
 
-function formatScopeLabel(scope) {
-  const value = normalizeScope(scope);
-  if (value === 'global') return 'Global';
-
-  const wpMatch = value.match(/^wp:([^:]+):u:(\d+)$/);
-  if (wpMatch) {
-    return `WP ${wpMatch[1]} / User ${wpMatch[2]}`;
-  }
-  return value;
-}
-
 function formatProtectionMode(mode) {
   switch (String(mode || '')) {
     case 'passkey': return 'Passkey';
@@ -810,7 +800,26 @@ function formatProtectionMode(mode) {
   }
 }
 
-async function refreshUnlockState(unlockCacheSelect, unlockCacheHint, scope) {
+function setUnlockStateBadge(unlockCacheState, runtimeStatus) {
+  if (!unlockCacheState) return;
+  const isActive = Boolean(runtimeStatus?.hasKey) && !Boolean(runtimeStatus?.locked);
+  unlockCacheState.textContent = isActive ? 'aktiv' : 'inaktiv';
+  unlockCacheState.classList.toggle('state-active', isActive);
+  unlockCacheState.classList.toggle('state-inactive', !isActive);
+}
+
+async function ensureFixedUnlockPolicy(scope) {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'NOSTR_SET_UNLOCK_CACHE_POLICY',
+      payload: { policy: '15m', scope }
+    });
+  } catch {
+    // Nicht blockierend: UI soll auch ohne Policy-Write nutzbar bleiben.
+  }
+}
+
+async function refreshUnlockState(unlockCacheState, unlockCacheHint, scope) {
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'NOSTR_GET_STATUS',
@@ -819,31 +828,55 @@ async function refreshUnlockState(unlockCacheSelect, unlockCacheHint, scope) {
     const runtimeStatus = response?.result;
     if (response?.error) throw new Error(response.error);
 
-    const policy = normalizeUnlockPolicy(runtimeStatus?.unlockCachePolicy);
-    unlockCacheSelect.value = policy;
+    setUnlockStateBadge(unlockCacheState, runtimeStatus);
     unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
   } catch {
-    unlockCacheSelect.value = '15m';
-    unlockCacheHint.textContent = 'Unlock-Status konnte nicht geladen werden.';
+    setUnlockStateBadge(unlockCacheState, null);
+    unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
   }
 }
 
 async function loadViewerContext(cardNode, statusNode) {
+  const cachedViewer = await loadViewerCache();
   const tabContext = await getActiveTabContext();
   const origin = tabContext?.origin || null;
   if (!origin) {
     renderViewerCard(cardNode, null, null);
-    return { isLoggedIn: false, scope: 'global', origin: null, wpApi: null, authBroker: null };
+    if (cachedViewer) {
+      return {
+        ...cachedViewer,
+        isLoggedIn: false,
+        isCached: true,
+        source: 'cache',
+        activeSiteOrigin: null,
+        wpApi: null,
+        authBroker: null
+      };
+    }
+    return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: null, wpApi: null, authBroker: null };
   }
 
   const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
   if (viewerFromTab?.pending) {
     renderViewerCard(cardNode, { pending: true }, origin);
+    if (cachedViewer) {
+      return {
+        ...cachedViewer,
+        isLoggedIn: false,
+        pending: true,
+        isCached: true,
+        source: 'cache',
+        activeSiteOrigin: origin,
+        wpApi: sanitizeWpApi(viewerFromTab.wpApi),
+        authBroker: sanitizeAuthBroker(viewerFromTab.authBroker)
+      };
+    }
     return {
       isLoggedIn: false,
       pending: true,
       scope: 'global',
       origin,
+      activeSiteOrigin: origin,
       wpApi: sanitizeWpApi(viewerFromTab.wpApi),
       authBroker: sanitizeAuthBroker(viewerFromTab.authBroker)
     };
@@ -853,15 +886,18 @@ async function loadViewerContext(cardNode, statusNode) {
     if (viewerFromTab.source) viewer.source = viewerFromTab.source;
     const scope = viewer?.isLoggedIn && viewer?.userId
       ? buildWpScope(origin, viewer.userId)
-      : 'global';
+      : (cachedViewer?.scope || 'global');
     renderViewerCard(cardNode, viewer, origin);
-    return {
+    const context = {
       ...viewer,
       scope,
       origin,
+      activeSiteOrigin: origin,
       wpApi: sanitizeWpApi(viewerFromTab.wpApi),
       authBroker: sanitizeAuthBroker(viewerFromTab.authBroker || viewer.authBroker)
     };
+    await persistViewerCache(context);
+    return context;
   }
 
   try {
@@ -869,15 +905,18 @@ async function loadViewerContext(cardNode, statusNode) {
     viewer.source = 'rest';
     const scope = viewer?.isLoggedIn && viewer?.userId
       ? buildWpScope(origin, viewer.userId)
-      : 'global';
+      : (cachedViewer?.scope || 'global');
     renderViewerCard(cardNode, viewer, origin);
-    return {
+    const context = {
       ...viewer,
       scope,
       origin,
+      activeSiteOrigin: origin,
       wpApi: null,
       authBroker: sanitizeAuthBroker(viewer.authBroker)
     };
+    await persistViewerCache(context);
+    return context;
   } catch (error) {
     const errorText = String(error?.message || error || '');
     const likelyNoWpEndpoint =
@@ -888,14 +927,36 @@ async function loadViewerContext(cardNode, statusNode) {
 
     if (likelyNoWpEndpoint) {
       renderViewerCard(cardNode, null, origin);
-      return { isLoggedIn: false, scope: 'global', origin, wpApi: null, authBroker: null };
+      if (cachedViewer) {
+        return {
+          ...cachedViewer,
+          isLoggedIn: false,
+          isCached: true,
+          source: 'cache',
+          activeSiteOrigin: origin,
+          wpApi: null,
+          authBroker: null
+        };
+      }
+      return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null };
     }
 
     renderViewerCard(cardNode, null, origin, error);
     if (statusNode) {
       statusNode.textContent = `WP-Viewer konnte nicht geladen werden: ${error.message || error}`;
     }
-    return { isLoggedIn: false, scope: 'global', origin, wpApi: null, authBroker: null };
+    if (cachedViewer) {
+      return {
+        ...cachedViewer,
+        isLoggedIn: false,
+        isCached: true,
+        source: 'cache',
+        activeSiteOrigin: origin,
+        wpApi: null,
+        authBroker: null
+      };
+    }
+    return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null };
   }
 }
 
@@ -1000,7 +1061,7 @@ function renderViewerCard(cardNode, viewer, origin, error = null) {
     const loggedOutText = viewer?.source === 'rest'
       ? `Tab-Kontext nicht verfügbar. REST meldet auf ${escapeHtml(origin || '-')} aktuell keinen WP-Login.`
       : (origin
-          ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-User eingeloggt.`
+          ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-Benutzer eingeloggt.`
           : 'Kein aktiver WordPress-Tab erkannt.');
     cardNode.innerHTML = `
       <p class="empty">
@@ -1045,31 +1106,13 @@ function buildWpScope(origin, userId) {
   }
 }
 
-function normalizeUnlockPolicy(value) {
-  const normalized = String(value || '').trim().toLowerCase();
-  const allowed = new Set(['off', '5m', '15m', '30m', '60m', 'session']);
-  if (allowed.has(normalized)) return normalized;
-  return '15m';
-}
-
 function formatUnlockCacheHint(runtimeStatus) {
-  const policy = normalizeUnlockPolicy(runtimeStatus?.unlockCachePolicy);
   const hasKey = Boolean(runtimeStatus?.hasKey);
   const locked = Boolean(runtimeStatus?.locked);
   const expiresAt = runtimeStatus?.cacheExpiresAt;
 
   if (!hasKey) {
-    return `Aktuelle Einstellung: ${formatUnlockPolicyLabel(policy)}. Ein Schlüssel ist noch nicht eingerichtet.`;
-  }
-
-  if (policy === 'off') {
-    return 'Unlock-Cache ist aus. Bei jeder sensiblen Aktion wird erneut nach Passwort/Passkey gefragt.';
-  }
-
-  if (policy === 'session') {
-    return locked
-      ? 'Cache bis Browser-Ende aktiv, aktuell gesperrt.'
-      : 'Entsperrt bis zum Ende der Browser-Session (oder bis Lock).';
+    return 'Noch kein lokaler Nostr-Schlüssel eingerichtet.';
   }
 
   const expiryText = (typeof expiresAt === 'number')
@@ -1077,26 +1120,14 @@ function formatUnlockCacheHint(runtimeStatus) {
     : null;
 
   if (locked) {
-    return `Aktuelle Einstellung: ${formatUnlockPolicyLabel(policy)}. Aktuell gesperrt.`;
+    return 'ReLogin ist derzeit nicht aktiv.';
   }
 
   if (expiryText) {
-    return `Entsperrt bis ca. ${expiryText} (${formatUnlockPolicyLabel(policy)}).`;
+    return `ReLogin ist aktiv bis ca. ${expiryText}.`;
   }
 
-  return `Aktuelle Einstellung: ${formatUnlockPolicyLabel(policy)}.`;
-}
-
-function formatUnlockPolicyLabel(policy) {
-  switch (policy) {
-    case 'off': return 'nie';
-    case '5m': return '5 Minuten';
-    case '15m': return '15 Minuten';
-    case '30m': return '30 Minuten';
-    case '60m': return '60 Minuten';
-    case 'session': return 'bis Browser-Ende';
-    default: return '15 Minuten';
-  }
+  return 'ReLogin ist aktiv.';
 }
 
 function formatShortHex(hex) {

@@ -1,5 +1,6 @@
 const LOCK_SETTING_KEY = 'preferWpNostrLock';
 const LOCK_DEFAULT = true;
+const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
 
 if (document.documentElement) {
   // Marker for pages that want to detect whether this extension bridge is active.
@@ -7,6 +8,7 @@ if (document.documentElement) {
 }
 
 injectInpageScript();
+primeViewerProfileCache();
 
 async function injectInpageScript() {
   let preferLock = LOCK_DEFAULT;
@@ -125,6 +127,48 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
     wpApi: snapshot.wpApi,
     authBroker: snapshot.authBroker
   };
+}
+
+async function primeViewerProfileCache() {
+  try {
+    const start = Date.now();
+    let snapshot = readViewerFromDom();
+    while (!snapshot.configReady && (Date.now() - start) < 2200) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      snapshot = readViewerFromDom();
+    }
+    if (!snapshot.configReady) return;
+
+    const origin = window.location.origin;
+    const host = window.location.host.toLowerCase();
+    const userId = Number(snapshot.userId) || null;
+    const scope = userId && host ? `wp:${host}:u:${userId}` : 'global';
+    const entry = {
+      userId,
+      displayName: snapshot.displayName || null,
+      avatarUrl: snapshot.avatarUrl || null,
+      pubkey: snapshot.pubkey || null,
+      userLogin: snapshot.userLogin || null,
+      profileRelayUrl: snapshot.profileRelayUrl || null,
+      profileNip05: snapshot.profileNip05 || null,
+      primaryDomain: snapshot.primaryDomain || null,
+      origin,
+      scope,
+      updatedAt: Date.now()
+    };
+
+    const hasUsefulData =
+      !!entry.primaryDomain ||
+      !!entry.userId ||
+      !!entry.displayName ||
+      !!entry.userLogin ||
+      !!entry.avatarUrl;
+    if (!hasUsefulData) return;
+
+    await chrome.storage.local.set({ [VIEWER_CACHE_KEY]: entry });
+  } catch {
+    // Optionaler Cache; Fehler sollen den Content-Flow nicht blockieren.
+  }
 }
 
 function readViewerFromDom() {

@@ -205,7 +205,8 @@ h1 {
 
 .unlock-section,
 .backup-section,
-.sync-section {
+.sync-section,
+.instance-section {
   margin-top: 12px;
   border-top: 1px solid var(--border);
   padding-top: 12px;
@@ -216,6 +217,39 @@ h1 {
   margin-top: 8px;
   font-size: 12px;
   font-weight: 600;
+}
+
+.relogin-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.relogin-duration {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.state-pill {
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 3px 9px;
+}
+
+.state-active {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 46%, var(--border));
+  background: color-mix(in srgb, var(--success) 16%, var(--surface));
+}
+
+.state-inactive {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 76%, var(--border));
 }
 
 select,
@@ -269,6 +303,36 @@ code {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.backup-actions .btn-secondary,
+.backup-actions .btn-danger {
+  flex: 1;
+  min-width: 120px;
+}
+
+.key-row {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.key-row-export {
+  grid-template-columns: auto 1fr auto;
+}
+
+.key-row-import,
+.key-row-create {
+  grid-template-columns: 1fr auto;
+}
+
+.compact-hint {
+  margin: 0;
+}
+
+.backup-output {
+  margin: 0;
 }
 
 .cloud-backup {

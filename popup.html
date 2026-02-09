@@ -10,32 +10,16 @@
   <main class="popup">
     <h1>WP Nostr Signer</h1>
 
-    <section class="wp-user-section">
-      <div class="section-head">
-        <h2>Aktiver WP-Benutzer</h2>
-        <button id="refresh-user" class="btn-secondary" type="button">Neu laden</button>
-      </div>
-      <div id="wp-user-card" class="wp-user-card">
-        <p class="empty">Kein aktiver WordPress-Tab erkannt.</p>
-      </div>
-    </section>
-
-    <section class="signer-section">
-      <div class="section-head">
-        <h2>Aktive Signer-Identität</h2>
-      </div>
-      <div id="signer-card" class="wp-user-card">
-        <p class="empty">Signer-Status wird geladen...</p>
-      </div>
-    </section>
-
     <section class="profile-section">
       <div class="section-head">
         <h2>Öffentliches Nostr-Profil</h2>
-        <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
+        <button id="refresh-user" class="btn-secondary" type="button">Neu laden</button>
       </div>
       <div id="profile-card" class="wp-user-card">
         <p class="empty">Profil wird geladen...</p>
+      </div>
+      <div class="section-head">
+        <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
       </div>
       <p id="profile-hint" class="hint"></p>
     </section>
@@ -54,58 +38,57 @@
 
     <section class="unlock-section">
       <div class="section-head">
-        <h2>Unlock Cache</h2>
+        <h2>ReLogin für sensible Aktionen</h2>
       </div>
-      <label class="field-label" for="unlock-cache-policy">Entsperrt bleiben</label>
-      <select id="unlock-cache-policy">
-        <option value="off">Nie (immer nach Passwort fragen)</option>
-        <option value="5m">5 Minuten</option>
-        <option value="15m">15 Minuten</option>
-        <option value="30m">30 Minuten</option>
-        <option value="60m">60 Minuten</option>
-        <option value="session">Bis Browser-Ende (Session)</option>
-      </select>
+      <div class="relogin-row">
+        <span class="relogin-duration">15 Minuten</span>
+        <span id="unlock-cache-state" class="state-pill state-inactive">inaktiv</span>
+      </div>
       <p id="unlock-cache-hint" class="hint"></p>
-      <p class="hint">Sperrung gilt für sensible Aktionen: Signieren, Export/Import und Cloud-Backup/Restore von nsec.</p>
+      <p class="hint">Gilt für Signieren sowie Schlüssel sichern/wiederherstellen.</p>
     </section>
 
     <section class="backup-section">
       <div class="section-head">
-        <h2>Backup / Restore</h2>
+        <h2>Nostr-Schlüssel</h2>
       </div>
-      <div class="backup-actions">
-        <button id="export-key" class="btn-secondary" type="button">Schlüssel exportieren</button>
+
+      <div class="key-row key-row-export">
+        <button id="export-key" class="btn-secondary" type="button">Exportieren</button>
+        <input id="backup-output" class="backup-output" type="text" readonly placeholder="nsec1... (Export)" />
+        <button id="backup-output-copy" class="btn-copy" type="button">Kopieren</button>
       </div>
-      <textarea id="backup-output" class="backup-output" rows="3" readonly placeholder="Exportierter nsec erscheint hier."></textarea>
-      <input id="import-nsec" type="text" placeholder="nsec1... (aus Backup importieren)" />
-      <button id="import-key" class="btn-secondary" type="button">Schlüssel importieren</button>
-      <p class="hint">Der Import überschreibt den Schlüssel für den aktiven WP-Benutzer-Scope.</p>
+
+      <div class="key-row key-row-import">
+        <input id="import-nsec" type="text" placeholder="nsec1... (Import)" />
+        <button id="import-key" class="btn-secondary" type="button">Importieren</button>
+      </div>
+
+      <div class="key-row key-row-create">
+        <p class="hint warn compact-hint">Neue Schlüssel (Warnung: Identitätsverlust)</p>
+        <button id="create-key" class="btn-danger" type="button">Erstellen</button>
+      </div>
 
       <div class="cloud-backup">
         <div class="section-head">
-          <h2>WP Cloud Backup</h2>
+          <h2>Schlüsselkopie in WordPress</h2>
         </div>
-        <p id="cloud-backup-meta" class="hint">Cloud-Status wird geladen...</p>
+        <p id="cloud-backup-meta" class="hint">Status wird geladen...</p>
         <div class="backup-actions">
-          <button id="backup-enable-cloud" class="btn-secondary" type="button">Backup jetzt speichern</button>
-          <button id="backup-restore-cloud" class="btn-secondary" type="button">Aus Cloud wiederherstellen</button>
-          <button id="backup-delete-cloud" class="btn-danger" type="button">Cloud-Backup löschen</button>
+          <button id="backup-enable-cloud" class="btn-secondary" type="button">Speichern/Ersetzen</button>
+          <button id="backup-restore-cloud" class="btn-secondary" type="button">Wiederherstellen</button>
+          <button id="backup-delete-cloud" class="btn-danger" type="button">Löschen</button>
         </div>
       </div>
     </section>
 
-    <section class="sync-section">
+    <section class="instance-section">
       <div class="section-head">
-        <h2>Domain Sync</h2>
-        <button id="sync-now" class="btn-secondary" type="button">Jetzt syncen</button>
+        <h2>Mitglieder-Instanz</h2>
       </div>
-      <div class="manual-config">
-        <input id="manual-primary-domain" type="text" placeholder="Primary Domain (z. B. http://forums.test)" />
-        <input id="manual-domain-secret" type="password" placeholder="Domain Secret" />
-        <button id="manual-add" class="btn-secondary" type="button">Hinzufügen / Aktualisieren</button>
+      <div id="instance-card" class="wp-user-card">
+        <p class="empty">Instanz-Informationen werden geladen...</p>
       </div>
-      <p id="sync-meta" class="hint"></p>
-      <div id="sync-list" class="sync-list"></div>
     </section>
 
     <p id="status" class="status"></p>

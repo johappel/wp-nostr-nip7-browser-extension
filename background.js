@@ -724,6 +724,7 @@ async function handleMessage(request, sender) {
     'NOSTR_BACKUP_RESTORE',
     'NOSTR_BACKUP_DELETE',
     'NOSTR_EXPORT_NSEC',
+    'NOSTR_CREATE_NEW_KEY',
     'NOSTR_IMPORT_NSEC',
     'NOSTR_PUBLISH_PROFILE',
     'NOSTR_GET_PUBLIC_KEY',
@@ -1056,6 +1057,24 @@ async function handleMessage(request, sender) {
       const npub = nip19.npubEncode(pubkey);
       const nsec = nip19.nsecEncode(secretKey);
       return { pubkey, npub, nsec };
+    } finally {
+      secretKey.fill(0);
+    }
+  }
+
+  if (request.type === 'NOSTR_CREATE_NEW_KEY') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Key creation is only allowed from extension UI');
+    }
+    const secretKey = generateSecretKey();
+    try {
+      const result = await configureProtectionAndStoreSecretKey(secretKey);
+      return {
+        success: true,
+        pubkey: result.pubkey,
+        npub: result.npub,
+        protectionMode: result.protectionMode
+      };
     } finally {
       secretKey.fill(0);
     }
