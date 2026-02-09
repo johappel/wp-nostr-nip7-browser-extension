@@ -61,29 +61,47 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return;
   }
 
-  const root = document.documentElement;
-  const configReady = root?.getAttribute('data-wp-nostr-config-ready') === '1';
-  if (!configReady) {
-    sendResponse({ viewer: null });
-    return;
+  resolvePageViewerContext()
+    .then((result) => sendResponse(result))
+    .catch(() => sendResponse({ viewer: null, pending: true }));
+  return true;
+});
+
+async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
+  const start = Date.now();
+  let snapshot = readViewerFromDom();
+
+  while (!snapshot.configReady && (Date.now() - start) < maxWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+    snapshot = readViewerFromDom();
   }
 
+  if (!snapshot.configReady) {
+    return { viewer: null, pending: true };
+  }
+
+  return {
+    viewer: {
+      isLoggedIn: snapshot.userId !== null,
+      userId: snapshot.userId,
+      displayName: snapshot.displayName,
+      avatarUrl: snapshot.avatarUrl,
+      pubkey: snapshot.pubkey
+    },
+    pending: false
+  };
+}
+
+function readViewerFromDom() {
+  const root = document.documentElement;
+  const configReady = root?.getAttribute('data-wp-nostr-config-ready') === '1';
   const rawUserId = Number(root?.getAttribute('data-wp-nostr-user-id') || 0);
   const userId = Number.isInteger(rawUserId) && rawUserId > 0 ? rawUserId : null;
   const displayName = String(root?.getAttribute('data-wp-nostr-display-name') || '').trim() || null;
   const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
   const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
-
-  sendResponse({
-    viewer: {
-      isLoggedIn: userId !== null,
-      userId,
-      displayName,
-      avatarUrl,
-      pubkey
-    }
-  });
-});
+  return { configReady, userId, displayName, avatarUrl, pubkey };
+}
 
 async function sendMessageWithRetry(message) {
   try {

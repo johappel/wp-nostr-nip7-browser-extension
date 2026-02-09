@@ -329,6 +329,21 @@ class NostrWPIntegration {
   }
 
   async getPublicKey() {
+    // Prefer our managed signer API if it is active.
+    if (this.isManagedNostrApiAvailable()) {
+      return await window.nostr.getPublicKey();
+    }
+
+    // If bridge is available, force bridge path to avoid taking keys from third-party signers.
+    if (this.isBridgeAvailable()) {
+      const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', null, 30000);
+      if (typeof pubkey !== 'string' || pubkey.length < 10) {
+        throw new Error('Extension returned invalid public key');
+      }
+      return pubkey;
+    }
+
+    // Fallback only when no bridge exists.
     if (this.isNostrApiAvailable()) {
       return await window.nostr.getPublicKey();
     }
@@ -337,11 +352,7 @@ class NostrWPIntegration {
       throw new Error('Nostr extension bridge is not available');
     }
 
-    const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', null, 30000);
-    if (typeof pubkey !== 'string' || pubkey.length < 10) {
-      throw new Error('Extension returned invalid public key');
-    }
-    return pubkey;
+    throw new Error('No compatible Nostr signer available');
   }
 
   delay(ms) {
@@ -465,13 +476,18 @@ class NostrWPIntegration {
         body: JSON.stringify({ pubkey: hexPubkey })
       });
 
-      const result = await response.json();
+      let result = {};
+      try {
+        result = await response.json();
+      } catch {
+        result = {};
+      }
 
       if (response.ok && result.success) {
         this.showRegistrationSuccess();
         document.getElementById('nostr-register-container')?.remove();
       } else {
-        throw new Error(result.message || 'Registrierung fehlgeschlagen');
+        throw new Error(this.formatRegistrationError(response, result, hexPubkey));
       }
     } catch (error) {
       console.error('[Nostr] Registration failed:', error);
@@ -479,6 +495,45 @@ class NostrWPIntegration {
       btn.disabled = false;
       btn.textContent = 'Mit Nostr verknuepfen';
     }
+  }
+
+  formatRegistrationError(response, result, attemptedPubkey) {
+    const status = Number(response?.status || 0);
+    const code = String(result?.code || '').trim();
+    const message = String(result?.message || '').trim();
+    const shortKey = this.formatShortPubkey(attemptedPubkey);
+
+    if (status === 409 && code === 'pubkey_in_use') {
+      return [
+        'Dieser Pubkey ist bereits einem anderen Account zugeordnet.',
+        `Verwendeter Signer-Pubkey: ${shortKey}`,
+        'Bitte den richtigen Schluessel fuer diesen WP-User in der Extension waehlen oder importieren.'
+      ].join('\n');
+    }
+
+    if (status === 409 && code === 'pubkey_already_registered') {
+      const currentPubkey = String(result?.data?.currentPubkey || '').trim();
+      const currentInfo = currentPubkey
+        ? `Aktuell registriert: ${this.formatShortPubkey(currentPubkey)}`
+        : 'Fuer diesen Account ist bereits ein anderer Pubkey registriert.';
+      return [
+        currentInfo,
+        `Vom Signer geliefert: ${shortKey}`,
+        'Bitte bewusst Key-Rotation durchfuehren statt still zu ueberschreiben.'
+      ].join('\n');
+    }
+
+    if (status === 401 || status === 403) {
+      return 'WordPress-Session ist nicht mehr gueltig. Bitte Seite neu laden und erneut anmelden.';
+    }
+
+    return message || `Registrierung fehlgeschlagen (HTTP ${status || 'unknown'}).`;
+  }
+
+  formatShortPubkey(pubkey) {
+    const value = String(pubkey || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(value)) return value || '(unbekannt)';
+    return `${value.slice(0, 12)}...${value.slice(-8)}`;
   }
 
   async verifyExistingUser(expectedPubkey) {
@@ -546,7 +601,10 @@ class NostrWPIntegration {
   showError(message) {
     const error = document.createElement('div');
     error.className = 'nostr-error';
-    error.innerHTML = `<p>Fehler: ${message}</p>`;
+    const paragraph = document.createElement('p');
+    paragraph.textContent = `Fehler: ${String(message || 'Unbekannter Fehler')}`;
+    paragraph.style.whiteSpace = 'pre-line';
+    error.appendChild(paragraph);
 
     const container = document.getElementById('nostr-register-container');
     if (container) {

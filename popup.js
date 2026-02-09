@@ -48,9 +48,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const viewer = await loadViewerContext(wpUserCard, status);
       activeScope = viewer?.scope || 'global';
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
-      status.textContent = viewer?.isLoggedIn
-        ? 'WordPress-User aktualisiert.'
-        : 'Kein eingeloggter WordPress-User auf aktivem Tab.';
+      if (viewer?.pending) {
+        status.textContent = 'WP-User-Kontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
+      } else {
+        status.textContent = viewer?.isLoggedIn
+          ? 'WordPress-User aktualisiert.'
+          : 'Kein eingeloggter WordPress-User auf aktivem Tab.';
+      }
     } catch (e) {
       status.textContent = `WP-User konnte nicht geladen werden: ${e.message || e}`;
     } finally {
@@ -235,16 +239,22 @@ async function loadViewerContext(cardNode, statusNode) {
   }
 
   const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
-  if (viewerFromTab) {
-    const scope = viewerFromTab?.isLoggedIn && viewerFromTab?.userId
-      ? buildWpScope(origin, viewerFromTab.userId)
+  if (viewerFromTab?.pending) {
+    renderViewerCard(cardNode, { pending: true }, origin);
+    return { isLoggedIn: false, pending: true, scope: 'global', origin };
+  }
+  if (viewerFromTab?.viewer) {
+    const viewer = viewerFromTab.viewer;
+    const scope = viewer?.isLoggedIn && viewer?.userId
+      ? buildWpScope(origin, viewer.userId)
       : 'global';
-    renderViewerCard(cardNode, viewerFromTab, origin);
-    return { ...viewerFromTab, scope, origin };
+    renderViewerCard(cardNode, viewer, origin);
+    return { ...viewer, scope, origin };
   }
 
   try {
     const viewer = await fetchWpViewer(origin);
+    viewer.source = 'rest';
     const scope = viewer?.isLoggedIn && viewer?.userId
       ? buildWpScope(origin, viewer.userId)
       : 'global';
@@ -289,14 +299,18 @@ async function getViewerFromActiveTab(tabId) {
   if (typeof tabId !== 'number') return null;
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'NOSTR_GET_PAGE_CONTEXT' });
+    if (response?.pending === true) return { pending: true };
     const viewer = response?.viewer;
     if (!viewer || typeof viewer !== 'object') return null;
     return {
-      isLoggedIn: viewer.isLoggedIn === true,
-      userId: Number(viewer.userId) || null,
-      displayName: viewer.displayName || null,
-      avatarUrl: viewer.avatarUrl || null,
-      pubkey: viewer.pubkey || null
+      pending: false,
+      viewer: {
+        isLoggedIn: viewer.isLoggedIn === true,
+        userId: Number(viewer.userId) || null,
+        displayName: viewer.displayName || null,
+        avatarUrl: viewer.avatarUrl || null,
+        pubkey: viewer.pubkey || null
+      }
     };
   } catch {
     return null;
@@ -324,12 +338,26 @@ function renderViewerCard(cardNode, viewer, origin, error = null) {
     return;
   }
 
-  if (!viewer || !viewer.isLoggedIn) {
+  if (viewer?.pending) {
     cardNode.innerHTML = `
       <p class="empty">
         ${origin
-          ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-User eingeloggt.`
+          ? `WP-Kontext auf ${escapeHtml(origin)} wird noch geladen...`
           : 'Kein aktiver WordPress-Tab erkannt.'}
+      </p>
+    `;
+    return;
+  }
+
+  if (!viewer || !viewer.isLoggedIn) {
+    const loggedOutText = viewer?.source === 'rest'
+      ? `Tab-Kontext nicht verfuegbar. REST meldet auf ${escapeHtml(origin || '-')} aktuell keinen WP-Login.`
+      : (origin
+          ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-User eingeloggt.`
+          : 'Kein aktiver WordPress-Tab erkannt.');
+    cardNode.innerHTML = `
+      <p class="empty">
+        ${loggedOutText}
       </p>
     `;
     return;
