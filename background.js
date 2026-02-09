@@ -17,6 +17,7 @@ const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
 const UNLOCK_CACHE_POLICY_DEFAULT = '15m';
 const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(['off', '5m', '15m', '30m', '60m', 'session']);
 const KEY_SCOPE_DEFAULT = 'global';
+const LAST_ACTIVE_SCOPE_KEY = 'lastActiveKeyScope';
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
@@ -256,10 +257,40 @@ async function ensureKeyScope(scope) {
   }
 
   activeKeyScope = nextScope;
+  await chrome.storage.local.set({ [LAST_ACTIVE_SCOPE_KEY]: activeKeyScope });
   keyManager.setNamespace(nextScope === KEY_SCOPE_DEFAULT ? '' : nextScope);
   await keyManager.migrateFromLegacyGlobalIfNeeded();
   await clearUnlockCaches();
   return nextScope;
+}
+
+async function listStoredKeyScopes() {
+  const all = await chrome.storage.local.get(null);
+  const scopes = new Set();
+
+  if (all[KeyManager.STORAGE_KEY] || all[KeyManager.PLAIN_KEY]) {
+    scopes.add(KEY_SCOPE_DEFAULT);
+  }
+
+  for (const key of Object.keys(all)) {
+    const match = key.match(/^(.+?)::(encrypted_nsec|plain_nsec)$/);
+    if (match && match[1]) {
+      scopes.add(normalizeKeyScope(match[1]));
+    }
+  }
+
+  return Array.from(scopes).sort((a, b) => a.localeCompare(b));
+}
+
+function resolvePreferredScope(requestedScope, scopes, lastActiveScope) {
+  const scopeSet = new Set(scopes);
+  const requested = normalizeKeyScope(requestedScope);
+  const lastActive = normalizeKeyScope(lastActiveScope);
+
+  if (scopeSet.has(requested)) return requested;
+  if (scopeSet.has(lastActive)) return lastActive;
+  if (scopeSet.has(KEY_SCOPE_DEFAULT)) return KEY_SCOPE_DEFAULT;
+  return scopes[0] || KEY_SCOPE_DEFAULT;
 }
 
 // ============================================================
@@ -350,6 +381,7 @@ async function handleMessage(request, sender) {
     const passwordProtected = protectionMode === KeyManager.MODE_PASSWORD;
     const passkeyProtected = protectionMode === KeyManager.MODE_PASSKEY;
     let npub = null;
+    let pubkeyHex = null;
     
     // Wenn entsperrt, Npub berechnen und zur????ckgeben
     const unlocked = hasKey && (
@@ -361,6 +393,7 @@ async function handleMessage(request, sender) {
     if (unlocked) {
        try {
          const pubkey = await keyManager.getPublicKey(passwordProtected ? currentCachedPassword : null);
+         pubkeyHex = pubkey;
          npub = nip19.npubEncode(pubkey);
        } catch (e) {
          await clearUnlockCaches();
@@ -373,6 +406,7 @@ async function handleMessage(request, sender) {
       passwordProtected,
       passkeyProtected,
       protectionMode,
+      pubkeyHex,
       npub,
       noPasswordMode: protectionMode === KeyManager.MODE_NONE,
       unlockCachePolicy,
@@ -381,6 +415,22 @@ async function handleMessage(request, sender) {
       cacheMode: unlockCachePolicy === 'session'
         ? 'session'
         : (unlockCachePolicy === 'off' ? 'off' : 'timed')
+    };
+  }
+
+  if (request.type === 'NOSTR_GET_KEY_SCOPE_INFO') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Key scope info is only available in extension UI');
+    }
+    const scopes = await listStoredKeyScopes();
+    const stored = await chrome.storage.local.get([LAST_ACTIVE_SCOPE_KEY]);
+    const lastActiveScope = normalizeKeyScope(stored[LAST_ACTIVE_SCOPE_KEY]);
+    const preferredScope = resolvePreferredScope(request.payload?.requestedScope, scopes, lastActiveScope);
+    return {
+      scopes,
+      preferredScope,
+      lastActiveScope,
+      activeScope: activeKeyScope
     };
   }
 

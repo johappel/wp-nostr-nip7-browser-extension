@@ -84,6 +84,9 @@ function nostr_enqueue_scripts() {
     $current_user_id = get_current_user_id();
     $current_pubkey = strtolower((string) get_user_meta($current_user_id, 'nostr_pubkey', true));
     $current_avatar = get_avatar_url($current_user_id, ['size' => 96]);
+    $profile_relay_url = trim((string) get_option('nostr_profile_relay_url', ''));
+    $publish_kind0 = get_option('nostr_publish_kind0_on_register', 1);
+    $profile_nip05 = trim((string) get_option('nostr_profile_nip05', ''));
 
     wp_localize_script('nostr-integration', 'nostrConfig', [
         'restUrl' => rest_url('nostr/v1/'),
@@ -94,8 +97,12 @@ function nostr_enqueue_scripts() {
         'wpDisplayName' => $current_user ? $current_user->display_name : '',
         'wpAvatarUrl' => $current_avatar ? $current_avatar : '',
         'wpPubkey' => $current_pubkey,
+        'wpUserLogin' => $current_user ? $current_user->user_login : '',
         'primaryDomain' => get_option('nostr_primary_domain', nostr_get_default_primary_domain()),
         'domainSecret' => nostr_get_or_create_domain_secret(),
+        'profileRelayUrl' => $profile_relay_url,
+        'publishKind0OnRegister' => !empty($publish_kind0),
+        'profileNip05' => $profile_nip05,
         // extensionStoreUrl bleibt fuer Rueckwaertskompatibilitaet erhalten.
         'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]'),
         'extensionStoreUrlChrome' => get_option(
@@ -178,7 +185,9 @@ function nostr_register_endpoints() {
 }
 
 function nostr_handle_register(WP_REST_Request $request) {
-    $pubkey = sanitize_text_field($request->get_param('pubkey'));
+    $pubkey = strtolower(sanitize_text_field($request->get_param('pubkey')));
+    $replace = nostr_sanitize_checkbox($request->get_param('replace')) === 1;
+    $expected_current = strtolower(sanitize_text_field($request->get_param('expectedCurrentPubkey')));
     $user_id = get_current_user_id();
     
     // Validiere hex Pubkey Format (64 hex chars)
@@ -191,21 +200,55 @@ function nostr_handle_register(WP_REST_Request $request) {
     }
 
     // Bestehenden Key dieses Users nicht stillschweigend ueberschreiben.
-    $current_pubkey = (string) get_user_meta($user_id, 'nostr_pubkey', true);
+    $current_pubkey = strtolower((string) get_user_meta($user_id, 'nostr_pubkey', true));
     if ($current_pubkey !== '') {
-        if (strtolower($current_pubkey) === strtolower($pubkey)) {
+        if ($current_pubkey === $pubkey) {
             return [
                 'success' => true,
-                'pubkey' => strtolower($current_pubkey),
+                'pubkey' => $current_pubkey,
                 'registered' => get_user_meta($user_id, 'nostr_registered', true),
                 'unchanged' => true
+            ];
+        }
+
+        if ($replace) {
+            if ($expected_current !== '' && $expected_current !== $current_pubkey) {
+                return new WP_Error(
+                    'pubkey_changed_concurrently',
+                    'Der aktuell registrierte Pubkey hat sich geaendert. Bitte Seite neu laden und erneut pruefen.',
+                    ['status' => 409, 'currentPubkey' => $current_pubkey]
+                );
+            }
+
+            $existing_user = get_users([
+                'meta_key' => 'nostr_pubkey',
+                'meta_value' => $pubkey,
+                'number' => 1,
+                'exclude' => [$user_id]
+            ]);
+            if (!empty($existing_user)) {
+                return new WP_Error(
+                    'pubkey_in_use',
+                    'Dieser Pubkey ist bereits einem anderen Account zugeordnet',
+                    ['status' => 409]
+                );
+            }
+
+            update_user_meta($user_id, 'nostr_pubkey', $pubkey);
+            update_user_meta($user_id, 'nostr_registered', current_time('mysql'));
+            return [
+                'success' => true,
+                'pubkey' => $pubkey,
+                'previousPubkey' => $current_pubkey,
+                'registered' => current_time('mysql'),
+                'replaced' => true
             ];
         }
 
         return new WP_Error(
             'pubkey_already_registered',
             'Fuer diesen Account ist bereits ein anderer Nostr-Pubkey registriert. Bitte zuerst bewusst wechseln (Key-Rotation), statt zu ueberschreiben.',
-            ['status' => 409, 'currentPubkey' => strtolower($current_pubkey)]
+            ['status' => 409, 'currentPubkey' => $current_pubkey]
         );
     }
     
@@ -231,7 +274,7 @@ function nostr_handle_register(WP_REST_Request $request) {
     
     return [
         'success' => true, 
-        'pubkey' => strtolower($pubkey),
+        'pubkey' => $pubkey,
         'registered' => current_time('mysql')
     ];
 }
@@ -614,6 +657,39 @@ function nostr_sanitize_primary_domain($value) {
     return untrailingslashit($value);
 }
 
+function nostr_sanitize_checkbox($value) {
+    if (is_bool($value)) {
+        return $value ? 1 : 0;
+    }
+    $value = strtolower(trim((string) $value));
+    return in_array($value, ['1', 'true', 'on', 'yes'], true) ? 1 : 0;
+}
+
+function nostr_sanitize_profile_relay_url($value) {
+    $raw = trim((string) $value);
+    if ($raw === '') {
+        return '';
+    }
+
+    $parts = preg_split('/[\r\n,\s;]+/', $raw);
+    $parts = is_array($parts) ? $parts : [];
+    $valid = [];
+
+    foreach ($parts as $entry) {
+        $entry = trim((string) $entry);
+        if ($entry === '') {
+            continue;
+        }
+        if (preg_match('/^(wss?|https?):\/\/[^\s]+$/i', $entry) !== 1) {
+            continue;
+        }
+        $valid[] = $entry;
+    }
+
+    $valid = array_values(array_unique($valid));
+    return implode("\n", $valid);
+}
+
 function nostr_admin_init() {
     register_setting('nostr_options', 'nostr_allowed_domains', [
         'type' => 'string',
@@ -638,6 +714,18 @@ function nostr_admin_init() {
     register_setting('nostr_options', 'nostr_extension_store_url_firefox', [
         'type' => 'string',
         'sanitize_callback' => 'esc_url_raw'
+    ]);
+    register_setting('nostr_options', 'nostr_profile_relay_url', [
+        'type' => 'string',
+        'sanitize_callback' => 'nostr_sanitize_profile_relay_url'
+    ]);
+    register_setting('nostr_options', 'nostr_publish_kind0_on_register', [
+        'type' => 'integer',
+        'sanitize_callback' => 'nostr_sanitize_checkbox'
+    ]);
+    register_setting('nostr_options', 'nostr_profile_nip05', [
+        'type' => 'string',
+        'sanitize_callback' => 'sanitize_text_field'
     ]);
 }
 
@@ -717,6 +805,53 @@ function nostr_settings_page() {
                                class="regular-text" />
                         <p class="description">
                             Link zum Chrome Web Store fuer den Install-Prompt in Chrome/Chromium.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="nostr_profile_relay_url">Profil-Relay (kind:0)</label>
+                    </th>
+                    <td>
+                        <input type="text"
+                               id="nostr_profile_relay_url"
+                               name="nostr_profile_relay_url"
+                               value="<?php echo esc_attr(get_option('nostr_profile_relay_url', '')); ?>"
+                               class="regular-text" />
+                        <p class="description">
+                            Optional: Relay-URL(s) fuer automatisches Profil-Publishing nach Registrierung (z.B. wss://relay.edufeed.org). Mehrere Werte per Komma oder Zeilenumbruch.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">Auto-Publish Profil-Event</th>
+                    <td>
+                        <label for="nostr_publish_kind0_on_register">
+                            <input type="checkbox"
+                                   id="nostr_publish_kind0_on_register"
+                                   name="nostr_publish_kind0_on_register"
+                                   value="1"
+                                   <?php checked((int) get_option('nostr_publish_kind0_on_register', 1), 1); ?> />
+                            Nach erfolgreicher Registrierung ein kind:0 Event senden
+                        </label>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="nostr_profile_nip05">NIP-05 Identifier (optional)</label>
+                    </th>
+                    <td>
+                        <input type="text"
+                               id="nostr_profile_nip05"
+                               name="nostr_profile_nip05"
+                               value="<?php echo esc_attr(get_option('nostr_profile_nip05', '')); ?>"
+                               class="regular-text"
+                               placeholder="z.B. joachim@edufeed.org" />
+                        <p class="description">
+                            Wird im kind:0 Profil als <code>nip05</code> gesetzt, wenn ausgefuellt.
                         </p>
                     </td>
                 </tr>

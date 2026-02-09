@@ -1,3 +1,6 @@
+(function () {
+  'use strict';
+
 function createNostrApi() {
   return {
     getPublicKey: async () => sendRequest('NOSTR_GET_PUBLIC_KEY'),
@@ -153,3 +156,5 @@ function createRequestId() {
 
   return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+})();

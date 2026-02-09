@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const status = document.getElementById('status');
   const refreshUserButton = document.getElementById('refresh-user');
   const wpUserCard = document.getElementById('wp-user-card');
+  const signerCard = document.getElementById('signer-card');
   const unlockCacheSelect = document.getElementById('unlock-cache-policy');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
@@ -33,6 +34,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const initialViewer = await loadViewerContext(wpUserCard, status);
   activeScope = initialViewer?.scope || 'global';
+  const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
+  activeScope = initialSigner?.scope || activeScope;
   await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
 
   checkbox.addEventListener('change', async () => {
@@ -51,6 +54,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const viewer = await loadViewerContext(wpUserCard, status);
       activeScope = viewer?.scope || 'global';
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
+      activeScope = signerContext?.scope || activeScope;
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       if (viewer?.pending) {
         status.textContent = 'WP-User-Kontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
@@ -135,6 +140,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       const pubkey = String(response?.result?.pubkey || '');
       importNsecInput.value = '';
       backupOutput.value = '';
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      activeScope = signerContext?.scope || activeScope;
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
       status.textContent = pubkey
         ? `Schluessel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknuepfen.`
@@ -270,6 +277,101 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = String(text || '');
   return div.innerHTML;
+}
+
+async function refreshSignerIdentity(cardNode, requestedScope, allowFallback = true) {
+  try {
+    let activeScope = normalizeScope(requestedScope);
+    let runtimeStatus = await getScopedRuntimeStatus(activeScope);
+
+    if (allowFallback && !runtimeStatus?.hasKey) {
+      const info = await chrome.runtime.sendMessage({
+        type: 'NOSTR_GET_KEY_SCOPE_INFO',
+        payload: { requestedScope: activeScope }
+      });
+      if (!info?.error) {
+        const preferredScope = normalizeScope(info?.result?.preferredScope || activeScope);
+        if (preferredScope !== activeScope) {
+          activeScope = preferredScope;
+          runtimeStatus = await getScopedRuntimeStatus(activeScope);
+        }
+      }
+    }
+
+    renderSignerCard(cardNode, runtimeStatus, activeScope);
+    return { scope: activeScope, runtimeStatus };
+  } catch (error) {
+    if (cardNode) {
+      cardNode.innerHTML = `<p class="empty">Signer-Status konnte nicht geladen werden: ${escapeHtml(error.message || String(error))}</p>`;
+    }
+    return { scope: normalizeScope(requestedScope), runtimeStatus: null };
+  }
+}
+
+async function getScopedRuntimeStatus(scope) {
+  const response = await chrome.runtime.sendMessage({
+    type: 'NOSTR_GET_STATUS',
+    payload: { scope: normalizeScope(scope) }
+  });
+  if (response?.error) throw new Error(response.error);
+  return response?.result || null;
+}
+
+function renderSignerCard(cardNode, runtimeStatus, scope) {
+  if (!cardNode) return;
+
+  const normalizedScope = normalizeScope(scope);
+  if (!runtimeStatus || !runtimeStatus.hasKey) {
+    cardNode.innerHTML = `
+      <p class="empty">Kein Schluessel im Scope <strong>${escapeHtml(formatScopeLabel(normalizedScope))}</strong> gefunden.</p>
+      <p class="hint">Scope: <code>${escapeHtml(normalizedScope)}</code></p>
+    `;
+    return;
+  }
+
+  const locked = Boolean(runtimeStatus.locked);
+  const npub = String(runtimeStatus.npub || '').trim();
+  const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
+  const mode = formatProtectionMode(runtimeStatus.protectionMode);
+  const lockState = locked ? 'gesperrt' : 'entsperrt';
+  const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
+
+  cardNode.innerHTML = `
+    <div class="wp-user-meta"><strong>Scope:</strong> ${escapeHtml(formatScopeLabel(normalizedScope))}</div>
+    <div class="wp-user-meta"><strong>Technisch:</strong> <code>${escapeHtml(normalizedScope)}</code></div>
+    <div class="wp-user-meta"><strong>Schutz:</strong> ${escapeHtml(mode)}</div>
+    <div class="wp-user-meta"><strong>Status:</strong> ${escapeHtml(lockState)}</div>
+    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'gesperrt (zum Anzeigen erst entsperren)')}</div>
+    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'gesperrt')}</div>
+    ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil oeffnen (njump)</a></div>` : ''}
+  `;
+}
+
+function normalizeScope(scope) {
+  const value = String(scope || '').trim();
+  if (!value) return 'global';
+  if (!/^[a-zA-Z0-9:._-]{1,120}$/.test(value)) return 'global';
+  return value;
+}
+
+function formatScopeLabel(scope) {
+  const value = normalizeScope(scope);
+  if (value === 'global') return 'Global';
+
+  const wpMatch = value.match(/^wp:([^:]+):u:(\d+)$/);
+  if (wpMatch) {
+    return `WP ${wpMatch[1]} / User ${wpMatch[2]}`;
+  }
+  return value;
+}
+
+function formatProtectionMode(mode) {
+  switch (String(mode || '')) {
+    case 'passkey': return 'Passkey';
+    case 'none': return 'Kein Passwort';
+    case 'password': return 'Passwort';
+    default: return 'Unbekannt';
+  }
 }
 
 async function refreshUnlockState(unlockCacheSelect, unlockCacheHint, scope) {
