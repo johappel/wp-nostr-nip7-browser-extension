@@ -42,7 +42,7 @@ class NostrWPIntegration {
   }
 
   async detectExtension() {
-    if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+    if (this.isRequiredExtensionAvailable()) {
       return true;
     }
 
@@ -56,7 +56,7 @@ class NostrWPIntegration {
       // handled by fallback checks below
     }
 
-    return this.isNostrApiAvailable() || this.isBridgeAvailable();
+    return this.isRequiredExtensionAvailable();
   }
 
   async runMainFlow() {
@@ -128,6 +128,11 @@ class NostrWPIntegration {
   }
 
   async configureDomainSync() {
+    // Domain sync is only supported with this extension's message bridge.
+    if (!this.isBridgeAvailable()) {
+      return;
+    }
+
     const primaryDomain = this.config.primaryDomain || this.config.siteDomain;
     const domainSecret = this.config.domainSecret;
 
@@ -212,6 +217,23 @@ class NostrWPIntegration {
     return Boolean(nostrApi && typeof nostrApi.getPublicKey === 'function');
   }
 
+  isManagedNostrApiAvailable() {
+    const nostrApi = window.nostr;
+    return Boolean(
+      nostrApi &&
+      typeof nostrApi.getPublicKey === 'function' &&
+      nostrApi.__wpNostrManaged === true
+    );
+  }
+
+  isRequiredExtensionAvailable() {
+    return this.isBridgeAvailable() || this.isManagedNostrApiAvailable();
+  }
+
+  hasOtherNip07Signer() {
+    return this.isNostrApiAvailable() && !this.isManagedNostrApiAvailable();
+  }
+
   isBridgeAvailable() {
     return document.documentElement?.getAttribute('data-wp-nostr-extension-bridge') === '1';
   }
@@ -230,7 +252,7 @@ class NostrWPIntegration {
   async waitForExtensionAvailability(maxWaitMs = 3000, intervalMs = 120) {
     const start = Date.now();
     while ((Date.now() - start) < maxWaitMs) {
-      if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+      if (this.isRequiredExtensionAvailable()) {
         return true;
       }
       await this.delay(intervalMs);
@@ -284,7 +306,7 @@ class NostrWPIntegration {
 
   showInstallPrompt() {
     // Last-minute guard against stale detection state.
-    if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+    if (this.isRequiredExtensionAvailable()) {
       return;
     }
 
@@ -293,14 +315,25 @@ class NostrWPIntegration {
     }
 
     const storeUrl = this.getInstallStoreUrl();
+    const hasOtherSigner = this.hasOtherNip07Signer();
+    const title = hasOtherSigner
+      ? 'wp-nostr Signer erforderlich'
+      : 'Nostr Signer erforderlich';
+    const introText = hasOtherSigner
+      ? 'Ein anderer NIP-07 Signer wurde erkannt. Fuer diese WordPress-Integration wird die wp-nostr Browser Extension benoetigt.'
+      : 'Fuer die sichere Anmeldung mit Nostr benoetigst du unsere Browser Extension.';
+    const signerHint = hasOtherSigner
+      ? '<p class="nostr-modal-hint">Hinweis: Vorhandene Signer bleiben nutzbar, aber Domain-Sync und nahtlose WP-Integration funktionieren nur mit wp-nostr.</p>'
+      : '';
 
     const modal = document.createElement('div');
     modal.id = 'nostr-install-modal';
     modal.innerHTML = `
       <div class="nostr-modal-backdrop">
         <div class="nostr-modal">
-          <h3>Nostr Signer erforderlich</h3>
-          <p>Fuer die sichere Anmeldung mit Nostr benoetigst du unsere Browser Extension.</p>
+          <h3>${title}</h3>
+          <p>${introText}</p>
+          ${signerHint}
 
           <div class="install-steps">
             <ol>
@@ -315,7 +348,7 @@ class NostrWPIntegration {
                target="_blank"
                rel="noopener noreferrer"
                class="nostr-btn nostr-btn-primary">
-              Extension installieren
+              wp-nostr installieren
             </a>
 
             <button class="nostr-btn nostr-btn-secondary" id="nostr-dismiss">
@@ -405,6 +438,13 @@ class NostrWPIntegration {
   }
 
   async verifyExistingUser(expectedPubkey) {
+    // Avoid unexpected signer popups for third-party NIP-07 providers.
+    // Automatic verification is only safe with our own bridge-based extension.
+    if (!this.isBridgeAvailable()) {
+      console.info('[Nostr] Skipping automatic key verification (no wp-nostr bridge detected)');
+      return;
+    }
+
     try {
       const currentPubkey = await this.getPublicKey();
       if (currentPubkey !== expectedPubkey) {
