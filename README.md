@@ -1,6 +1,36 @@
 # WP Nostr NIP-07 Browser Extension
 
-NIP-07 Signer Extension mit WordPress-Integration (Chrome/Firefox, Manifest V3).
+Eine Browser-Erweiterung für sicheres Identitätsmanagement mit Nostr, die nahtlos mit WordPress (und anderen Systemen) zusammenarbeitet.
+
+## Was macht diese Integration?
+
+Diese Lösung verbindet die Welt von **WordPress** (als vertrauenswürdige Heimatbasis) mit dem **Nostr-Netzwerk** (als offener Verteilungsraum).
+
+1.  **Sicheres Login & Signieren:** Die Extension verwaltet kryptografische Schlüssel sicher im Browser (NIP-07), statt Passwörter an Server zu senden.
+2.  **Automatische Konfiguration:** WordPress erkennt die Extension und richtet sie automatisch ein.
+3.  **Vertrauens-Synchronisation:** WordPress sendet der Extension eine signierte Liste vertrauenswürdiger Webseiten (Whitelist), sodass der Nutzer nicht ständig Popups bestätigen muss.
+4.  **Cloud-Recovery:** Verschlüsselte Backups der Schlüssel können in WordPress gespeichert werden, um sie bei Geräteverlust wiederherzustellen.
+
+Weitere Details finden sich im Konzept und der API-Referenz.
+
+## Roadmap (Task-Status)
+
+- [x] TASK-00: Projekt-Uebersicht
+- [x] TASK-01: Extension Grundgeruest
+- [x] TASK-02: WordPress-Integration-Detection
+- [x] TASK-03: Extension Key-Management-UI
+- [x] TASK-04: NIP04-NIP44-Encryption
+- [x] TASK-05: Domain-Whitelist
+- [x] TASK-06: Update-Mechanismus
+- [x] TASK-07: Build-Pipeline
+- [x] TASK-08: Popup-UI
+- [x] TASK-09: Unit-Tests
+- [x] TASK-10: Passkey-WP-Backup-Recovery
+- [x] TASK-11: WP-Backup-Restore-Routines
+- [x] TASK-12: Primary-Domain-Auth-Broker
+- [x] TASK-13: CSS-Design-UTF8-Dark-Light-Blue-Glow
+- [ ] TASK-14: e2e-Test
+- [ ] TASK-15: Deoloyment
 
 ## Lokales E2E-Testing (ohne SSL)
 
