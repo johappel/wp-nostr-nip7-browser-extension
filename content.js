@@ -137,7 +137,36 @@ async function primeViewerProfileCache() {
       await new Promise((resolve) => setTimeout(resolve, 100));
       snapshot = readViewerFromDom();
     }
-    if (!snapshot.configReady) return;
+    if (!snapshot.configReady) {
+      const viewerFromRest = await fetchViewerFromPageContext();
+      if (!viewerFromRest) return;
+      const origin = window.location.origin;
+      const host = window.location.host.toLowerCase();
+      const userId = Number(viewerFromRest.userId) || null;
+      const scope = userId && host ? `wp:${host}:u:${userId}` : 'global';
+      const entry = {
+        userId,
+        displayName: viewerFromRest.displayName || null,
+        avatarUrl: viewerFromRest.avatarUrl || null,
+        pubkey: viewerFromRest.pubkey || null,
+        userLogin: viewerFromRest.userLogin || null,
+        profileRelayUrl: viewerFromRest.profileRelayUrl || null,
+        profileNip05: viewerFromRest.profileNip05 || null,
+        primaryDomain: viewerFromRest.primaryDomain || null,
+        origin,
+        scope,
+        updatedAt: Date.now()
+      };
+      const hasUsefulData =
+        !!entry.primaryDomain ||
+        !!entry.userId ||
+        !!entry.displayName ||
+        !!entry.userLogin ||
+        !!entry.avatarUrl;
+      if (!hasUsefulData) return;
+      await chrome.storage.local.set({ [VIEWER_CACHE_KEY]: entry });
+      return;
+    }
 
     const origin = window.location.origin;
     const host = window.location.host.toLowerCase();

@@ -435,11 +435,21 @@ function hasProfileContext(viewer) {
 async function persistViewerCache(viewer) {
   if (!hasProfileContext(viewer)) return;
 
+  let existing = null;
+  try {
+    const current = await chrome.storage.local.get([VIEWER_CACHE_KEY]);
+    existing = current?.[VIEWER_CACHE_KEY] || null;
+  } catch {
+    existing = null;
+  }
+
   const origin = String(viewer?.origin || '').trim();
   const validOrigin = /^https?:\/\//i.test(origin) ? origin : null;
   const userId = Number(viewer?.userId) || null;
   const fallbackScope = validOrigin && userId ? buildWpScope(validOrigin, userId) : 'global';
-  const scope = normalizeScope(viewer?.scope || fallbackScope);
+  const existingScope = String(existing?.scope || '').trim();
+  const scope = normalizeScope(viewer?.scope || existingScope || fallbackScope);
+  const primaryDomain = String(viewer?.primaryDomain || '').trim() || String(existing?.primaryDomain || '').trim() || null;
 
   const cacheEntry = {
     userId,
@@ -449,8 +459,8 @@ async function persistViewerCache(viewer) {
     userLogin: String(viewer?.userLogin || '').trim() || null,
     profileRelayUrl: String(viewer?.profileRelayUrl || '').trim() || null,
     profileNip05: String(viewer?.profileNip05 || '').trim() || null,
-    primaryDomain: String(viewer?.primaryDomain || '').trim() || null,
-    origin: validOrigin,
+    primaryDomain,
+    origin: validOrigin || String(existing?.origin || '').trim() || null,
     scope,
     updatedAt: Date.now()
   };
@@ -493,6 +503,39 @@ async function loadViewerCache() {
   } catch {
     return null;
   }
+}
+
+async function getPrimaryDomainFromDomainSync(activeOrigin) {
+  const activeHost = extractHost(activeOrigin);
+  if (!activeHost) return null;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'NOSTR_GET_DOMAIN_SYNC_STATE' });
+    if (response?.error) return null;
+    const configs = Array.isArray(response?.result?.configs) ? response.result.configs : [];
+    if (!configs.length) return null;
+
+    const direct = configs.find((item) => String(item?.host || '').trim().toLowerCase() === activeHost);
+    if (direct?.primaryDomain) return String(direct.primaryDomain).trim();
+
+    const byPrimaryHost = configs.find((item) => extractHost(item?.primaryDomain || '') === activeHost);
+    if (byPrimaryHost?.primaryDomain) return String(byPrimaryHost.primaryDomain).trim();
+
+    if (configs.length === 1) {
+      return String(configs[0]?.primaryDomain || '').trim() || null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function applyPrimaryDomainFallback(context, activeOrigin) {
+  const currentPrimary = String(context?.primaryDomain || '').trim();
+  if (currentPrimary) return context;
+
+  const resolved = await getPrimaryDomainFromDomainSync(activeOrigin || context?.origin || '');
+  if (!resolved) return context;
+  return { ...context, primaryDomain: resolved };
 }
 
 function setCloudButtonsDisabled(buttons, disabled) {
@@ -843,7 +886,7 @@ async function loadViewerContext(cardNode, statusNode) {
   if (!origin) {
     renderViewerCard(cardNode, null, null);
     if (cachedViewer) {
-      return {
+      const context = {
         ...cachedViewer,
         isLoggedIn: false,
         isCached: true,
@@ -852,15 +895,19 @@ async function loadViewerContext(cardNode, statusNode) {
         wpApi: null,
         authBroker: null
       };
+      return await applyPrimaryDomainFallback(context, cachedViewer?.origin || '');
     }
-    return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: null, wpApi: null, authBroker: null };
+    return await applyPrimaryDomainFallback(
+      { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: null, wpApi: null, authBroker: null },
+      ''
+    );
   }
 
   const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
   if (viewerFromTab?.pending) {
     renderViewerCard(cardNode, { pending: true }, origin);
     if (cachedViewer) {
-      return {
+      const context = {
         ...cachedViewer,
         isLoggedIn: false,
         pending: true,
@@ -870,8 +917,9 @@ async function loadViewerContext(cardNode, statusNode) {
         wpApi: sanitizeWpApi(viewerFromTab.wpApi),
         authBroker: sanitizeAuthBroker(viewerFromTab.authBroker)
       };
+      return await applyPrimaryDomainFallback(context, origin);
     }
-    return {
+    const context = {
       isLoggedIn: false,
       pending: true,
       scope: 'global',
@@ -880,6 +928,7 @@ async function loadViewerContext(cardNode, statusNode) {
       wpApi: sanitizeWpApi(viewerFromTab.wpApi),
       authBroker: sanitizeAuthBroker(viewerFromTab.authBroker)
     };
+    return await applyPrimaryDomainFallback(context, origin);
   }
   if (viewerFromTab?.viewer) {
     const viewer = viewerFromTab.viewer;
@@ -896,8 +945,9 @@ async function loadViewerContext(cardNode, statusNode) {
       wpApi: sanitizeWpApi(viewerFromTab.wpApi),
       authBroker: sanitizeAuthBroker(viewerFromTab.authBroker || viewer.authBroker)
     };
-    await persistViewerCache(context);
-    return context;
+    const withPrimary = await applyPrimaryDomainFallback(context, origin);
+    await persistViewerCache(withPrimary);
+    return withPrimary;
   }
 
   try {
@@ -915,8 +965,9 @@ async function loadViewerContext(cardNode, statusNode) {
       wpApi: null,
       authBroker: sanitizeAuthBroker(viewer.authBroker)
     };
-    await persistViewerCache(context);
-    return context;
+    const withPrimary = await applyPrimaryDomainFallback(context, origin);
+    await persistViewerCache(withPrimary);
+    return withPrimary;
   } catch (error) {
     const errorText = String(error?.message || error || '');
     const likelyNoWpEndpoint =
@@ -928,7 +979,7 @@ async function loadViewerContext(cardNode, statusNode) {
     if (likelyNoWpEndpoint) {
       renderViewerCard(cardNode, null, origin);
       if (cachedViewer) {
-        return {
+        const context = {
           ...cachedViewer,
           isLoggedIn: false,
           isCached: true,
@@ -937,8 +988,12 @@ async function loadViewerContext(cardNode, statusNode) {
           wpApi: null,
           authBroker: null
         };
+        return await applyPrimaryDomainFallback(context, origin);
       }
-      return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null };
+      return await applyPrimaryDomainFallback(
+        { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null },
+        origin
+      );
     }
 
     renderViewerCard(cardNode, null, origin, error);
@@ -946,7 +1001,7 @@ async function loadViewerContext(cardNode, statusNode) {
       statusNode.textContent = `WP-Viewer konnte nicht geladen werden: ${error.message || error}`;
     }
     if (cachedViewer) {
-      return {
+      const context = {
         ...cachedViewer,
         isLoggedIn: false,
         isCached: true,
@@ -955,8 +1010,12 @@ async function loadViewerContext(cardNode, statusNode) {
         wpApi: null,
         authBroker: null
       };
+      return await applyPrimaryDomainFallback(context, origin);
     }
-    return { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null };
+    return await applyPrimaryDomainFallback(
+      { isLoggedIn: false, scope: 'global', origin: null, activeSiteOrigin: origin, wpApi: null, authBroker: null },
+      origin
+    );
   }
 }
 
