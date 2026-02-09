@@ -80,11 +80,20 @@ function nostr_enqueue_scripts() {
         true
     );
     
+    $current_user = wp_get_current_user();
+    $current_user_id = get_current_user_id();
+    $current_pubkey = strtolower((string) get_user_meta($current_user_id, 'nostr_pubkey', true));
+    $current_avatar = get_avatar_url($current_user_id, ['size' => 96]);
+
     wp_localize_script('nostr-integration', 'nostrConfig', [
         'restUrl' => rest_url('nostr/v1/'),
         'nonce' => wp_create_nonce('wp_rest'),
         'siteDomain' => parse_url(home_url(), PHP_URL_HOST),
         'isLoggedIn' => is_user_logged_in(),
+        'wpUserId' => $current_user_id,
+        'wpDisplayName' => $current_user ? $current_user->display_name : '',
+        'wpAvatarUrl' => $current_avatar ? $current_avatar : '',
+        'wpPubkey' => $current_pubkey,
         'primaryDomain' => get_option('nostr_primary_domain', nostr_get_default_primary_domain()),
         'domainSecret' => nostr_get_or_create_domain_secret(),
         // extensionStoreUrl bleibt fuer Rueckwaertskompatibilitaet erhalten.
@@ -131,6 +140,12 @@ function nostr_register_endpoints() {
     register_rest_route('nostr/v1', '/domains', [
         'methods' => 'GET',
         'callback' => 'nostr_get_domains',
+        'permission_callback' => '__return_true'
+    ]);
+
+    register_rest_route('nostr/v1', '/viewer', [
+        'methods' => 'GET',
+        'callback' => 'nostr_get_viewer',
         'permission_callback' => '__return_true'
     ]);
 
@@ -222,6 +237,31 @@ function nostr_get_user() {
         'pubkey' => get_user_meta($user_id, 'nostr_pubkey', true),
         'registered' => get_user_meta($user_id, 'nostr_registered', true),
         'userId' => $user_id
+    ];
+}
+
+function nostr_get_viewer() {
+    if (!is_user_logged_in()) {
+        return [
+            'isLoggedIn' => false,
+            'userId' => null,
+            'displayName' => null,
+            'avatarUrl' => null,
+            'pubkey' => null
+        ];
+    }
+
+    $user_id = get_current_user_id();
+    $user = wp_get_current_user();
+    $pubkey = strtolower((string) get_user_meta($user_id, 'nostr_pubkey', true));
+    $avatar = get_avatar_url($user_id, ['size' => 96]);
+
+    return [
+        'isLoggedIn' => true,
+        'userId' => $user_id,
+        'displayName' => $user ? $user->display_name : '',
+        'avatarUrl' => $avatar ? $avatar : '',
+        'pubkey' => $pubkey !== '' ? $pubkey : null
     ];
 }
 

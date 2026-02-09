@@ -118,8 +118,26 @@ function sendRequest(type, payload = null) {
       }
     };
     window.addEventListener('message', handler);
-    window.postMessage({ type, payload, _id: id }, '*');
+    const message = { type, payload, _id: id };
+    const signerScope = determineSignerScope();
+    if (signerScope) {
+      message.scope = signerScope;
+    }
+    window.postMessage(message, '*');
   });
+}
+
+function determineSignerScope() {
+  const config = window.nostrConfig;
+  if (!config || typeof config !== 'object') return null;
+
+  const rawUserId = Number(config.wpUserId || config.userId || 0);
+  if (!Number.isInteger(rawUserId) || rawUserId <= 0) return null;
+
+  const host = String(window.location.host || '').trim().toLowerCase();
+  if (!host) return null;
+
+  return `wp:${host}:u:${rawUserId}`;
 }
 
 function createRequestId() {

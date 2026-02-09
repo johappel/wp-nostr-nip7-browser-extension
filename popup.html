@@ -10,6 +10,16 @@
   <main class="popup">
     <h1>WP Nostr Signer</h1>
 
+    <section class="wp-user-section">
+      <div class="section-head">
+        <h2>Aktiver WP User</h2>
+        <button id="refresh-user" class="btn-secondary" type="button">Neu laden</button>
+      </div>
+      <div id="wp-user-card" class="wp-user-card">
+        <p class="empty">Kein aktiver WordPress-Tab erkannt.</p>
+      </div>
+    </section>
+
     <label class="row">
       <input type="checkbox" id="prefer-lock" />
       <span>Prefer WP Nostr Lock</span>

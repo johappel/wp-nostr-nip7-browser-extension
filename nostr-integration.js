@@ -15,12 +15,43 @@ class NostrWPIntegration {
     this.npub = null;
     this.flowPromise = null;
     this.extensionRecoveryActive = false;
+    this.publishViewerContext();
     this.init();
+  }
+
+  isWpLoggedIn() {
+    return this.config.isLoggedIn === true
+      || this.config.isLoggedIn === 1
+      || this.config.isLoggedIn === '1';
+  }
+
+  publishViewerContext() {
+    const root = document.documentElement;
+    if (!root) return;
+
+    root.setAttribute('data-wp-nostr-config-ready', '1');
+
+    const rawUserId = Number(this.config.wpUserId || this.config.userId || 0);
+    const userId = Number.isInteger(rawUserId) && rawUserId > 0 ? rawUserId : null;
+    const isLoggedIn = this.isWpLoggedIn() && userId !== null;
+
+    if (!isLoggedIn) {
+      root.removeAttribute('data-wp-nostr-user-id');
+      root.removeAttribute('data-wp-nostr-display-name');
+      root.removeAttribute('data-wp-nostr-avatar-url');
+      root.removeAttribute('data-wp-nostr-pubkey');
+      return;
+    }
+
+    root.setAttribute('data-wp-nostr-user-id', String(userId));
+    root.setAttribute('data-wp-nostr-display-name', String(this.config.wpDisplayName || ''));
+    root.setAttribute('data-wp-nostr-avatar-url', String(this.config.wpAvatarUrl || ''));
+    root.setAttribute('data-wp-nostr-pubkey', String(this.config.wpPubkey || ''));
   }
 
   async init() {
     // Nur fuer eingeloggte User
-    if (!this.config.isLoggedIn) {
+    if (!this.isWpLoggedIn()) {
       return;
     }
 
@@ -196,8 +227,21 @@ class NostrWPIntegration {
       }, timeoutMs);
 
       window.addEventListener('message', handler);
-      window.postMessage({ type, payload, _id: id }, '*');
+      const message = { type, payload, _id: id };
+      const scope = this.getSignerScope();
+      if (scope) {
+        message.scope = scope;
+      }
+      window.postMessage(message, '*');
     });
+  }
+
+  getSignerScope() {
+    const rawUserId = Number(this.config.wpUserId || this.config.userId || 0);
+    if (!Number.isInteger(rawUserId) || rawUserId <= 0) return null;
+    const host = String(window.location.host || '').trim().toLowerCase();
+    if (!host) return null;
+    return `wp:${host}:u:${rawUserId}`;
   }
 
   createRequestId() {

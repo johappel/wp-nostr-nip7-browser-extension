@@ -93,4 +93,38 @@ describe('KeyManager', () => {
   it('should return false for hasKey if empty', async () => {
     expect(await keyManager.hasKey()).toBe(false);
   });
+
+  it('should isolate keys per namespace scope', async () => {
+    const scopeA = new KeyManager(chrome.storage.local, 'wp:forums.test:u:11');
+    const scopeB = new KeyManager(chrome.storage.local, 'wp:forums.test:u:22');
+
+    const { pubkey: pubkeyA } = await scopeA.generateKey('scope-a-password');
+    expect(await scopeA.hasKey()).toBe(true);
+    expect(await scopeB.hasKey()).toBe(false);
+
+    const { pubkey: pubkeyB } = await scopeB.generateKey('scope-b-password');
+    expect(await scopeB.hasKey()).toBe(true);
+    expect(pubkeyA).not.toBe(pubkeyB);
+
+    const stored = await chrome.storage.local.get([
+      'wp:forums.test:u:11::' + KeyManager.MODE_KEY,
+      'wp:forums.test:u:22::' + KeyManager.MODE_KEY
+    ]);
+    expect(stored['wp:forums.test:u:11::' + KeyManager.MODE_KEY]).toBe(KeyManager.MODE_PASSWORD);
+    expect(stored['wp:forums.test:u:22::' + KeyManager.MODE_KEY]).toBe(KeyManager.MODE_PASSWORD);
+  });
+
+  it('should migrate legacy global key to first scope only', async () => {
+    const legacy = new KeyManager(chrome.storage.local);
+    const { pubkey: legacyPubkey } = await legacy.generateKey('legacy-password');
+
+    const firstScope = new KeyManager(chrome.storage.local, 'wp:forums.test:u:101');
+    await firstScope.migrateFromLegacyGlobalIfNeeded();
+    expect(await firstScope.hasKey()).toBe(true);
+    expect(await firstScope.getPublicKey('legacy-password')).toBe(legacyPubkey);
+
+    const secondScope = new KeyManager(chrome.storage.local, 'wp:forums.test:u:202');
+    await secondScope.migrateFromLegacyGlobalIfNeeded();
+    expect(await secondScope.hasKey()).toBe(false);
+  });
 });

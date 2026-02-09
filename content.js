@@ -36,6 +36,7 @@ window.addEventListener('message', async (event) => {
       type: event.data.type,
       payload: event.data.payload,
       _id: event.data._id,
+      scope: typeof event.data.scope === 'string' ? event.data.scope : null,
       domain: window.location.hostname,
       origin: window.location.origin
     });
@@ -53,6 +54,35 @@ window.addEventListener('message', async (event) => {
       error: err.message || 'Extension communication failed'
     }, '*');
   }
+});
+
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (!request || request.type !== 'NOSTR_GET_PAGE_CONTEXT') {
+    return;
+  }
+
+  const root = document.documentElement;
+  const configReady = root?.getAttribute('data-wp-nostr-config-ready') === '1';
+  if (!configReady) {
+    sendResponse({ viewer: null });
+    return;
+  }
+
+  const rawUserId = Number(root?.getAttribute('data-wp-nostr-user-id') || 0);
+  const userId = Number.isInteger(rawUserId) && rawUserId > 0 ? rawUserId : null;
+  const displayName = String(root?.getAttribute('data-wp-nostr-display-name') || '').trim() || null;
+  const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
+  const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
+
+  sendResponse({
+    viewer: {
+      isLoggedIn: userId !== null,
+      userId,
+      displayName,
+      avatarUrl,
+      pubkey
+    }
+  });
 });
 
 async function sendMessageWithRetry(message) {

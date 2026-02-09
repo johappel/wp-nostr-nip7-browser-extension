@@ -4,6 +4,8 @@ const DEFAULT_VALUE = true;
 document.addEventListener('DOMContentLoaded', async () => {
   const checkbox = document.getElementById('prefer-lock');
   const status = document.getElementById('status');
+  const refreshUserButton = document.getElementById('refresh-user');
+  const wpUserCard = document.getElementById('wp-user-card');
   const unlockCacheSelect = document.getElementById('unlock-cache-policy');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const syncNowButton = document.getElementById('sync-now');
@@ -12,6 +14,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const manualPrimaryDomain = document.getElementById('manual-primary-domain');
   const manualDomainSecret = document.getElementById('manual-domain-secret');
   const manualAddButton = document.getElementById('manual-add');
+  let activeScope = 'global';
 
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
@@ -24,18 +27,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'NOSTR_GET_STATUS' });
-    const runtimeStatus = response?.result;
-    if (response?.error) throw new Error(response.error);
-
-    const policy = normalizeUnlockPolicy(runtimeStatus?.unlockCachePolicy);
-    unlockCacheSelect.value = policy;
-    unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
-  } catch (e) {
-    unlockCacheSelect.value = '15m';
-    unlockCacheHint.textContent = 'Unlock-Status konnte nicht geladen werden.';
-  }
+  const initialViewer = await loadViewerContext(wpUserCard, status);
+  activeScope = initialViewer?.scope || 'global';
+  await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
 
   checkbox.addEventListener('change', async () => {
     try {
@@ -48,20 +42,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  refreshUserButton.addEventListener('click', async () => {
+    refreshUserButton.disabled = true;
+    try {
+      const viewer = await loadViewerContext(wpUserCard, status);
+      activeScope = viewer?.scope || 'global';
+      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      status.textContent = viewer?.isLoggedIn
+        ? 'WordPress-User aktualisiert.'
+        : 'Kein eingeloggter WordPress-User auf aktivem Tab.';
+    } catch (e) {
+      status.textContent = `WP-User konnte nicht geladen werden: ${e.message || e}`;
+    } finally {
+      refreshUserButton.disabled = false;
+    }
+  });
+
   unlockCacheSelect.addEventListener('change', async () => {
     const selectedPolicy = normalizeUnlockPolicy(unlockCacheSelect.value);
     unlockCacheSelect.disabled = true;
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_SET_UNLOCK_CACHE_POLICY',
-        payload: { policy: selectedPolicy }
+        payload: { policy: selectedPolicy, scope: activeScope }
       });
       if (response?.error) throw new Error(response.error);
 
       unlockCacheSelect.value = normalizeUnlockPolicy(response?.result?.policy);
-      const statusResponse = await chrome.runtime.sendMessage({ type: 'NOSTR_GET_STATUS' });
-      const runtimeStatus = statusResponse?.result;
-      unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
+      const statusResponseScoped = await chrome.runtime.sendMessage({
+        type: 'NOSTR_GET_STATUS',
+        payload: { scope: activeScope }
+      });
+      unlockCacheHint.textContent = formatUnlockCacheHint(statusResponseScoped?.result);
       status.textContent = 'Unlock-Cache aktualisiert.';
     } catch (e) {
       status.textContent = `Unlock-Cache konnte nicht gespeichert werden: ${e.message || e}`;
@@ -194,6 +206,166 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = String(text || '');
   return div.innerHTML;
+}
+
+async function refreshUnlockState(unlockCacheSelect, unlockCacheHint, scope) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_GET_STATUS',
+      payload: { scope }
+    });
+    const runtimeStatus = response?.result;
+    if (response?.error) throw new Error(response.error);
+
+    const policy = normalizeUnlockPolicy(runtimeStatus?.unlockCachePolicy);
+    unlockCacheSelect.value = policy;
+    unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
+  } catch {
+    unlockCacheSelect.value = '15m';
+    unlockCacheHint.textContent = 'Unlock-Status konnte nicht geladen werden.';
+  }
+}
+
+async function loadViewerContext(cardNode, statusNode) {
+  const tabContext = await getActiveTabContext();
+  const origin = tabContext?.origin || null;
+  if (!origin) {
+    renderViewerCard(cardNode, null, null);
+    return { isLoggedIn: false, scope: 'global', origin: null };
+  }
+
+  const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
+  if (viewerFromTab) {
+    const scope = viewerFromTab?.isLoggedIn && viewerFromTab?.userId
+      ? buildWpScope(origin, viewerFromTab.userId)
+      : 'global';
+    renderViewerCard(cardNode, viewerFromTab, origin);
+    return { ...viewerFromTab, scope, origin };
+  }
+
+  try {
+    const viewer = await fetchWpViewer(origin);
+    const scope = viewer?.isLoggedIn && viewer?.userId
+      ? buildWpScope(origin, viewer.userId)
+      : 'global';
+    renderViewerCard(cardNode, viewer, origin);
+    return { ...viewer, scope, origin };
+  } catch (error) {
+    const errorText = String(error?.message || error || '');
+    const likelyNoWpEndpoint =
+      errorText.includes('HTTP 404') ||
+      errorText.includes('HTTP 403') ||
+      errorText.includes('Failed to fetch') ||
+      errorText.includes('NetworkError');
+
+    if (likelyNoWpEndpoint) {
+      renderViewerCard(cardNode, null, origin);
+      return { isLoggedIn: false, scope: 'global', origin };
+    }
+
+    renderViewerCard(cardNode, null, origin, error);
+    if (statusNode) {
+      statusNode.textContent = `WP-Viewer konnte nicht geladen werden: ${error.message || error}`;
+    }
+    return { isLoggedIn: false, scope: 'global', origin };
+  }
+}
+
+async function getActiveTabContext() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs?.[0];
+  if (!tab?.url) return null;
+
+  try {
+    const url = new URL(tab.url);
+    if (!/^https?:$/i.test(url.protocol)) return { id: tab.id ?? null, origin: null };
+    return { id: tab.id ?? null, origin: url.origin };
+  } catch {
+    return { id: tab.id ?? null, origin: null };
+  }
+}
+
+async function getViewerFromActiveTab(tabId) {
+  if (typeof tabId !== 'number') return null;
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'NOSTR_GET_PAGE_CONTEXT' });
+    const viewer = response?.viewer;
+    if (!viewer || typeof viewer !== 'object') return null;
+    return {
+      isLoggedIn: viewer.isLoggedIn === true,
+      userId: Number(viewer.userId) || null,
+      displayName: viewer.displayName || null,
+      avatarUrl: viewer.avatarUrl || null,
+      pubkey: viewer.pubkey || null
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWpViewer(origin) {
+  const response = await fetch(`${origin}/wp-json/nostr/v1/viewer`, {
+    method: 'GET',
+    credentials: 'include',
+    cache: 'no-store'
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return await response.json();
+}
+
+function renderViewerCard(cardNode, viewer, origin, error = null) {
+  if (!cardNode) return;
+
+  if (error) {
+    cardNode.innerHTML = `<p class="empty">Fehler beim Laden: ${escapeHtml(error.message || String(error))}</p>`;
+    return;
+  }
+
+  if (!viewer || !viewer.isLoggedIn) {
+    cardNode.innerHTML = `
+      <p class="empty">
+        ${origin
+          ? `Auf ${escapeHtml(origin)} ist aktuell kein WordPress-User eingeloggt.`
+          : 'Kein aktiver WordPress-Tab erkannt.'}
+      </p>
+    `;
+    return;
+  }
+
+  const avatarUrl = String(viewer.avatarUrl || '').trim();
+  const displayName = String(viewer.displayName || `User #${viewer.userId}`);
+  const pubkey = String(viewer.pubkey || '');
+  const userId = Number(viewer.userId) || 0;
+
+  cardNode.innerHTML = `
+    <div class="wp-user-main">
+      ${avatarUrl
+        ? `<img class="wp-user-avatar" src="${escapeHtml(avatarUrl)}" alt="Avatar" />`
+        : '<div class="wp-user-avatar"></div>'}
+      <div>
+        <div class="wp-user-name">${escapeHtml(displayName)}</div>
+        <div class="hint">User ID: ${escapeHtml(String(userId))}</div>
+      </div>
+    </div>
+    <div class="wp-user-meta"><strong>Domain:</strong> ${escapeHtml(origin || '-')}</div>
+    <div class="wp-user-meta"><strong>Avatar URL:</strong> ${escapeHtml(avatarUrl || '-')}</div>
+    <div class="wp-user-meta"><strong>Pubkey:</strong> ${escapeHtml(pubkey || 'noch nicht registriert')}</div>
+  `;
+}
+
+function buildWpScope(origin, userId) {
+  try {
+    const url = new URL(origin);
+    const host = String(url.host || '').trim().toLowerCase();
+    const normalizedUserId = Number(userId) || 0;
+    if (!host || normalizedUserId <= 0) return 'global';
+    return `wp:${host}:u:${normalizedUserId}`;
+  } catch {
+    return 'global';
+  }
 }
 
 function normalizeUnlockPolicy(value) {

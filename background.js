@@ -16,6 +16,7 @@ const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
 const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
 const UNLOCK_CACHE_POLICY_DEFAULT = '15m';
 const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(['off', '5m', '15m', '30m', '60m', 'session']);
+const KEY_SCOPE_DEFAULT = 'global';
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
@@ -25,6 +26,7 @@ let cachedPassword = null;
 let cachedPasswordExpiresAt = null;
 let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
+let activeKeyScope = KEY_SCOPE_DEFAULT;
 const DIALOG_TIMEOUT_MS = 25000;
 let domainSyncMigrationDone = false;
 
@@ -232,6 +234,34 @@ async function ensureUnlockForMode(mode) {
   return null;
 }
 
+function normalizeKeyScope(scope) {
+  const value = String(scope || '').trim();
+  if (!value) return KEY_SCOPE_DEFAULT;
+  if (value === KEY_SCOPE_DEFAULT) return KEY_SCOPE_DEFAULT;
+  if (!/^[a-zA-Z0-9:._-]{1,120}$/.test(value)) return KEY_SCOPE_DEFAULT;
+  return value;
+}
+
+function getKeyScopeFromRequest(request) {
+  const explicit = typeof request?.scope === 'string'
+    ? request.scope
+    : (typeof request?.payload?.scope === 'string' ? request.payload.scope : '');
+  return normalizeKeyScope(explicit);
+}
+
+async function ensureKeyScope(scope) {
+  const nextScope = normalizeKeyScope(scope);
+  if (nextScope === activeKeyScope) {
+    return nextScope;
+  }
+
+  activeKeyScope = nextScope;
+  keyManager.setNamespace(nextScope === KEY_SCOPE_DEFAULT ? '' : nextScope);
+  await keyManager.migrateFromLegacyGlobalIfNeeded();
+  await clearUnlockCaches();
+  return nextScope;
+}
+
 // ============================================================
 // Message Handler
 // ============================================================
@@ -245,6 +275,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function handleMessage(request, sender) {
   const domain = sender.tab?.url ? new URL(sender.tab.url).hostname : null;
   const isInternalExtensionRequest = sender?.id === chrome.runtime.id && !sender?.tab?.url;
+  const requestType = String(request?.type || '');
+  const scopedTypes = new Set([
+    'NOSTR_LOCK',
+    'NOSTR_SET_UNLOCK_CACHE_POLICY',
+    'NOSTR_GET_STATUS',
+    'NOSTR_GET_PUBLIC_KEY',
+    'NOSTR_SIGN_EVENT',
+    'NOSTR_NIP04_ENCRYPT',
+    'NOSTR_NIP04_DECRYPT',
+    'NOSTR_NIP44_ENCRYPT',
+    'NOSTR_NIP44_DECRYPT'
+  ]);
+
+  if (scopedTypes.has(requestType)) {
+    await ensureKeyScope(getKeyScopeFromRequest(request));
+  }
 
   // PING erfordert keine Domain-Validierung (f????r Extension-Detection)
   if (request.type === 'NOSTR_PING') {
@@ -329,6 +375,7 @@ async function handleMessage(request, sender) {
       noPasswordMode: protectionMode === KeyManager.MODE_NONE,
       unlockCachePolicy,
       cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt,
+      keyScope: activeKeyScope,
       cacheMode: unlockCachePolicy === 'session'
         ? 'session'
         : (unlockCachePolicy === 'off' ? 'off' : 'timed')

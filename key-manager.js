@@ -11,26 +11,134 @@ export class KeyManager {
   static PLAIN_KEY = 'plain_nsec';
   static PASSKEY_ID_KEY = 'passkey_credential_id';
   static MODE_KEY = 'key_protection';
+  static CREATED_KEY = 'created';
+  static LEGACY_MIGRATED_KEY = 'migrated_from_legacy_global';
+  static LEGACY_GLOBAL_CONSUMED_KEY = 'legacy_global_consumed_scope';
 
   static MODE_PASSWORD = 'password';
   static MODE_PASSKEY = 'passkey';
   static MODE_NONE = 'none';
 
-  constructor(storage = chrome.storage.local) {
+  constructor(storage = chrome.storage.local, namespace = '') {
     this.storage = storage;
+    this.namespace = this.normalizeNamespace(namespace);
+  }
+
+  normalizeNamespace(namespace) {
+    const value = String(namespace || '').trim();
+    if (!value || value === 'global') return '';
+    return value.replace(/[^a-zA-Z0-9:._-]/g, '_').slice(0, 120);
+  }
+
+  setNamespace(namespace) {
+    this.namespace = this.normalizeNamespace(namespace);
+  }
+
+  getNamespace() {
+    return this.namespace || 'global';
+  }
+
+  keyName(baseKey) {
+    if (!this.namespace) return baseKey;
+    return `${this.namespace}::${baseKey}`;
+  }
+
+  keyNames(baseKeys) {
+    return baseKeys.map((baseKey) => this.keyName(baseKey));
+  }
+
+  mapFromStorage(result, baseKeys) {
+    const mapped = {};
+    for (const baseKey of baseKeys) {
+      mapped[baseKey] = result[this.keyName(baseKey)];
+    }
+    return mapped;
+  }
+
+  async migrateFromLegacyGlobalIfNeeded() {
+    if (!this.namespace) return;
+
+    const scopedKeys = [
+      KeyManager.MODE_KEY,
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.CREATED_KEY,
+      KeyManager.LEGACY_MIGRATED_KEY
+    ];
+
+    const scopedRaw = await this.storage.get(this.keyNames(scopedKeys));
+    const scoped = this.mapFromStorage(scopedRaw, scopedKeys);
+
+    if (scoped[KeyManager.LEGACY_MIGRATED_KEY]) return;
+
+    const globalMeta = await this.storage.get([KeyManager.LEGACY_GLOBAL_CONSUMED_KEY]);
+    const consumedScope = String(globalMeta[KeyManager.LEGACY_GLOBAL_CONSUMED_KEY] || '').trim();
+    if (consumedScope && consumedScope !== this.namespace) {
+      await this.storage.set({ [this.keyName(KeyManager.LEGACY_MIGRATED_KEY)]: true });
+      return;
+    }
+
+    if (scoped[KeyManager.STORAGE_KEY] || scoped[KeyManager.PLAIN_KEY]) {
+      await this.storage.set({ [this.keyName(KeyManager.LEGACY_MIGRATED_KEY)]: true });
+      return;
+    }
+
+    const legacyRaw = await this.storage.get([
+      KeyManager.MODE_KEY,
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.CREATED_KEY
+    ]);
+
+    const hasLegacyKey = Boolean(legacyRaw[KeyManager.STORAGE_KEY] || legacyRaw[KeyManager.PLAIN_KEY]);
+    if (!hasLegacyKey) {
+      await this.storage.set({ [this.keyName(KeyManager.LEGACY_MIGRATED_KEY)]: true });
+      return;
+    }
+
+    const updatePayload = {
+      [this.keyName(KeyManager.LEGACY_MIGRATED_KEY)]: true,
+      [KeyManager.LEGACY_GLOBAL_CONSUMED_KEY]: this.namespace
+    };
+    const copyKeys = [
+      KeyManager.MODE_KEY,
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.CREATED_KEY
+    ];
+    for (const key of copyKeys) {
+      if (legacyRaw[key] !== undefined) {
+        updatePayload[this.keyName(key)] = legacyRaw[key];
+      }
+    }
+
+    await this.storage.set(updatePayload);
   }
 
   async hasKey() {
-    const result = await this.storage.get([KeyManager.STORAGE_KEY, KeyManager.PLAIN_KEY]);
+    const keys = [KeyManager.STORAGE_KEY, KeyManager.PLAIN_KEY];
+    const raw = await this.storage.get(this.keyNames(keys));
+    const result = this.mapFromStorage(raw, keys);
     return !!result[KeyManager.STORAGE_KEY] || !!result[KeyManager.PLAIN_KEY];
   }
 
   async isPasswordProtected() {
-    const result = await this.storage.get([
+    const keys = [
       KeyManager.MODE_KEY,
       KeyManager.STORAGE_KEY,
       KeyManager.PLAIN_KEY
-    ]);
+    ];
+    const raw = await this.storage.get(this.keyNames(keys));
+    const result = this.mapFromStorage(raw, keys);
 
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSWORD) return true;
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSKEY) return false;
@@ -43,12 +151,14 @@ export class KeyManager {
   }
 
   async getProtectionMode() {
-    const result = await this.storage.get([
+    const keys = [
       KeyManager.MODE_KEY,
       KeyManager.STORAGE_KEY,
       KeyManager.PLAIN_KEY,
       KeyManager.PASSKEY_ID_KEY
-    ]);
+    ];
+    const raw = await this.storage.get(this.keyNames(keys));
+    const result = this.mapFromStorage(raw, keys);
 
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSWORD) return KeyManager.MODE_PASSWORD;
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSKEY) return KeyManager.MODE_PASSKEY;
@@ -91,22 +201,22 @@ export class KeyManager {
       }
 
       await this.storage.set({
-        [KeyManager.PLAIN_KEY]: Array.from(secretKey),
-        [KeyManager.PASSKEY_ID_KEY]: passkeyCredentialId,
-        [KeyManager.MODE_KEY]: KeyManager.MODE_PASSKEY,
-        created: Date.now()
+        [this.keyName(KeyManager.PLAIN_KEY)]: Array.from(secretKey),
+        [this.keyName(KeyManager.PASSKEY_ID_KEY)]: passkeyCredentialId,
+        [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_PASSKEY,
+        [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
       });
-      await this.storage.remove([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY]);
+      await this.storage.remove(this.keyNames([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY]));
       return;
     }
 
     if (!password) {
       await this.storage.set({
-        [KeyManager.PLAIN_KEY]: Array.from(secretKey),
-        [KeyManager.MODE_KEY]: KeyManager.MODE_NONE,
-        created: Date.now()
+        [this.keyName(KeyManager.PLAIN_KEY)]: Array.from(secretKey),
+        [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_NONE,
+        [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
       });
-      await this.storage.remove([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY, KeyManager.PASSKEY_ID_KEY]);
+      await this.storage.remove(this.keyNames([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY, KeyManager.PASSKEY_ID_KEY]));
       return;
     }
 
@@ -124,13 +234,13 @@ export class KeyManager {
     const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, secretKey);
 
     await this.storage.set({
-      [KeyManager.STORAGE_KEY]: Array.from(new Uint8Array(ciphertext)),
-      [KeyManager.SALT_KEY]: Array.from(salt),
-      [KeyManager.IV_KEY]: Array.from(iv),
-      [KeyManager.MODE_KEY]: KeyManager.MODE_PASSWORD,
-      created: Date.now()
+      [this.keyName(KeyManager.STORAGE_KEY)]: Array.from(new Uint8Array(ciphertext)),
+      [this.keyName(KeyManager.SALT_KEY)]: Array.from(salt),
+      [this.keyName(KeyManager.IV_KEY)]: Array.from(iv),
+      [this.keyName(KeyManager.MODE_KEY)]: KeyManager.MODE_PASSWORD,
+      [this.keyName(KeyManager.CREATED_KEY)]: Date.now()
     });
-    await this.storage.remove([KeyManager.PLAIN_KEY, KeyManager.PASSKEY_ID_KEY]);
+    await this.storage.remove(this.keyNames([KeyManager.PLAIN_KEY, KeyManager.PASSKEY_ID_KEY]));
   }
 
   /**
@@ -138,14 +248,16 @@ export class KeyManager {
    * @returns {Promise<Uint8Array|null>}
    */
   async getKey(password = null) {
-    const result = await this.storage.get([
+    const keys = [
       KeyManager.MODE_KEY,
       KeyManager.STORAGE_KEY,
       KeyManager.SALT_KEY,
       KeyManager.IV_KEY,
       KeyManager.PLAIN_KEY,
       KeyManager.PASSKEY_ID_KEY
-    ]);
+    ];
+    const raw = await this.storage.get(this.keyNames(keys));
+    const result = this.mapFromStorage(raw, keys);
 
     const mode = result[KeyManager.MODE_KEY]
       || (result[KeyManager.STORAGE_KEY] ? KeyManager.MODE_PASSWORD : null)
