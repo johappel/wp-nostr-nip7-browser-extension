@@ -1,6 +1,11 @@
 const LOCK_SETTING_KEY = 'preferWpNostrLock';
 const LOCK_DEFAULT = true;
 
+if (document.documentElement) {
+  // Marker for pages that want to detect whether this extension bridge is active.
+  document.documentElement.setAttribute('data-wp-nostr-extension-bridge', '1');
+}
+
 injectInpageScript();
 
 async function injectInpageScript() {

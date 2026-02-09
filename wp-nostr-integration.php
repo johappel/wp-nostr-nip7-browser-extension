@@ -87,7 +87,16 @@ function nostr_enqueue_scripts() {
         'isLoggedIn' => is_user_logged_in(),
         'primaryDomain' => get_option('nostr_primary_domain', nostr_get_default_primary_domain()),
         'domainSecret' => nostr_get_or_create_domain_secret(),
-        'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]')
+        // extensionStoreUrl bleibt fuer Rueckwaertskompatibilitaet erhalten.
+        'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]'),
+        'extensionStoreUrlChrome' => get_option(
+            'nostr_extension_store_url_chrome',
+            get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]')
+        ),
+        'extensionStoreUrlFirefox' => get_option(
+            'nostr_extension_store_url_firefox',
+            'https://addons.mozilla.org/firefox/addon/[ADDON_SLUG]'
+        )
     ]);
     
     // CSS für Modal
@@ -256,6 +265,14 @@ function nostr_admin_init() {
         'type' => 'string',
         'sanitize_callback' => 'esc_url_raw'
     ]);
+    register_setting('nostr_options', 'nostr_extension_store_url_chrome', [
+        'type' => 'string',
+        'sanitize_callback' => 'esc_url_raw'
+    ]);
+    register_setting('nostr_options', 'nostr_extension_store_url_firefox', [
+        'type' => 'string',
+        'sanitize_callback' => 'esc_url_raw'
+    ]);
 }
 
 function nostr_settings_page() {
@@ -324,16 +341,32 @@ function nostr_settings_page() {
                 
                 <tr>
                     <th scope="row">
-                        <label for="nostr_extension_store_url">Extension Store URL</label>
+                        <label for="nostr_extension_store_url_chrome">Chrome Web Store URL</label>
                     </th>
                     <td>
                         <input type="url" 
-                               id="nostr_extension_store_url"
-                               name="nostr_extension_store_url" 
-                               value="<?php echo esc_attr(get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]')); ?>" 
+                               id="nostr_extension_store_url_chrome"
+                               name="nostr_extension_store_url_chrome" 
+                               value="<?php echo esc_attr(get_option('nostr_extension_store_url_chrome', get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]'))); ?>" 
                                class="regular-text" />
                         <p class="description">
-                            Link zum Chrome Web Store (wird im Install-Prompt angezeigt)
+                            Link zum Chrome Web Store fuer den Install-Prompt in Chrome/Chromium.
+                        </p>
+                    </td>
+                </tr>
+                
+                <tr>
+                    <th scope="row">
+                        <label for="nostr_extension_store_url_firefox">Firefox Add-ons URL</label>
+                    </th>
+                    <td>
+                        <input type="url" 
+                               id="nostr_extension_store_url_firefox"
+                               name="nostr_extension_store_url_firefox" 
+                               value="<?php echo esc_attr(get_option('nostr_extension_store_url_firefox', 'https://addons.mozilla.org/firefox/addon/[ADDON_SLUG]')); ?>" 
+                               class="regular-text" />
+                        <p class="description">
+                            Link zu addons.mozilla.org fuer den Install-Prompt in Firefox.
                         </p>
                     </td>
                 </tr>

@@ -25,9 +25,9 @@ class NostrWPIntegration {
     // 1. Extension Detection
     this.hasExtension = await this.detectExtension();
     if (!this.hasExtension) {
-      // Race beim Seitenstart abfangen: NIP-07 API kann kurz spaeter erscheinen.
-      await this.waitForNostrApi(3000, 120);
-      this.hasExtension = this.isNostrApiAvailable();
+      // Race beim Seitenstart abfangen: Bridge/API kann kurz spaeter erscheinen.
+      await this.waitForExtensionAvailability(3000, 120);
+      this.hasExtension = await this.detectExtension();
     }
 
     if (!this.hasExtension) {
@@ -51,29 +51,21 @@ class NostrWPIntegration {
   }
 
   async detectExtension() {
-    return new Promise((resolve) => {
-      const requestId = `detect-${this.createRequestId()}`;
-      window.postMessage({ type: 'NOSTR_PING', _id: requestId }, '*');
+    if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+      return true;
+    }
 
-      const handler = (e) => {
-        if (e.data.type === 'NOSTR_PING_RESPONSE' && e.data._id === requestId) {
-          window.removeEventListener('message', handler);
-          if (e.data.error) {
-            resolve(false);
-            return;
-          }
-          console.log('[Nostr] Extension detected');
-          resolve(true);
-        }
-      };
+    try {
+      const result = await this.sendExtensionMessage('NOSTR_PING', null, 1500);
+      if (result && result.pong === true) {
+        console.log('[Nostr] Extension detected');
+        return true;
+      }
+    } catch {
+      // handled by fallback checks below
+    }
 
-      window.addEventListener('message', handler);
-
-      setTimeout(() => {
-        window.removeEventListener('message', handler);
-        resolve(this.isNostrApiAvailable());
-      }, 800);
-    });
+    return this.isNostrApiAvailable() || this.isBridgeAvailable();
   }
 
   async configureDomainSync() {
@@ -122,10 +114,13 @@ class NostrWPIntegration {
       };
 
       const handler = (e) => {
-        if (e.data.type === type + '_RESPONSE' && e.data._id === id) {
+        const data = e?.data;
+        if (!data || typeof data !== 'object') return;
+
+        if (data.type === type + '_RESPONSE' && data._id === id) {
           cleanup();
-          if (e.data.error) reject(new Error(e.data.error));
-          else resolve(e.data.result);
+          if (data.error) reject(new Error(data.error));
+          else resolve(data.result);
         }
       };
 
@@ -158,6 +153,10 @@ class NostrWPIntegration {
     return Boolean(nostrApi && typeof nostrApi.getPublicKey === 'function');
   }
 
+  isBridgeAvailable() {
+    return document.documentElement?.getAttribute('data-wp-nostr-extension-bridge') === '1';
+  }
+
   async waitForNostrApi(maxWaitMs = 3000, intervalMs = 120) {
     const start = Date.now();
     while ((Date.now() - start) < maxWaitMs) {
@@ -169,13 +168,67 @@ class NostrWPIntegration {
     return false;
   }
 
+  async waitForExtensionAvailability(maxWaitMs = 3000, intervalMs = 120) {
+    const start = Date.now();
+    while ((Date.now() - start) < maxWaitMs) {
+      if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+        return true;
+      }
+      await this.delay(intervalMs);
+    }
+    return false;
+  }
+
+  isFirefoxBrowser() {
+    return /firefox\//i.test(navigator.userAgent || '');
+  }
+
+  getInstallStoreUrl() {
+    const defaultChromeStoreUrl = 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]';
+    const defaultFirefoxStoreUrl = 'https://addons.mozilla.org/firefox/addon/[ADDON_SLUG]';
+    const legacyStoreUrl = String(this.config.extensionStoreUrl || '').trim();
+
+    if (this.isFirefoxBrowser()) {
+      const firefoxStoreUrl = String(this.config.extensionStoreUrlFirefox || '').trim();
+      if (firefoxStoreUrl) return firefoxStoreUrl;
+      if (legacyStoreUrl && !/chrome\.google\.com\/webstore/i.test(legacyStoreUrl)) {
+        return legacyStoreUrl;
+      }
+      return defaultFirefoxStoreUrl;
+    }
+
+    const chromeStoreUrl = String(this.config.extensionStoreUrlChrome || '').trim();
+    if (chromeStoreUrl) return chromeStoreUrl;
+    if (legacyStoreUrl) return legacyStoreUrl;
+    return defaultChromeStoreUrl;
+  }
+
+  async getPublicKey() {
+    if (this.isNostrApiAvailable()) {
+      return await window.nostr.getPublicKey();
+    }
+
+    if (!this.hasExtension && !this.isBridgeAvailable()) {
+      throw new Error('Nostr extension bridge is not available');
+    }
+
+    const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', null, 30000);
+    if (typeof pubkey !== 'string' || pubkey.length < 10) {
+      throw new Error('Extension returned invalid public key');
+    }
+    return pubkey;
+  }
+
   delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   showInstallPrompt() {
-    const storeUrl = this.config.extensionStoreUrl ||
-      'https://chrome.google.com/webstore/detail/[EXTENSION_ID]';
+    if (document.getElementById('nostr-install-modal')) {
+      return;
+    }
+
+    const storeUrl = this.getInstallStoreUrl();
 
     const modal = document.createElement('div');
     modal.id = 'nostr-install-modal';
@@ -260,7 +313,7 @@ class NostrWPIntegration {
     btn.textContent = 'Registriere...';
 
     try {
-      const hexPubkey = await window.nostr.getPublicKey();
+      const hexPubkey = await this.getPublicKey();
 
       const response = await fetch(`${this.config.restUrl}register`, {
         method: 'POST',
@@ -289,7 +342,7 @@ class NostrWPIntegration {
 
   async verifyExistingUser(expectedPubkey) {
     try {
-      const currentPubkey = await window.nostr.getPublicKey();
+      const currentPubkey = await this.getPublicKey();
       if (currentPubkey !== expectedPubkey) {
         this.showKeyMismatchWarning(expectedPubkey, currentPubkey);
       } else {
