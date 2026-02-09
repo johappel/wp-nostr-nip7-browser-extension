@@ -32,42 +32,61 @@ function showBackupDialog(npub, nsec) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="dialog backup">
-      <h2>Dein Nostr-Schlüsselpaar</h2>
+      <h2>Dein Nostr-Schluesselpaar</h2>
       <p class="warning">
-        Wichtig: Speichere deinen privaten Schlüssel jetzt. Nach dem Schließen wird er nicht erneut angezeigt.
+        Wichtig: Speichere deinen privaten Schluessel jetzt. Nach dem Schliessen wird er nicht erneut angezeigt.
       </p>
 
       <div class="key-box">
-        <label>Öffentlicher Schlüssel (npub):</label>
+        <label>Oeffentlicher Schluessel (npub):</label>
         <code id="npub-display">${escapeHtml(npub)}</code>
-        <button onclick="copyToClipboard('npub-display')" class="btn-secondary">Kopieren</button>
+        <button id="copy-npub" class="btn-secondary" type="button">Kopieren</button>
       </div>
 
       <div class="key-box nsec-box">
-        <label>Privater Schlüssel (nsec) - geheim halten:</label>
+        <label>Privater Schluessel (nsec) - geheim halten:</label>
         <code id="nsec-display" class="blurred">${escapeHtml(nsec)}</code>
         <div class="btn-group">
-          <button onclick="toggleVisibility('nsec-display')" class="btn-secondary">Anzeigen</button>
-          <button onclick="copyToClipboard('nsec-display')" class="btn-secondary">Kopieren</button>
+          <button id="toggle-nsec" class="btn-secondary" type="button">Anzeigen</button>
+          <button id="copy-nsec" class="btn-secondary" type="button">Kopieren</button>
         </div>
       </div>
 
       <div class="actions">
-        <button id="download" class="btn-primary">Schlüssel als Datei speichern</button>
+        <button id="download" class="btn-primary">Schluessel als Datei speichern</button>
         <label class="checkbox-label">
           <input type="checkbox" id="confirm-saved" />
-          Ich habe meinen privaten Schlüssel sicher gespeichert
+          Ich habe meinen privaten Schluessel sicher gespeichert
         </label>
         <button id="close" class="btn-primary" disabled>Weiter</button>
       </div>
 
-      <p class="hint">Für den privaten Schlüssel gibt es kein Zurücksetzen.</p>
+      <p class="hint">Fuer den privaten Schluessel gibt es kein Zuruecksetzen.</p>
     </div>
   `;
 
   document.getElementById('confirm-saved').onchange = (e) => {
     document.getElementById('close').disabled = !e.target.checked;
   };
+
+  const npubEl = document.getElementById('npub-display');
+  const nsecEl = document.getElementById('nsec-display');
+  const copyNpubBtn = document.getElementById('copy-npub');
+  const copyNsecBtn = document.getElementById('copy-nsec');
+  const toggleNsecBtn = document.getElementById('toggle-nsec');
+
+  copyNpubBtn.addEventListener('click', async () => {
+    await copyTextWithFeedback(npubEl?.textContent || '', copyNpubBtn);
+  });
+
+  copyNsecBtn.addEventListener('click', async () => {
+    await copyTextWithFeedback(nsecEl?.textContent || '', copyNsecBtn);
+  });
+
+  toggleNsecBtn.addEventListener('click', () => {
+    nsecEl.classList.toggle('blurred');
+    toggleNsecBtn.textContent = nsecEl.classList.contains('blurred') ? 'Anzeigen' : 'Verbergen';
+  });
 
   document.getElementById('download').onclick = () => {
     const blob = new Blob(
@@ -84,7 +103,6 @@ function showBackupDialog(npub, nsec) {
 
   document.getElementById('close').onclick = () => window.close();
 }
-
 function showPasswordDialog(mode) {
   const app = document.getElementById('app');
   const isCreate = mode === 'create';
@@ -700,24 +718,43 @@ function showConfirmDialog(domain, kind) {
 }
 
 // Helpers
-window.copyToClipboard = function(elementId) {
-  const text = document.getElementById(elementId).textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = window.event?.target;
-    if (!btn) return;
-    const original = btn.textContent;
-    btn.textContent = 'Kopiert';
-    setTimeout(() => { btn.textContent = original; }, 1500);
-  });
-};
+async function copyTextWithFeedback(rawText, buttonEl = null) {
+  const text = String(rawText || '').trim();
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const fallbackOk = legacyCopyText(text);
+    if (!fallbackOk) return false;
+  }
 
-window.toggleVisibility = function(elementId) {
-  const el = document.getElementById(elementId);
-  el.classList.toggle('blurred');
-  const btn = window.event?.target;
-  if (!btn) return;
-  btn.textContent = el.classList.contains('blurred') ? 'Anzeigen' : 'Verbergen';
-};
+  if (buttonEl) {
+    const original = buttonEl.textContent;
+    buttonEl.textContent = 'Kopiert';
+    setTimeout(() => {
+      buttonEl.textContent = original;
+    }, 1500);
+  }
+  return true;
+}
+
+function legacyCopyText(text) {
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 function escapeHtml(text) {
   if (!text) return '';
