@@ -100,7 +100,23 @@ function bootstrapDomainSyncConfig() {
   const domainSecret = String(config.domainSecret || '').trim();
   if (!primaryDomain || !domainSecret) return;
 
-  sendRequest('NOSTR_SET_DOMAIN_CONFIG', { primaryDomain, domainSecret })
+  const authBrokerEnabled = config.authBrokerEnabled === true
+    || config.authBrokerEnabled === 1
+    || config.authBrokerEnabled === '1';
+  const authBrokerUrl = String(config.authBrokerUrl || '').trim();
+  const authBrokerOrigin = String(config.authBrokerOrigin || '').trim();
+  const authBrokerRpId = String(config.authBrokerRpId || '').trim();
+
+  sendRequest('NOSTR_SET_DOMAIN_CONFIG', {
+    primaryDomain,
+    domainSecret,
+    authBroker: {
+      enabled: authBrokerEnabled,
+      url: authBrokerUrl,
+      origin: authBrokerOrigin,
+      rpId: authBrokerRpId
+    }
+  })
     .catch((err) => {
       // Normal auf Nicht-Primary-Domains; der Fehler soll den Seitenfluss nicht stoeren.
       console.debug('[wp-nostr] Domain config bootstrap skipped:', err?.message || err);
@@ -126,8 +142,28 @@ function sendRequest(type, payload = null) {
     if (signerScope) {
       message.scope = signerScope;
     }
+    const authBroker = readAuthBrokerFromConfig();
+    if (authBroker) {
+      message.authBroker = authBroker;
+    }
     window.postMessage(message, '*');
   });
+}
+
+function readAuthBrokerFromConfig() {
+  const config = window.nostrConfig;
+  if (!config || typeof config !== 'object') return null;
+
+  const enabled = config.authBrokerEnabled === true
+    || config.authBrokerEnabled === 1
+    || config.authBrokerEnabled === '1';
+  const url = String(config.authBrokerUrl || '').trim();
+  const origin = String(config.authBrokerOrigin || '').trim();
+  const rpId = String(config.authBrokerRpId || '').trim();
+
+  if (!enabled && !url) return null;
+  if (!url) return null;
+  return { enabled, url, origin, rpId };
 }
 
 function determineSignerScope() {

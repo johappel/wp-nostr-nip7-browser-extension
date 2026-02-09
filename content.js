@@ -35,6 +35,7 @@ window.addEventListener('message', async (event) => {
     const response = await sendMessageWithRetry({
       type: event.data.type,
       payload: event.data.payload,
+      authBroker: event.data.authBroker,
       _id: event.data._id,
       scope: typeof event.data.scope === 'string' ? event.data.scope : null,
       domain: window.location.hostname,
@@ -79,10 +80,17 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
   if (!snapshot.configReady) {
     const viewerFromRest = await fetchViewerFromPageContext();
     const wpApi = readWpApiFromDom();
+    const authBroker = readAuthBrokerFromDom();
     if (viewerFromRest) {
-      return { viewer: viewerFromRest, pending: false, source: 'rest', wpApi };
+      return {
+        viewer: viewerFromRest,
+        pending: false,
+        source: 'rest',
+        wpApi,
+        authBroker: authBroker || sanitizeAuthBroker(viewerFromRest?.authBroker)
+      };
     }
-    return { viewer: null, pending: true, wpApi };
+    return { viewer: null, pending: true, wpApi, authBroker };
   }
 
   if (snapshot.userId === null) {
@@ -90,7 +98,13 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
     // to avoid false negatives in popup (especially Firefox/cookie edge cases).
     const viewerFromRest = await fetchViewerFromPageContext();
     if (viewerFromRest) {
-      return { viewer: viewerFromRest, pending: false, source: 'rest', wpApi: snapshot.wpApi };
+      return {
+        viewer: viewerFromRest,
+        pending: false,
+        source: 'rest',
+        wpApi: snapshot.wpApi,
+        authBroker: snapshot.authBroker || sanitizeAuthBroker(viewerFromRest?.authBroker)
+      };
     }
   }
 
@@ -104,7 +118,8 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
     },
     pending: false,
     source: 'dom',
-    wpApi: snapshot.wpApi
+    wpApi: snapshot.wpApi,
+    authBroker: snapshot.authBroker
   };
 }
 
@@ -117,7 +132,8 @@ function readViewerFromDom() {
   const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
   const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
   const wpApi = readWpApiFromDom();
-  return { configReady, userId, displayName, avatarUrl, pubkey, wpApi };
+  const authBroker = readAuthBrokerFromDom();
+  return { configReady, userId, displayName, avatarUrl, pubkey, wpApi, authBroker };
 }
 
 function readWpApiFromDom() {
@@ -126,6 +142,38 @@ function readWpApiFromDom() {
   const nonce = String(root?.getAttribute('data-wp-nostr-nonce') || '').trim();
   if (!restUrl || !nonce) return null;
   return { restUrl, nonce };
+}
+
+function readAuthBrokerFromDom() {
+  const root = document.documentElement;
+  const enabledAttr = String(root?.getAttribute('data-wp-nostr-auth-broker-enabled') || '').trim();
+  const url = String(root?.getAttribute('data-wp-nostr-auth-broker-url') || '').trim();
+  const origin = String(root?.getAttribute('data-wp-nostr-auth-broker-origin') || '').trim();
+  const rpId = String(root?.getAttribute('data-wp-nostr-auth-broker-rp-id') || '').trim();
+  const enabled = enabledAttr === '1' || enabledAttr.toLowerCase() === 'true';
+  return sanitizeAuthBroker({ enabled, url, origin, rpId });
+}
+
+function sanitizeAuthBroker(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const enabled = raw.enabled === true || raw.enabled === 1 || raw.enabled === '1';
+  const url = String(raw.url || raw.authBrokerUrl || '').trim();
+  const origin = String(raw.origin || raw.authBrokerOrigin || '').trim();
+  const rpId = String(raw.rpId || raw.authBrokerRpId || '').trim().toLowerCase();
+  if (!enabled && !url) return null;
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+    return {
+      enabled,
+      url: parsed.href,
+      origin: origin || parsed.origin,
+      rpId: rpId || parsed.hostname.toLowerCase()
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchViewerFromPageContext() {
@@ -143,7 +191,13 @@ async function fetchViewerFromPageContext() {
       userId: Number(data.userId) || null,
       displayName: data.displayName || null,
       avatarUrl: data.avatarUrl || null,
-      pubkey: data.pubkey || null
+      pubkey: data.pubkey || null,
+      authBroker: sanitizeAuthBroker({
+        enabled: data.authBrokerEnabled,
+        url: data.authBrokerUrl,
+        origin: data.authBrokerOrigin,
+        rpId: data.authBrokerRpId
+      })
     };
   } catch {
     return null;

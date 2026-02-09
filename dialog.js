@@ -3,6 +3,10 @@
 const params = new URLSearchParams(window.location.search);
 const type = params.get('type');
 const keyScope = normalizeKeyScope(params.get('scope'));
+const passkeyBrokerUrl = String(params.get('passkeyBrokerUrl') || '').trim();
+const passkeyBrokerOrigin = String(params.get('passkeyBrokerOrigin') || '').trim();
+const passkeyBrokerRpId = String(params.get('passkeyBrokerRpId') || '').trim();
+const passkeyIntent = String(params.get('passkeyIntent') || '').trim();
 const PASSKEY_TIMEOUT_MS = 120000;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -107,7 +111,12 @@ function showPasswordDialog(mode) {
         if (!passkeySupported) {
           throw new Error('Passkey is not supported in this browser context');
         }
-        const assertionResult = await runPasskeyAssertion();
+        const assertionResult = await runPasskeyAssertion({
+          brokerUrl: passkeyBrokerUrl,
+          brokerOrigin: passkeyBrokerOrigin,
+          rpId: passkeyBrokerRpId,
+          intent: passkeyIntent || 'unlock'
+        });
         await chrome.storage.session.set({
           passwordResult: {
             passkey: true,
@@ -312,12 +321,28 @@ async function createPasskeyCredential() {
   return toBase64Url(credential.rawId);
 }
 
-async function runPasskeyAssertion() {
+async function runPasskeyAssertion(options = {}) {
+  const brokerOptions = normalizeBrokerOptions(options);
   const credentialStorageKey = keyName('passkey_credential_id');
   const storage = await chrome.storage.local.get([credentialStorageKey]);
   const storedCredentialId = storage[credentialStorageKey];
   const knownCredentialId = String(storedCredentialId || '').trim();
 
+  if (brokerOptions) {
+    if (knownCredentialId) {
+      try {
+        return await runLocalPasskeyAssertion(knownCredentialId);
+      } catch {
+        return await runPasskeyAssertionViaBroker(brokerOptions);
+      }
+    }
+    return await runPasskeyAssertionViaBroker(brokerOptions);
+  }
+
+  return await runLocalPasskeyAssertion(knownCredentialId);
+}
+
+async function runLocalPasskeyAssertion(knownCredentialId = '') {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const request = {
     challenge,
@@ -375,9 +400,135 @@ async function runPasskeyAssertion() {
   };
 }
 
+function normalizeBrokerOptions(options) {
+  const rawUrl = String(options?.brokerUrl || '').trim();
+  if (!rawUrl) return null;
+
+  try {
+    const parsed = new URL(rawUrl);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+    const origin = String(options?.brokerOrigin || '').trim() || parsed.origin;
+    const rpId = String(options?.rpId || '').trim().toLowerCase() || parsed.hostname.toLowerCase();
+    const intent = String(options?.intent || '').trim() || 'generic';
+    return {
+      url: parsed.href,
+      origin,
+      rpId,
+      intent
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function runPasskeyAssertionViaBroker(brokerOptions) {
+  const requestId = createRequestId();
+  const features = 'popup=yes,width=560,height=740,resizable=yes,scrollbars=yes';
+  const brokerWindow = window.open(brokerOptions.url, 'wp_nostr_auth_broker', features);
+  if (!brokerWindow) {
+    throw new Error('Auth-Broker Fenster konnte nicht geoeffnet werden (Popup-Blocker?).');
+  }
+
+  return await new Promise((resolve, reject) => {
+    let finished = false;
+    let ready = false;
+
+    const cleanup = (closeWindow = false) => {
+      clearTimeout(readyTimeout);
+      clearTimeout(resultTimeout);
+      clearInterval(closedPoll);
+      window.removeEventListener('message', onMessage);
+      if (closeWindow) {
+        try {
+          brokerWindow.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const fail = (error) => {
+      if (finished) return;
+      finished = true;
+      cleanup(true);
+      reject(error instanceof Error ? error : new Error(String(error || 'Auth-Broker Fehler')));
+    };
+
+    const succeed = (result) => {
+      if (finished) return;
+      finished = true;
+      cleanup(true);
+      resolve(result);
+    };
+
+    const onMessage = (event) => {
+      if (event.source !== brokerWindow) return;
+      if (brokerOptions.origin && event.origin !== brokerOptions.origin) return;
+
+      const data = event?.data;
+      if (!data || typeof data !== 'object') return;
+
+      if (data.type === 'NOSTR_AUTH_BROKER_READY') {
+        ready = true;
+        clearTimeout(readyTimeout);
+        try {
+          brokerWindow.postMessage({
+            type: 'NOSTR_AUTH_BROKER_ASSERT_REQUEST',
+            requestId,
+            intent: brokerOptions.intent,
+            rpId: brokerOptions.rpId
+          }, brokerOptions.origin || '*');
+        } catch (error) {
+          fail(error);
+        }
+        return;
+      }
+
+      if (data.type !== 'NOSTR_AUTH_BROKER_ASSERT_RESULT') return;
+      if (String(data.requestId || '') !== requestId) return;
+
+      if (data.error) {
+        fail(new Error(String(data.error)));
+        return;
+      }
+
+      const credentialId = String(data?.result?.credentialId || '').trim();
+      if (!credentialId) {
+        fail(new Error('Auth-Broker Antwort enthaelt keine Credential-ID.'));
+        return;
+      }
+
+      succeed({ credentialId });
+    };
+
+    window.addEventListener('message', onMessage);
+
+    const readyTimeout = setTimeout(() => {
+      fail(new Error('Auth-Broker antwortet nicht. Bitte Login auf der Primary Domain pruefen.'));
+    }, 30000);
+
+    const resultTimeout = setTimeout(() => {
+      fail(new Error('Auth-Broker Passkey-Flow hat ein Timeout erreicht.'));
+    }, PASSKEY_TIMEOUT_MS + 30000);
+
+    const closedPoll = setInterval(() => {
+      if (brokerWindow.closed) {
+        const message = ready
+          ? 'Passkey-Dialog wurde geschlossen, bevor die Freigabe abgeschlossen war.'
+          : 'Auth-Broker Fenster wurde vor dem Start geschlossen.';
+        fail(new Error(message));
+      }
+    }, 300);
+  });
+}
+
 function mapPasskeyError(error, phase) {
   const rawMessage = String(error?.message || error || '');
   const name = String(error?.name || '').trim();
+
+  if (/Auth-Broker/i.test(rawMessage)) {
+    return rawMessage;
+  }
 
   if (name === 'NotAllowedError') {
     if (phase === 'unlock') {
@@ -395,6 +546,18 @@ function mapPasskeyError(error, phase) {
   }
 
   return rawMessage || 'Passkey operation failed';
+}
+
+function createRequestId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function normalizeKeyScope(scope) {

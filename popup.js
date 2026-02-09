@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const manualAddButton = document.getElementById('manual-add');
   let activeScope = 'global';
   let activeWpApi = null;
+  let activeAuthBroker = null;
 
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
@@ -40,6 +41,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const initialViewer = await loadViewerContext(wpUserCard, status);
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
+  activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
   const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
   activeScope = initialSigner?.scope || activeScope;
   await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
@@ -66,6 +68,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const viewer = await loadViewerContext(wpUserCard, status);
       activeScope = viewer?.scope || 'global';
       activeWpApi = sanitizeWpApi(viewer?.wpApi);
+      activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
       const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
       activeScope = signerContext?.scope || activeScope;
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
@@ -184,7 +187,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_ENABLE',
-        payload: { scope: activeScope, wpApi: activeWpApi }
+        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
       status.textContent = 'Cloud-Backup gespeichert.';
@@ -220,7 +223,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_RESTORE',
-        payload: { scope: activeScope, wpApi: activeWpApi }
+        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
       const pubkey = String(response?.result?.pubkey || '');
@@ -262,7 +265,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_BACKUP_DELETE',
-        payload: { scope: activeScope, wpApi: activeWpApi }
+        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
       });
       if (response?.error) throw new Error(response.error);
       status.textContent = 'Cloud-Backup geloescht.';
@@ -413,6 +416,28 @@ function sanitizeWpApi(raw) {
   const nonce = String(raw.nonce || '').trim();
   if (!restUrl || !nonce) return null;
   return { restUrl, nonce };
+}
+
+function sanitizeAuthBroker(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const enabled = raw.enabled === true || raw.enabled === 1 || raw.enabled === '1';
+  const url = String(raw.url || raw.authBrokerUrl || '').trim();
+  const origin = String(raw.origin || raw.authBrokerOrigin || '').trim();
+  const rpId = String(raw.rpId || raw.authBrokerRpId || '').trim().toLowerCase();
+  if (!enabled && !url) return null;
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+    return {
+      enabled,
+      url: parsed.href,
+      origin: origin || parsed.origin,
+      rpId: rpId || parsed.hostname.toLowerCase()
+    };
+  } catch {
+    return null;
+  }
 }
 
 function setCloudButtonsDisabled(buttons, disabled) {
@@ -578,13 +603,20 @@ async function loadViewerContext(cardNode, statusNode) {
   const origin = tabContext?.origin || null;
   if (!origin) {
     renderViewerCard(cardNode, null, null);
-    return { isLoggedIn: false, scope: 'global', origin: null, wpApi: null };
+    return { isLoggedIn: false, scope: 'global', origin: null, wpApi: null, authBroker: null };
   }
 
   const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
   if (viewerFromTab?.pending) {
     renderViewerCard(cardNode, { pending: true }, origin);
-    return { isLoggedIn: false, pending: true, scope: 'global', origin, wpApi: sanitizeWpApi(viewerFromTab.wpApi) };
+    return {
+      isLoggedIn: false,
+      pending: true,
+      scope: 'global',
+      origin,
+      wpApi: sanitizeWpApi(viewerFromTab.wpApi),
+      authBroker: sanitizeAuthBroker(viewerFromTab.authBroker)
+    };
   }
   if (viewerFromTab?.viewer) {
     const viewer = viewerFromTab.viewer;
@@ -593,7 +625,13 @@ async function loadViewerContext(cardNode, statusNode) {
       ? buildWpScope(origin, viewer.userId)
       : 'global';
     renderViewerCard(cardNode, viewer, origin);
-    return { ...viewer, scope, origin, wpApi: sanitizeWpApi(viewerFromTab.wpApi) };
+    return {
+      ...viewer,
+      scope,
+      origin,
+      wpApi: sanitizeWpApi(viewerFromTab.wpApi),
+      authBroker: sanitizeAuthBroker(viewerFromTab.authBroker || viewer.authBroker)
+    };
   }
 
   try {
@@ -603,7 +641,13 @@ async function loadViewerContext(cardNode, statusNode) {
       ? buildWpScope(origin, viewer.userId)
       : 'global';
     renderViewerCard(cardNode, viewer, origin);
-    return { ...viewer, scope, origin, wpApi: null };
+    return {
+      ...viewer,
+      scope,
+      origin,
+      wpApi: null,
+      authBroker: sanitizeAuthBroker(viewer.authBroker)
+    };
   } catch (error) {
     const errorText = String(error?.message || error || '');
     const likelyNoWpEndpoint =
@@ -614,14 +658,14 @@ async function loadViewerContext(cardNode, statusNode) {
 
     if (likelyNoWpEndpoint) {
       renderViewerCard(cardNode, null, origin);
-      return { isLoggedIn: false, scope: 'global', origin, wpApi: null };
+      return { isLoggedIn: false, scope: 'global', origin, wpApi: null, authBroker: null };
     }
 
     renderViewerCard(cardNode, null, origin, error);
     if (statusNode) {
       statusNode.textContent = `WP-Viewer konnte nicht geladen werden: ${error.message || error}`;
     }
-    return { isLoggedIn: false, scope: 'global', origin, wpApi: null };
+    return { isLoggedIn: false, scope: 'global', origin, wpApi: null, authBroker: null };
   }
 }
 
@@ -643,7 +687,13 @@ async function getViewerFromActiveTab(tabId) {
   if (typeof tabId !== 'number') return null;
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'NOSTR_GET_PAGE_CONTEXT' });
-    if (response?.pending === true) return { pending: true, wpApi: sanitizeWpApi(response?.wpApi) };
+    if (response?.pending === true) {
+      return {
+        pending: true,
+        wpApi: sanitizeWpApi(response?.wpApi),
+        authBroker: sanitizeAuthBroker(response?.authBroker)
+      };
+    }
     const viewer = response?.viewer;
     if (!viewer || typeof viewer !== 'object') return null;
     const source = String(response?.source || '').trim().toLowerCase();
@@ -651,12 +701,14 @@ async function getViewerFromActiveTab(tabId) {
       pending: false,
       source: source === 'rest' ? 'rest' : 'dom',
       wpApi: sanitizeWpApi(response?.wpApi),
+      authBroker: sanitizeAuthBroker(response?.authBroker || viewer?.authBroker),
       viewer: {
         isLoggedIn: viewer.isLoggedIn === true,
         userId: Number(viewer.userId) || null,
         displayName: viewer.displayName || null,
         avatarUrl: viewer.avatarUrl || null,
-        pubkey: viewer.pubkey || null
+        pubkey: viewer.pubkey || null,
+        authBroker: sanitizeAuthBroker(viewer?.authBroker)
       }
     };
   } catch {
@@ -674,7 +726,17 @@ async function fetchWpViewer(origin) {
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
-  return await response.json();
+  const viewer = await response.json();
+  if (!viewer || typeof viewer !== 'object') {
+    throw new Error('Invalid viewer payload');
+  }
+  viewer.authBroker = sanitizeAuthBroker({
+    enabled: viewer.authBrokerEnabled,
+    url: viewer.authBrokerUrl,
+    origin: viewer.authBrokerOrigin,
+    rpId: viewer.authBrokerRpId
+  });
+  return viewer;
 }
 
 function renderViewerCard(cardNode, viewer, origin, error = null) {

@@ -17,6 +17,7 @@ add_action('wp_enqueue_scripts', 'nostr_enqueue_scripts');
 add_action('rest_api_init', 'nostr_register_endpoints');
 add_action('admin_menu', 'nostr_admin_menu');
 add_action('admin_init', 'nostr_admin_init');
+add_action('template_redirect', 'nostr_maybe_render_auth_broker_page');
 
 function nostr_get_or_create_domain_secret() {
     $secret = get_option('nostr_domain_secret');
@@ -103,6 +104,10 @@ function nostr_enqueue_scripts() {
         'profileRelayUrl' => $profile_relay_url,
         'publishKind0OnRegister' => !empty($publish_kind0),
         'profileNip05' => $profile_nip05,
+        'authBrokerEnabled' => nostr_is_auth_broker_enabled(),
+        'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
+        'authBrokerOrigin' => nostr_get_auth_broker_origin(),
+        'authBrokerRpId' => nostr_get_auth_broker_rp_id(),
         // extensionStoreUrl bleibt fuer Rueckwaertskompatibilitaet erhalten.
         'extensionStoreUrl' => get_option('nostr_extension_store_url', 'https://chrome.google.com/webstore/detail/[EXTENSION_ID]'),
         'extensionStoreUrlChrome' => get_option(
@@ -180,6 +185,18 @@ function nostr_register_endpoints() {
     register_rest_route('nostr/v1', '/backup/delete', [
         'methods' => 'POST',
         'callback' => 'nostr_backup_delete',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+
+    // Primary-Domain Auth Broker (WebAuthn Assertion)
+    register_rest_route('nostr/v1', '/webauthn/assert/challenge', [
+        'methods' => 'POST',
+        'callback' => 'nostr_webauthn_assert_challenge',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+    register_rest_route('nostr/v1', '/webauthn/assert/verify', [
+        'methods' => 'POST',
+        'callback' => 'nostr_webauthn_assert_verify',
         'permission_callback' => 'is_user_logged_in'
     ]);
 }
@@ -343,7 +360,11 @@ function nostr_get_viewer() {
             'userId' => null,
             'displayName' => null,
             'avatarUrl' => null,
-            'pubkey' => null
+            'pubkey' => null,
+            'authBrokerEnabled' => nostr_is_auth_broker_enabled(),
+            'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
+            'authBrokerOrigin' => nostr_get_auth_broker_origin(),
+            'authBrokerRpId' => nostr_get_auth_broker_rp_id()
         ];
     }
 
@@ -357,7 +378,11 @@ function nostr_get_viewer() {
         'userId' => $user_id,
         'displayName' => $user ? $user->display_name : '',
         'avatarUrl' => $avatar ? $avatar : '',
-        'pubkey' => $pubkey !== '' ? $pubkey : null
+        'pubkey' => $pubkey !== '' ? $pubkey : null,
+        'authBrokerEnabled' => nostr_is_auth_broker_enabled(),
+        'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
+        'authBrokerOrigin' => nostr_get_auth_broker_origin(),
+        'authBrokerRpId' => nostr_get_auth_broker_rp_id()
     ];
 }
 
@@ -387,6 +412,240 @@ function nostr_get_domains() {
         'updated'   => $timestamp,
         'signature' => $signature
     ];
+}
+
+function nostr_is_auth_broker_enabled() {
+    return (int) get_option('nostr_auth_broker_enabled', 0) === 1;
+}
+
+function nostr_is_auth_broker_dev_mode_enabled() {
+    return (int) get_option('nostr_auth_broker_dev_mode_unverified', 0) === 1;
+}
+
+function nostr_get_auth_broker_origin() {
+    $configured = trim((string) get_option('nostr_auth_broker_origin', ''));
+    if ($configured !== '') {
+        return untrailingslashit($configured);
+    }
+    return untrailingslashit(home_url());
+}
+
+function nostr_get_auth_broker_url() {
+    $origin = nostr_get_auth_broker_origin();
+    if ($origin === '') {
+        return '';
+    }
+    return untrailingslashit($origin) . '/?nostr_auth_broker=1';
+}
+
+function nostr_get_auth_broker_rp_id() {
+    $configured = trim((string) get_option('nostr_auth_broker_rp_id', ''));
+    if ($configured !== '') {
+        return strtolower($configured);
+    }
+    $host = parse_url(nostr_get_auth_broker_origin(), PHP_URL_HOST);
+    return $host ? strtolower($host) : strtolower((string) parse_url(home_url(), PHP_URL_HOST));
+}
+
+function nostr_base64url_encode($binary) {
+    return rtrim(strtr(base64_encode($binary), '+/', '-_'), '=');
+}
+
+function nostr_base64url_decode($value) {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    $normalized = strtr($value, '-_', '+/');
+    $padding = strlen($normalized) % 4;
+    if ($padding > 0) {
+        $normalized .= str_repeat('=', 4 - $padding);
+    }
+    $decoded = base64_decode($normalized, true);
+    return $decoded === false ? null : $decoded;
+}
+
+function nostr_webauthn_challenge_transient_key($user_id, $challenge_id) {
+    return 'nostr_webauthn_ch_' . md5($user_id . '|' . $challenge_id);
+}
+
+function nostr_webauthn_assert_challenge(WP_REST_Request $request) {
+    if (!nostr_is_auth_broker_enabled()) {
+        return new WP_Error('auth_broker_disabled', 'Primary-domain auth broker is disabled', ['status' => 503]);
+    }
+
+    $user_id = get_current_user_id();
+    $intent = sanitize_text_field((string) $request->get_param('intent'));
+    if ($intent === '') {
+        $intent = 'generic';
+    }
+
+    $challenge_bytes = random_bytes(32);
+    $challenge = nostr_base64url_encode($challenge_bytes);
+    $challenge_id = bin2hex(random_bytes(16));
+    $origin = nostr_get_auth_broker_origin();
+    $rp_id = nostr_get_auth_broker_rp_id();
+
+    $record = [
+        'userId' => $user_id,
+        'intent' => $intent,
+        'challenge' => $challenge,
+        'origin' => $origin,
+        'rpId' => $rp_id,
+        'createdAt' => time()
+    ];
+    set_transient(
+        nostr_webauthn_challenge_transient_key($user_id, $challenge_id),
+        $record,
+        3 * MINUTE_IN_SECONDS
+    );
+
+    return [
+        'challengeId' => $challenge_id,
+        'challengeOptions' => [
+            'challenge' => $challenge,
+            'rpId' => $rp_id,
+            'timeout' => 120000,
+            'userVerification' => 'preferred'
+        ],
+        'origin' => $origin,
+        'rpId' => $rp_id,
+        'intent' => $intent
+    ];
+}
+
+function nostr_auth_broker_sign_result_token($claims) {
+    $payload = wp_json_encode($claims);
+    $payload_b64 = nostr_base64url_encode($payload);
+    $signature = hash_hmac('sha256', $payload_b64, wp_salt('auth'));
+    return $payload_b64 . '.' . $signature;
+}
+
+function nostr_webauthn_assert_verify(WP_REST_Request $request) {
+    if (!nostr_is_auth_broker_enabled()) {
+        return new WP_Error('auth_broker_disabled', 'Primary-domain auth broker is disabled', ['status' => 503]);
+    }
+
+    $user_id = get_current_user_id();
+    $challenge_id = sanitize_text_field((string) $request->get_param('challengeId'));
+    if ($challenge_id === '') {
+        return new WP_Error('invalid_challenge_id', 'challengeId is required', ['status' => 400]);
+    }
+
+    $transient_key = nostr_webauthn_challenge_transient_key($user_id, $challenge_id);
+    $record = get_transient($transient_key);
+    delete_transient($transient_key);
+    if (!is_array($record)) {
+        return new WP_Error('challenge_not_found', 'Challenge expired or invalid', ['status' => 400]);
+    }
+
+    $client_data_json_b64 = (string) $request->get_param('clientDataJSON');
+    $credential_id = sanitize_text_field((string) $request->get_param('credentialId'));
+
+    $client_data_raw = nostr_base64url_decode($client_data_json_b64);
+    if ($client_data_raw === null) {
+        return new WP_Error('invalid_client_data', 'clientDataJSON is invalid', ['status' => 400]);
+    }
+    $client_data = json_decode($client_data_raw, true);
+    if (!is_array($client_data)) {
+        return new WP_Error('invalid_client_data', 'clientDataJSON cannot be parsed', ['status' => 400]);
+    }
+
+    $type = isset($client_data['type']) ? (string) $client_data['type'] : '';
+    $challenge = isset($client_data['challenge']) ? (string) $client_data['challenge'] : '';
+    $origin = isset($client_data['origin']) ? untrailingslashit((string) $client_data['origin']) : '';
+    $expected_origin = untrailingslashit((string) $record['origin']);
+
+    if ($type !== 'webauthn.get') {
+        return new WP_Error('invalid_assertion_type', 'Unexpected WebAuthn assertion type', ['status' => 400]);
+    }
+    if ($challenge !== (string) $record['challenge']) {
+        return new WP_Error('challenge_mismatch', 'Assertion challenge does not match', ['status' => 400]);
+    }
+    if ($origin !== $expected_origin) {
+        return new WP_Error('origin_mismatch', 'Assertion origin does not match auth broker origin', ['status' => 400]);
+    }
+
+    if (!nostr_is_auth_broker_dev_mode_enabled()) {
+        return new WP_Error(
+            'webauthn_verifier_unavailable',
+            'Server-side WebAuthn signature verification is not enabled yet. Enable dev mode for initial integration tests.',
+            ['status' => 501]
+        );
+    }
+
+    $now = time();
+    $claims = [
+        'iss' => 'wp-nostr-auth-broker',
+        'userId' => $user_id,
+        'intent' => (string) $record['intent'],
+        'challengeId' => $challenge_id,
+        'credentialId' => $credential_id,
+        'iat' => $now,
+        'exp' => $now + 120,
+        'mode' => 'dev-unverified'
+    ];
+
+    return [
+        'success' => true,
+        'token' => nostr_auth_broker_sign_result_token($claims),
+        'expiresAt' => $claims['exp'],
+        'mode' => $claims['mode']
+    ];
+}
+
+function nostr_maybe_render_auth_broker_page() {
+    if (!isset($_GET['nostr_auth_broker'])) {
+        return;
+    }
+
+    if (!nostr_is_auth_broker_enabled()) {
+        status_header(503);
+        wp_die('Nostr Auth Broker is disabled.');
+    }
+
+    if (!is_user_logged_in()) {
+        auth_redirect();
+        exit;
+    }
+
+    nocache_headers();
+    $script_url = plugins_url('nostr-auth-broker.js', __FILE__);
+    $config = [
+        'restUrl' => rest_url('nostr/v1/'),
+        'nonce' => wp_create_nonce('wp_rest'),
+        'origin' => nostr_get_auth_broker_origin(),
+        'rpId' => nostr_get_auth_broker_rp_id()
+    ];
+    ?>
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nostr Auth Broker</title>
+  <style>
+    body { font-family: "Segoe UI", Tahoma, sans-serif; margin: 0; padding: 16px; background: #f5f7fb; color: #1e2530; }
+    .card { max-width: 560px; margin: 0 auto; background: #fff; border: 1px solid #d8dee9; border-radius: 10px; padding: 16px; }
+    .status { font-size: 14px; margin-top: 10px; color: #3b4656; white-space: pre-line; }
+    .small { font-size: 12px; color: #5a6677; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 style="margin:0 0 8px;font-size:20px;">Nostr Auth Broker</h1>
+    <p style="margin:0;">Dieses Fenster wird von der Extension fuer Passkey-Auth genutzt.</p>
+    <p id="nostr-auth-broker-status" class="status">Warte auf Extension-Anfrage...</p>
+    <p class="small">Origin: <?php echo esc_html(nostr_get_auth_broker_origin()); ?> | RP-ID: <?php echo esc_html(nostr_get_auth_broker_rp_id()); ?></p>
+  </div>
+  <script>
+    window.nostrAuthBrokerConfig = <?php echo wp_json_encode($config); ?>;
+  </script>
+  <script src="<?php echo esc_url($script_url); ?>"></script>
+</body>
+</html>
+    <?php
+    exit;
 }
 
 function nostr_backup_meta_key() {
@@ -690,6 +949,31 @@ function nostr_sanitize_profile_relay_url($value) {
     return implode("\n", $valid);
 }
 
+function nostr_sanitize_auth_broker_origin($value) {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return untrailingslashit(home_url());
+    }
+    $value = untrailingslashit($value);
+    if (preg_match('/^https?:\/\/[^\s\/$.?#].[^\s]*$/i', $value) !== 1) {
+        return untrailingslashit(home_url());
+    }
+    return $value;
+}
+
+function nostr_sanitize_auth_broker_rp_id($value) {
+    $value = strtolower(trim((string) $value));
+    if ($value === '') {
+        $host = parse_url(nostr_get_auth_broker_origin(), PHP_URL_HOST);
+        return $host ? strtolower($host) : '';
+    }
+    if (preg_match('/^[a-z0-9.-]+$/', $value) !== 1) {
+        $host = parse_url(nostr_get_auth_broker_origin(), PHP_URL_HOST);
+        return $host ? strtolower($host) : '';
+    }
+    return $value;
+}
+
 function nostr_admin_init() {
     register_setting('nostr_options', 'nostr_allowed_domains', [
         'type' => 'string',
@@ -726,6 +1010,22 @@ function nostr_admin_init() {
     register_setting('nostr_options', 'nostr_profile_nip05', [
         'type' => 'string',
         'sanitize_callback' => 'sanitize_text_field'
+    ]);
+    register_setting('nostr_options', 'nostr_auth_broker_enabled', [
+        'type' => 'integer',
+        'sanitize_callback' => 'nostr_sanitize_checkbox'
+    ]);
+    register_setting('nostr_options', 'nostr_auth_broker_origin', [
+        'type' => 'string',
+        'sanitize_callback' => 'nostr_sanitize_auth_broker_origin'
+    ]);
+    register_setting('nostr_options', 'nostr_auth_broker_rp_id', [
+        'type' => 'string',
+        'sanitize_callback' => 'nostr_sanitize_auth_broker_rp_id'
+    ]);
+    register_setting('nostr_options', 'nostr_auth_broker_dev_mode_unverified', [
+        'type' => 'integer',
+        'sanitize_callback' => 'nostr_sanitize_checkbox'
     ]);
 }
 
@@ -774,6 +1074,69 @@ function nostr_settings_page() {
                         <p class="description">
                             Eine Domain pro Zeile. Diese Domains werden der Extension als vertrauenswürdig mitgeteilt.
                         </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">Primary-Domain Auth Broker</th>
+                    <td>
+                        <label for="nostr_auth_broker_enabled">
+                            <input type="checkbox"
+                                   id="nostr_auth_broker_enabled"
+                                   name="nostr_auth_broker_enabled"
+                                   value="1"
+                                   <?php checked((int) get_option('nostr_auth_broker_enabled', 0), 1); ?> />
+                            Auth-Broker fuer WebAuthn-Challenge/Assertion aktivieren
+                        </label>
+                        <p class="description">
+                            Broker-URL: <code><?php echo esc_html(nostr_get_auth_broker_url()); ?></code>
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="nostr_auth_broker_origin">Auth-Broker Origin</label>
+                    </th>
+                    <td>
+                        <input type="text"
+                               id="nostr_auth_broker_origin"
+                               name="nostr_auth_broker_origin"
+                               value="<?php echo esc_attr(get_option('nostr_auth_broker_origin', untrailingslashit(home_url()))); ?>"
+                               class="regular-text" />
+                        <p class="description">
+                            Stabile Origin fuer Passkey-Flow (z.B. https://auth.edufeed.org).
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">
+                        <label for="nostr_auth_broker_rp_id">WebAuthn RP-ID</label>
+                    </th>
+                    <td>
+                        <input type="text"
+                               id="nostr_auth_broker_rp_id"
+                               name="nostr_auth_broker_rp_id"
+                               value="<?php echo esc_attr(get_option('nostr_auth_broker_rp_id', parse_url(untrailingslashit(home_url()), PHP_URL_HOST))); ?>"
+                               class="regular-text" />
+                        <p class="description">
+                            Beispiel: <code>edufeed.org</code> fuer gemeinsame Nutzung ueber Subdomains.
+                        </p>
+                    </td>
+                </tr>
+
+                <tr>
+                    <th scope="row">Auth-Broker Dev Mode</th>
+                    <td>
+                        <label for="nostr_auth_broker_dev_mode_unverified">
+                            <input type="checkbox"
+                                   id="nostr_auth_broker_dev_mode_unverified"
+                                   name="nostr_auth_broker_dev_mode_unverified"
+                                   value="1"
+                                   <?php checked((int) get_option('nostr_auth_broker_dev_mode_unverified', 0), 1); ?> />
+                            Unverifizierte Assertion fuer Integrations-Tests erlauben (NICHT fuer Produktion)
+                        </label>
                     </td>
                 </tr>
                 

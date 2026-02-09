@@ -42,6 +42,10 @@ class NostrWPIntegration {
       root.removeAttribute('data-wp-nostr-pubkey');
       root.removeAttribute('data-wp-nostr-rest-url');
       root.removeAttribute('data-wp-nostr-nonce');
+      root.removeAttribute('data-wp-nostr-auth-broker-enabled');
+      root.removeAttribute('data-wp-nostr-auth-broker-url');
+      root.removeAttribute('data-wp-nostr-auth-broker-origin');
+      root.removeAttribute('data-wp-nostr-auth-broker-rp-id');
       return;
     }
 
@@ -51,6 +55,10 @@ class NostrWPIntegration {
     root.setAttribute('data-wp-nostr-pubkey', String(this.config.wpPubkey || ''));
     root.setAttribute('data-wp-nostr-rest-url', String(this.config.restUrl || ''));
     root.setAttribute('data-wp-nostr-nonce', String(this.config.nonce || ''));
+    root.setAttribute('data-wp-nostr-auth-broker-enabled', this.config.authBrokerEnabled ? '1' : '0');
+    root.setAttribute('data-wp-nostr-auth-broker-url', String(this.config.authBrokerUrl || ''));
+    root.setAttribute('data-wp-nostr-auth-broker-origin', String(this.config.authBrokerOrigin || ''));
+    root.setAttribute('data-wp-nostr-auth-broker-rp-id', String(this.config.authBrokerRpId || ''));
   }
 
   async init() {
@@ -176,7 +184,18 @@ class NostrWPIntegration {
       return;
     }
 
-    const payload = { primaryDomain, domainSecret };
+    const payload = {
+      primaryDomain,
+      domainSecret,
+      authBroker: {
+        enabled: this.config.authBrokerEnabled === true
+          || this.config.authBrokerEnabled === 1
+          || this.config.authBrokerEnabled === '1',
+        url: String(this.config.authBrokerUrl || ''),
+        origin: String(this.config.authBrokerOrigin || ''),
+        rpId: String(this.config.authBrokerRpId || '')
+      }
+    };
     let lastError = null;
 
     for (let attempt = 1; attempt <= 3; attempt++) {

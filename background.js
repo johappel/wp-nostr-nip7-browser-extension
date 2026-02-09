@@ -211,11 +211,11 @@ async function ensurePasswordIfNeeded(passwordProtected) {
   return password;
 }
 
-async function ensurePasskeyIfNeeded() {
+async function ensurePasskeyIfNeeded(passkeyAuthOptions = null) {
   const cached = await getCachedPasskeyAuth();
   if (cached) return true;
 
-  const unlockResult = await promptPassword('unlock-passkey');
+  const unlockResult = await promptPassword('unlock-passkey', passkeyAuthOptions);
   if (!unlockResult || unlockResult.passkey !== true) {
     throw new Error('Passkey required');
   }
@@ -224,12 +224,12 @@ async function ensurePasskeyIfNeeded() {
   return true;
 }
 
-async function ensureUnlockForMode(mode) {
+async function ensureUnlockForMode(mode, passkeyAuthOptions = null) {
   if (mode === KeyManager.MODE_PASSWORD) {
     return await ensurePasswordIfNeeded(true);
   }
   if (mode === KeyManager.MODE_PASSKEY) {
-    await ensurePasskeyIfNeeded();
+    await ensurePasskeyIfNeeded(passkeyAuthOptions);
     return null;
   }
   return null;
@@ -299,6 +299,32 @@ function sanitizeWpApiContext(rawContext) {
   const nonce = String(rawContext.nonce || '').trim();
   if (!restUrl || !nonce) return null;
   return { restUrl, nonce };
+}
+
+function sanitizePasskeyAuthBroker(rawBroker) {
+  if (!rawBroker || typeof rawBroker !== 'object') return null;
+
+  const enabled = rawBroker.enabled === true || rawBroker.enabled === 1 || rawBroker.enabled === '1';
+  const rawUrl = String(rawBroker.url || rawBroker.authBrokerUrl || '').trim();
+  if (!enabled && !rawUrl) return null;
+  if (!rawUrl) return null;
+
+  try {
+    const parsed = new URL(rawUrl);
+    if (!/^https?:$/i.test(parsed.protocol)) return null;
+
+    const origin = String(rawBroker.origin || rawBroker.authBrokerOrigin || '').trim();
+    const rpIdRaw = String(rawBroker.rpId || rawBroker.authBrokerRpId || '').trim().toLowerCase();
+
+    return {
+      enabled,
+      url: parsed.href,
+      origin: origin || parsed.origin,
+      rpId: rpIdRaw || parsed.hostname.toLowerCase()
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeWpRestBaseUrl(restUrl) {
@@ -466,6 +492,30 @@ async function configureProtectionAndStoreSecretKey(secretKey) {
   };
 }
 
+async function resolvePasskeyAuthOptions(request, domain, isInternalExtensionRequest) {
+  const topLevelBroker = sanitizePasskeyAuthBroker(request?.authBroker);
+  if (topLevelBroker) {
+    return topLevelBroker;
+  }
+
+  const payloadBroker = sanitizePasskeyAuthBroker(request?.payload?.authBroker);
+  if (payloadBroker) {
+    return payloadBroker;
+  }
+
+  if (isInternalExtensionRequest) {
+    return null;
+  }
+
+  const normalizedDomain = normalizeDomainEntry(domain);
+  if (!normalizedDomain) {
+    return null;
+  }
+
+  const configs = await getDomainSyncConfigs();
+  return sanitizePasskeyAuthBroker(configs[normalizedDomain]?.authBroker);
+}
+
 // ============================================================
 // Message Handler
 // ============================================================
@@ -501,6 +551,15 @@ async function handleMessage(request, sender) {
   if (scopedTypes.has(requestType)) {
     await ensureKeyScope(getKeyScopeFromRequest(request));
   }
+
+  let cachedPasskeyAuthOptions;
+  let passkeyAuthOptionsResolved = false;
+  const getPasskeyAuthOptions = async () => {
+    if (passkeyAuthOptionsResolved) return cachedPasskeyAuthOptions;
+    cachedPasskeyAuthOptions = await resolvePasskeyAuthOptions(request, domain, isInternalExtensionRequest);
+    passkeyAuthOptionsResolved = true;
+    return cachedPasskeyAuthOptions;
+  };
 
   // PING erfordert keine Domain-Validierung (f????r Extension-Detection)
   if (request.type === 'NOSTR_PING') {
@@ -629,7 +688,7 @@ async function handleMessage(request, sender) {
     }
 
     const protectionMode = await keyManager.getProtectionMode();
-    const unlockPassword = await ensureUnlockForMode(protectionMode);
+    const unlockPassword = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
     const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null);
     if (!secretKey) {
       throw new Error('Key unlock failed.');
@@ -637,7 +696,10 @@ async function handleMessage(request, sender) {
 
     try {
       const pubkey = getPublicKey(secretKey);
-      const passkeyUnlock = await promptPassword('unlock-passkey');
+      const passkeyUnlock = await promptPassword('unlock-passkey', {
+        ...(await getPasskeyAuthOptions() || {}),
+        intent: 'backup-enable'
+      });
       if (!passkeyUnlock?.passkey) {
         throw new Error('Passkey confirmation is required for cloud backup.');
       }
@@ -700,7 +762,10 @@ async function handleMessage(request, sender) {
     const wrapIv = wrappedPack.subarray(0, 12);
     const wrappedDekCiphertext = wrappedPack.subarray(12);
 
-    const passkeyUnlock = await promptPassword('unlock-passkey');
+    const passkeyUnlock = await promptPassword('unlock-passkey', {
+      ...(await getPasskeyAuthOptions() || {}),
+      intent: 'backup-restore'
+    });
     if (!passkeyUnlock?.passkey) {
       throw new Error('Passkey confirmation is required for restore.');
     }
@@ -762,7 +827,7 @@ async function handleMessage(request, sender) {
       throw new Error('No key available for export');
     }
     const protectionMode = await keyManager.getProtectionMode();
-    const password = await ensureUnlockForMode(protectionMode);
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
     const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!secretKey) {
       throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
@@ -814,7 +879,7 @@ async function handleMessage(request, sender) {
 
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen
   if (request.type === 'NOSTR_SET_DOMAIN_CONFIG') {
-    const { primaryDomain, domainSecret } = request.payload || {};
+    const { primaryDomain, domainSecret, authBroker } = request.payload || {};
     if (!primaryDomain || !domainSecret) {
       throw new Error('Invalid domain sync config');
     }
@@ -823,7 +888,7 @@ async function handleMessage(request, sender) {
     if (!domain || !primaryHost || domain.toLowerCase() !== primaryHost.toLowerCase()) {
       throw new Error('Domain config can only be set from primary domain');
     }
-    const result = await upsertDomainSyncConfig(primaryDomain, domainSecret);
+    const result = await upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker);
     // Domain-Sync im Hintergrund starten, damit der Message-Channel sofort antwortet.
     updateDomainWhitelist().catch((e) => {
       console.error('Failed to update domains after config:', e);
@@ -835,11 +900,11 @@ async function handleMessage(request, sender) {
     if (!isInternalExtensionRequest) {
       throw new Error('Manual domain config is only allowed from extension UI');
     }
-    const { primaryDomain, domainSecret } = request.payload || {};
+    const { primaryDomain, domainSecret, authBroker } = request.payload || {};
     if (!primaryDomain || !domainSecret) {
       throw new Error('Primary domain and secret are required');
     }
-    await upsertDomainSyncConfig(primaryDomain, domainSecret);
+    await upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker);
     await updateDomainWhitelist();
     return await getDomainSyncState();
   }
@@ -948,7 +1013,7 @@ async function handleMessage(request, sender) {
         return pubkey;
       }
       const protectionMode = await keyManager.getProtectionMode();
-      const password = await ensureUnlockForMode(protectionMode);
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
       const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
       if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       const pubkey = getPublicKey(secretKey);
@@ -958,7 +1023,7 @@ async function handleMessage(request, sender) {
 
     case 'NOSTR_SIGN_EVENT': {
       const protectionMode = await keyManager.getProtectionMode();
-      const password = await ensureUnlockForMode(protectionMode);
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
       const sensitiveKinds = [0, 3, 4];
       if (sensitiveKinds.includes(request.payload?.kind)) {
         const confirmed = await promptSignConfirmation(request.payload, domain);
@@ -978,7 +1043,7 @@ async function handleMessage(request, sender) {
     case 'NOSTR_NIP04_ENCRYPT':
     case 'NOSTR_NIP04_DECRYPT': {
       const protectionMode = await keyManager.getProtectionMode();
-      const password = await ensureUnlockForMode(protectionMode);
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
       const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
       if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       try {
@@ -991,7 +1056,7 @@ async function handleMessage(request, sender) {
     case 'NOSTR_NIP44_ENCRYPT':
     case 'NOSTR_NIP44_DECRYPT': {
       const protectionMode = await keyManager.getProtectionMode();
-      const password = await ensureUnlockForMode(protectionMode);
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
       const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
       if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       try {
@@ -1010,7 +1075,7 @@ async function handleMessage(request, sender) {
 // UI-Dialoge Helper
 // ============================================================
 
-async function promptPassword(mode) {
+async function promptPassword(mode, passkeyAuthOptions = null) {
   await chrome.storage.session.remove('passwordResult');
   return new Promise((resolve) => {
     let timeoutId = null;
@@ -1035,9 +1100,25 @@ async function promptPassword(mode) {
       resolve(null);
     }, DIALOG_TIMEOUT_MS);
 
-    const scopeParam = encodeURIComponent(activeKeyScope || KEY_SCOPE_DEFAULT);
+    const query = new URLSearchParams({
+      type: 'password',
+      mode: String(mode || ''),
+      scope: activeKeyScope || KEY_SCOPE_DEFAULT
+    });
+
+    const broker = sanitizePasskeyAuthBroker(passkeyAuthOptions);
+    if (broker?.enabled && broker.url) {
+      query.set('passkeyBrokerUrl', broker.url);
+      if (broker.origin) query.set('passkeyBrokerOrigin', broker.origin);
+      if (broker.rpId) query.set('passkeyBrokerRpId', broker.rpId);
+    }
+    const intent = String(passkeyAuthOptions?.intent || '').trim();
+    if (intent) {
+      query.set('passkeyIntent', intent);
+    }
+
     chrome.windows.create({
-      url: `dialog.html?type=password&mode=${mode}&scope=${scopeParam}`,
+      url: `dialog.html?${query.toString()}`,
       type: 'popup', width: 400, height: 350, focused: true
     });
   });
@@ -1205,6 +1286,7 @@ function normalizeDomainSyncConfigEntry(value) {
   const domainSecret = String(value.domainSecret || '').trim();
   const primaryHost = extractHostFromPrimaryDomain(primaryDomain);
   if (!primaryDomain || !primaryHost || !domainSecret) return null;
+  const authBroker = sanitizePasskeyAuthBroker(value.authBroker);
 
   return {
     primaryDomain,
@@ -1213,7 +1295,8 @@ function normalizeDomainSyncConfigEntry(value) {
     lastSyncAt: Number(value.lastSyncAt) || null,
     lastSyncBaseUrl: typeof value.lastSyncBaseUrl === 'string' ? value.lastSyncBaseUrl : null,
     lastSyncError: typeof value.lastSyncError === 'string' ? value.lastSyncError : null,
-    syncedDomains: normalizeDomainList(value.syncedDomains || [])
+    syncedDomains: normalizeDomainList(value.syncedDomains || []),
+    authBroker
   };
 }
 
@@ -1231,11 +1314,12 @@ function normalizeDomainSyncConfigs(configs) {
   return normalized;
 }
 
-function createDomainSyncConfig(primaryDomain, domainSecret) {
+function createDomainSyncConfig(primaryDomain, domainSecret, authBroker = null) {
   const normalizedPrimaryDomain = getPrimaryDomainBaseUrl(primaryDomain);
   const primaryHost = extractHostFromPrimaryDomain(normalizedPrimaryDomain);
   const normalizedSecret = String(domainSecret || '').trim();
   if (!normalizedPrimaryDomain || !primaryHost || !normalizedSecret) return null;
+  const normalizedBroker = sanitizePasskeyAuthBroker(authBroker);
 
   return {
     primaryHost,
@@ -1246,7 +1330,8 @@ function createDomainSyncConfig(primaryDomain, domainSecret) {
       lastSyncAt: null,
       lastSyncBaseUrl: null,
       lastSyncError: null,
-      syncedDomains: []
+      syncedDomains: [],
+      authBroker: normalizedBroker
     }
   };
 }
@@ -1266,7 +1351,8 @@ async function getDomainSyncState() {
       lastSyncAt: config.lastSyncAt || null,
       lastSyncBaseUrl: config.lastSyncBaseUrl || null,
       lastSyncError: config.lastSyncError || null,
-      syncedDomains: normalizeDomainList(config.syncedDomains || [])
+      syncedDomains: normalizeDomainList(config.syncedDomains || []),
+      authBroker: sanitizePasskeyAuthBroker(config.authBroker)
     }))
     .sort((a, b) => a.host.localeCompare(b.host));
 
@@ -1289,7 +1375,8 @@ async function getDomainSyncConfigs() {
   if (!domainSyncMigrationDone) {
     const migrated = createDomainSyncConfig(
       storage[LEGACY_PRIMARY_DOMAIN_KEY],
-      storage[LEGACY_DOMAIN_SECRET_KEY]
+      storage[LEGACY_DOMAIN_SECRET_KEY],
+      null
     );
 
     if (migrated && !configs[migrated.primaryHost]) {
@@ -1310,10 +1397,11 @@ async function isConfiguredPrimaryDomain(domain) {
   return Boolean(configs[normalizedDomain]);
 }
 
-async function upsertDomainSyncConfig(primaryDomain, domainSecret) {
+async function upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker = null) {
   const normalizedPrimaryDomain = getPrimaryDomainBaseUrl(primaryDomain);
   const primaryHost = extractHostFromPrimaryDomain(normalizedPrimaryDomain);
   const normalizedSecret = String(domainSecret || '').trim();
+  const normalizedBroker = sanitizePasskeyAuthBroker(authBroker);
 
   if (!normalizedPrimaryDomain || !primaryHost || !normalizedSecret) {
     throw new Error('Invalid domain sync config');
@@ -1327,7 +1415,8 @@ async function upsertDomainSyncConfig(primaryDomain, domainSecret) {
     lastSyncAt: domainSyncConfigs[primaryHost]?.lastSyncAt || null,
     lastSyncBaseUrl: domainSyncConfigs[primaryHost]?.lastSyncBaseUrl || null,
     lastSyncError: null,
-    syncedDomains: domainSyncConfigs[primaryHost]?.syncedDomains || []
+    syncedDomains: domainSyncConfigs[primaryHost]?.syncedDomains || [],
+    authBroker: normalizedBroker || sanitizePasskeyAuthBroker(domainSyncConfigs[primaryHost]?.authBroker)
   };
 
   await chrome.storage.local.set({
