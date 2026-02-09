@@ -280,6 +280,8 @@ async function handleMessage(request, sender) {
     'NOSTR_LOCK',
     'NOSTR_SET_UNLOCK_CACHE_POLICY',
     'NOSTR_GET_STATUS',
+    'NOSTR_EXPORT_NSEC',
+    'NOSTR_IMPORT_NSEC',
     'NOSTR_GET_PUBLIC_KEY',
     'NOSTR_SIGN_EVENT',
     'NOSTR_NIP04_ENCRYPT',
@@ -379,6 +381,99 @@ async function handleMessage(request, sender) {
       cacheMode: unlockCachePolicy === 'session'
         ? 'session'
         : (unlockCachePolicy === 'off' ? 'off' : 'timed')
+    };
+  }
+
+  if (request.type === 'NOSTR_EXPORT_NSEC') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Key export is only allowed from extension UI');
+    }
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No key available for export');
+    }
+    const protectionMode = await keyManager.getProtectionMode();
+    const password = await ensureUnlockForMode(protectionMode);
+    const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!secretKey) {
+      throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
+    }
+    try {
+      const pubkey = getPublicKey(secretKey);
+      const npub = nip19.npubEncode(pubkey);
+      const nsec = nip19.nsecEncode(secretKey);
+      return { pubkey, npub, nsec };
+    } finally {
+      secretKey.fill(0);
+    }
+  }
+
+  if (request.type === 'NOSTR_IMPORT_NSEC') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Key import is only allowed from extension UI');
+    }
+    const nsecInput = String(request.payload?.nsec || '').trim();
+    if (!nsecInput) {
+      throw new Error('nsec is required');
+    }
+
+    let decoded;
+    try {
+      decoded = nip19.decode(nsecInput);
+    } catch {
+      throw new Error('Invalid nsec format');
+    }
+    if (decoded?.type !== 'nsec' || !(decoded.data instanceof Uint8Array)) {
+      throw new Error('Invalid nsec payload');
+    }
+    const importedSecret = new Uint8Array(decoded.data);
+    if (importedSecret.length !== 32) {
+      importedSecret.fill(0);
+      throw new Error('Invalid nsec length');
+    }
+
+    const setupResult = await promptPassword('create');
+    if (!setupResult) {
+      importedSecret.fill(0);
+      throw new Error('Import canceled');
+    }
+    const setupMode = typeof setupResult === 'object' ? setupResult.protection : null;
+    const usePasskey = setupMode === KeyManager.MODE_PASSKEY;
+    const useNoPassword = !usePasskey && typeof setupResult === 'object' && setupResult.noPassword === true;
+    const password = usePasskey ? null : extractPasswordFromDialogResult(setupResult);
+
+    if (!useNoPassword && !usePasskey && !password) {
+      importedSecret.fill(0);
+      throw new Error('Password required');
+    }
+
+    try {
+      await keyManager.storeKey(
+        importedSecret,
+        useNoPassword ? null : password,
+        usePasskey
+          ? {
+            mode: KeyManager.MODE_PASSKEY,
+            passkeyCredentialId: setupResult.credentialId
+          }
+          : undefined
+      );
+    } finally {
+      importedSecret.fill(0);
+    }
+
+    await clearUnlockCaches();
+    if (usePasskey) {
+      await cachePasskeyAuthWithPolicy();
+    } else if (!useNoPassword && password) {
+      await cachePasswordWithPolicy(password);
+    }
+
+    const pubkey = await keyManager.getPublicKey(usePasskey || useNoPassword ? null : password);
+    return {
+      success: true,
+      pubkey,
+      npub: nip19.npubEncode(pubkey)
     };
   }
 
@@ -605,8 +700,9 @@ async function promptPassword(mode) {
       resolve(null);
     }, DIALOG_TIMEOUT_MS);
 
+    const scopeParam = encodeURIComponent(activeKeyScope || KEY_SCOPE_DEFAULT);
     chrome.windows.create({
-      url: `dialog.html?type=password&mode=${mode}`,
+      url: `dialog.html?type=password&mode=${mode}&scope=${scopeParam}`,
       type: 'popup', width: 400, height: 350, focused: true
     });
   });

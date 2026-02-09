@@ -2,6 +2,7 @@
 
 const params = new URLSearchParams(window.location.search);
 const type = params.get('type');
+const keyScope = normalizeKeyScope(params.get('scope'));
 
 document.addEventListener('DOMContentLoaded', () => {
   switch (type) {
@@ -285,7 +286,9 @@ async function createPasskeyCredential() {
 }
 
 async function runPasskeyAssertion() {
-  const { passkey_credential_id: storedCredentialId } = await chrome.storage.local.get(['passkey_credential_id']);
+  const credentialStorageKey = keyName('passkey_credential_id');
+  const storage = await chrome.storage.local.get([credentialStorageKey]);
+  const storedCredentialId = storage[credentialStorageKey];
   const credentialId = String(storedCredentialId || '').trim();
   if (!credentialId) {
     throw new Error('No passkey is configured for this extension key');
@@ -309,6 +312,18 @@ async function runPasskeyAssertion() {
   if (!assertion) {
     throw new Error('Passkey unlock failed');
   }
+}
+
+function normalizeKeyScope(scope) {
+  const value = String(scope || '').trim();
+  if (!value || value === 'global') return 'global';
+  if (!/^[a-zA-Z0-9:._-]{1,120}$/.test(value)) return 'global';
+  return value;
+}
+
+function keyName(baseKey) {
+  if (keyScope === 'global') return baseKey;
+  return `${keyScope}::${baseKey}`;
 }
 
 function toBase64Url(buffer) {

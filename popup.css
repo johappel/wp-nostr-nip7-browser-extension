@@ -54,6 +54,27 @@ h1 {
   word-break: break-word;
 }
 
+.backup-section {
+  margin: 10px 0;
+  border-top: 1px solid #d8dee9;
+  padding-top: 10px;
+}
+
+.backup-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.backup-output {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  margin-bottom: 8px;
+  font-family: monospace;
+  font-size: 11px;
+}
+
 .row {
   display: flex;
   align-items: center;

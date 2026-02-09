@@ -559,6 +559,10 @@ class NostrWPIntegration {
 
   showKeyMismatchWarning(expected, actual) {
     console.warn('[Nostr] Key mismatch:', { expected, actual });
+    const existingWarning = document.querySelector('.nostr-warning');
+    if (existingWarning) {
+      existingWarning.remove();
+    }
     const expectedShort = this.formatShortPubkey(expected);
     const actualShort = this.formatShortPubkey(actual);
 
@@ -569,12 +573,84 @@ class NostrWPIntegration {
       <p>Registriert: <code>${expectedShort}</code></p>
       <p>Aktueller Browser: <code>${actualShort}</code></p>
       <p>Bitte denselben privaten Schluessel in beiden Browsern importieren (Backup/Restore), damit beide dieselbe Identitaet nutzen.</p>
+      <div class="nostr-modal-actions">
+        <button type="button" class="nostr-btn nostr-btn-primary" id="nostr-adopt-browser-key">
+          Aktuelles Browser-Profil uebernehmen
+        </button>
+        <button type="button" class="nostr-btn nostr-btn-secondary" id="nostr-recheck-key">
+          Neu pruefen
+        </button>
+      </div>
     `;
 
     const target = document.querySelector('.entry-content') ||
       document.querySelector('main') ||
       document.body;
     target.insertBefore(warning, target.firstChild);
+
+    const adoptButton = warning.querySelector('#nostr-adopt-browser-key');
+    if (adoptButton) {
+      adoptButton.onclick = async () => {
+        adoptButton.disabled = true;
+        const originalLabel = adoptButton.textContent;
+        adoptButton.textContent = 'Uebernehme...';
+        try {
+          await this.adoptCurrentBrowserProfile(expected, actual);
+          warning.remove();
+          this.showVerifiedStatus();
+        } catch (error) {
+          this.showError(error?.message || String(error));
+          adoptButton.disabled = false;
+          adoptButton.textContent = originalLabel;
+        }
+      };
+    }
+
+    const recheckButton = warning.querySelector('#nostr-recheck-key');
+    if (recheckButton) {
+      recheckButton.onclick = async () => {
+        recheckButton.disabled = true;
+        try {
+          await this.verifyExistingUser(expected);
+        } finally {
+          recheckButton.disabled = false;
+        }
+      };
+    }
+  }
+
+  async adoptCurrentBrowserProfile(expected, actual) {
+    if (!/^[a-f0-9]{64}$/i.test(String(actual || ''))) {
+      throw new Error('Aktueller Browser-Pubkey ist ungueltig.');
+    }
+
+    const response = await fetch(`${this.config.restUrl}register/replace`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-WP-Nonce': this.config.nonce
+      },
+      body: JSON.stringify({
+        pubkey: String(actual || '').toLowerCase(),
+        expectedCurrentPubkey: String(expected || '').toLowerCase()
+      })
+    });
+
+    let result = {};
+    try {
+      result = await response.json();
+    } catch {
+      result = {};
+    }
+
+    if (!response.ok || !result?.success) {
+      const status = Number(response.status || 0);
+      const message = String(result?.message || '');
+      if (status === 409 && String(result?.code || '') === 'pubkey_in_use') {
+        throw new Error('Der aktuelle Browser-Pubkey gehoert bereits zu einem anderen Account und kann nicht uebernommen werden.');
+      }
+      throw new Error(message || `Profil-Uebernahme fehlgeschlagen (HTTP ${status || 'unknown'}).`);
+    }
   }
 
   showRegistrationSuccess() {
@@ -614,7 +690,14 @@ class NostrWPIntegration {
     if (container) {
       container.insertBefore(error, container.firstChild);
       setTimeout(() => error.remove(), 5000);
+      return;
     }
+
+    const target = document.querySelector('.entry-content') ||
+      document.querySelector('main') ||
+      document.body;
+    target.insertBefore(error, target.firstChild);
+    setTimeout(() => error.remove(), 7000);
   }
 
   async getCurrentWPUser() {

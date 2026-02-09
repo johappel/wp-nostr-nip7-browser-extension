@@ -8,6 +8,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const wpUserCard = document.getElementById('wp-user-card');
   const unlockCacheSelect = document.getElementById('unlock-cache-policy');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
+  const exportKeyButton = document.getElementById('export-key');
+  const importKeyButton = document.getElementById('import-key');
+  const importNsecInput = document.getElementById('import-nsec');
+  const backupOutput = document.getElementById('backup-output');
   const syncNowButton = document.getElementById('sync-now');
   const syncList = document.getElementById('sync-list');
   const syncMeta = document.getElementById('sync-meta');
@@ -83,6 +87,62 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = `Unlock-Cache konnte nicht gespeichert werden: ${e.message || e}`;
     } finally {
       unlockCacheSelect.disabled = false;
+    }
+  });
+
+  exportKeyButton.addEventListener('click', async () => {
+    exportKeyButton.disabled = true;
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_EXPORT_NSEC',
+        payload: { scope: activeScope }
+      });
+      if (response?.error) throw new Error(response.error);
+      const nsec = String(response?.result?.nsec || '').trim();
+      if (!nsec) throw new Error('Export lieferte keinen nsec');
+
+      backupOutput.value = nsec;
+      try {
+        await navigator.clipboard.writeText(nsec);
+        status.textContent = 'Schluessel exportiert und in die Zwischenablage kopiert.';
+      } catch {
+        status.textContent = 'Schluessel exportiert. Bitte sicher speichern.';
+      }
+    } catch (e) {
+      status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
+    } finally {
+      exportKeyButton.disabled = false;
+    }
+  });
+
+  importKeyButton.addEventListener('click', async () => {
+    const nsec = String(importNsecInput.value || '').trim();
+    if (!nsec) {
+      status.textContent = 'Bitte zuerst einen nsec eingeben.';
+      return;
+    }
+
+    const confirmed = confirm('Import ueberschreibt den bestehenden Schluessel im aktiven WP-User-Scope. Fortfahren?');
+    if (!confirmed) return;
+
+    importKeyButton.disabled = true;
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_IMPORT_NSEC',
+        payload: { scope: activeScope, nsec }
+      });
+      if (response?.error) throw new Error(response.error);
+      const pubkey = String(response?.result?.pubkey || '');
+      importNsecInput.value = '';
+      backupOutput.value = '';
+      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      status.textContent = pubkey
+        ? `Schluessel importiert (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknuepfen.`
+        : 'Schluessel importiert. Seite neu laden.';
+    } catch (e) {
+      status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
+    } finally {
+      importKeyButton.disabled = false;
     }
   });
 
@@ -451,4 +511,10 @@ function formatUnlockPolicyLabel(policy) {
     case 'session': return 'bis Browser-Ende';
     default: return '15 Minuten';
   }
+}
+
+function formatShortHex(hex) {
+  const value = String(hex || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(value)) return value || 'unbekannt';
+  return `${value.slice(0, 12)}...${value.slice(-8)}`;
 }

@@ -128,6 +128,11 @@ function nostr_register_endpoints() {
         'callback' => 'nostr_handle_register',
         'permission_callback' => 'is_user_logged_in'
     ]);
+    register_rest_route('nostr/v1', '/register/replace', [
+        'methods' => 'POST',
+        'callback' => 'nostr_handle_replace_register',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
     
     // Aktueller User Status
     register_rest_route('nostr/v1', '/user', [
@@ -237,6 +242,54 @@ function nostr_get_user() {
         'pubkey' => get_user_meta($user_id, 'nostr_pubkey', true),
         'registered' => get_user_meta($user_id, 'nostr_registered', true),
         'userId' => $user_id
+    ];
+}
+
+function nostr_handle_replace_register(WP_REST_Request $request) {
+    $pubkey = strtolower(sanitize_text_field($request->get_param('pubkey')));
+    $expected_current = strtolower(sanitize_text_field($request->get_param('expectedCurrentPubkey')));
+    $user_id = get_current_user_id();
+
+    if (!preg_match('/^[a-f0-9]{64}$/', $pubkey)) {
+        return new WP_Error(
+            'invalid_pubkey',
+            'Ungueltiges Pubkey Format',
+            ['status' => 400]
+        );
+    }
+
+    $current_pubkey = strtolower((string) get_user_meta($user_id, 'nostr_pubkey', true));
+    if ($expected_current !== '' && $current_pubkey !== '' && $expected_current !== $current_pubkey) {
+        return new WP_Error(
+            'pubkey_changed_concurrently',
+            'Der aktuell registrierte Pubkey hat sich geaendert. Bitte Seite neu laden und erneut pruefen.',
+            ['status' => 409, 'currentPubkey' => $current_pubkey]
+        );
+    }
+
+    $existing_user = get_users([
+        'meta_key' => 'nostr_pubkey',
+        'meta_value' => $pubkey,
+        'number' => 1,
+        'exclude' => [$user_id]
+    ]);
+    if (!empty($existing_user)) {
+        return new WP_Error(
+            'pubkey_in_use',
+            'Dieser Pubkey ist bereits einem anderen Account zugeordnet',
+            ['status' => 409]
+        );
+    }
+
+    update_user_meta($user_id, 'nostr_pubkey', $pubkey);
+    update_user_meta($user_id, 'nostr_registered', current_time('mysql'));
+
+    return [
+        'success' => true,
+        'pubkey' => $pubkey,
+        'previousPubkey' => $current_pubkey !== '' ? $current_pubkey : null,
+        'registered' => current_time('mysql'),
+        'replaced' => true
     ];
 }
 

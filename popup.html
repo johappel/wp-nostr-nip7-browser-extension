@@ -48,6 +48,19 @@
       <p id="unlock-cache-hint" class="hint"></p>
     </section>
 
+    <section class="backup-section">
+      <div class="section-head">
+        <h2>Backup / Restore</h2>
+      </div>
+      <div class="backup-actions">
+        <button id="export-key" class="btn-secondary" type="button">Schluessel exportieren</button>
+      </div>
+      <textarea id="backup-output" class="backup-output" rows="3" readonly placeholder="Exportierter nsec erscheint hier."></textarea>
+      <input id="import-nsec" type="text" placeholder="nsec1... (aus Backup importieren)" />
+      <button id="import-key" class="btn-secondary" type="button">Schluessel importieren</button>
+      <p class="hint">Der Import ueberschreibt den Schluessel fuer den aktiven WP-User-Scope.</p>
+    </section>
+
     <section class="sync-section">
       <div class="section-head">
         <h2>Domain Sync</h2>
