@@ -82,6 +82,44 @@ function showBackupDialog(npub, nsec) {
 function showPasswordDialog(mode) {
   const app = document.getElementById('app');
   const isCreate = mode === 'create';
+  const isUnlockPasskey = mode === 'unlock-passkey';
+  const passkeySupported = typeof window.PublicKeyCredential !== 'undefined';
+
+  if (isUnlockPasskey) {
+    app.innerHTML = `
+      <div class="dialog password">
+        <h2>Unlock with passkey</h2>
+        <p>Confirm with your device passkey (biometric/PIN).</p>
+        <p id="error" class="error" hidden></p>
+        <div class="actions">
+          <button id="unlock-passkey-submit" class="btn-primary">Unlock</button>
+          <button id="cancel" class="btn-secondary">Cancel</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('unlock-passkey-submit').onclick = async () => {
+      const errorEl = document.getElementById('error');
+      errorEl.hidden = true;
+      try {
+        if (!passkeySupported) {
+          throw new Error('Passkey is not supported in this browser context');
+        }
+        await runPasskeyAssertion();
+        await chrome.storage.session.set({ passwordResult: { passkey: true } });
+        window.close();
+      } catch (err) {
+        errorEl.textContent = err?.message || String(err) || 'Passkey unlock failed';
+        errorEl.hidden = false;
+      }
+    };
+
+    document.getElementById('cancel').onclick = () => {
+      chrome.storage.session.set({ passwordResult: null });
+      window.close();
+    };
+    return;
+  }
 
   app.innerHTML = `
     <div class="dialog password">
@@ -103,6 +141,14 @@ function showPasswordDialog(mode) {
           Store without password (less secure)
         </label>
         <p class="hint">Use only on private devices. Private key will be stored unencrypted.</p>
+        <div class="actions">
+          <button id="setup-passkey" class="btn-secondary" type="button" ${passkeySupported ? '' : 'disabled'}>
+            Use passkey instead (recommended)
+          </button>
+        </div>
+        <p class="hint">${passkeySupported
+          ? 'Passkey unlock uses biometric/PIN and keeps UX simple across devices.'
+          : 'Passkey is not available in this browser context.'}</p>
       ` : ''}
 
       <p id="error" class="error" hidden></p>
@@ -126,6 +172,32 @@ function showPasswordDialog(mode) {
     };
     noPasswordEl.onchange = toggleInputs;
     toggleInputs();
+  }
+
+  if (isCreate) {
+    const passkeyBtn = document.getElementById('setup-passkey');
+    if (passkeyBtn) {
+      passkeyBtn.onclick = async () => {
+        const errorEl = document.getElementById('error');
+        errorEl.hidden = true;
+        try {
+          if (!passkeySupported) {
+            throw new Error('Passkey is not supported in this browser context');
+          }
+          const credentialId = await createPasskeyCredential();
+          await chrome.storage.session.set({
+            passwordResult: {
+              protection: 'passkey',
+              credentialId
+            }
+          });
+          window.close();
+        } catch (err) {
+          errorEl.textContent = err?.message || String(err) || 'Passkey setup failed';
+          errorEl.hidden = false;
+        }
+      };
+    }
   }
 
   document.getElementById('submit').onclick = async () => {
@@ -175,6 +247,88 @@ function showPasswordDialog(mode) {
       if (e.key === 'Enter') document.getElementById('submit').click();
     };
   }
+}
+
+async function createPasskeyCredential() {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = crypto.getRandomValues(new Uint8Array(16));
+
+  const credential = await navigator.credentials.create({
+    publicKey: {
+      challenge,
+      rp: {
+        name: 'WP Nostr Signer'
+      },
+      user: {
+        id: userId,
+        name: 'wp-nostr-user',
+        displayName: 'WP Nostr User'
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 }, // ES256
+        { type: 'public-key', alg: -257 } // RS256
+      ],
+      authenticatorSelection: {
+        userVerification: 'preferred',
+        residentKey: 'preferred'
+      },
+      timeout: 60000,
+      attestation: 'none'
+    }
+  });
+
+  if (!credential || !credential.rawId) {
+    throw new Error('Passkey setup was canceled');
+  }
+
+  return toBase64Url(credential.rawId);
+}
+
+async function runPasskeyAssertion() {
+  const { passkey_credential_id: storedCredentialId } = await chrome.storage.local.get(['passkey_credential_id']);
+  const credentialId = String(storedCredentialId || '').trim();
+  if (!credentialId) {
+    throw new Error('No passkey is configured for this extension key');
+  }
+
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const allowCredentials = [{
+    type: 'public-key',
+    id: fromBase64Url(credentialId)
+  }];
+
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge,
+      allowCredentials,
+      userVerification: 'preferred',
+      timeout: 60000
+    }
+  });
+
+  if (!assertion) {
+    throw new Error('Passkey unlock failed');
+  }
+}
+
+function toBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function fromBase64Url(input) {
+  const base64 = String(input || '')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+    .padEnd(Math.ceil(String(input || '').length / 4) * 4, '=');
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 function showDomainApprovalDialog(domain) {

@@ -33,6 +33,29 @@ h1 {
   color: #8a3e00;
 }
 
+.unlock-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #d8dee9;
+}
+
+.field-label {
+  margin-top: 8px;
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.unlock-section select {
+  margin-top: 6px;
+  width: 100%;
+  border: 1px solid #c3ccd8;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: #fff;
+}
+
 .status {
   min-height: 18px;
   margin: 10px 0 0;

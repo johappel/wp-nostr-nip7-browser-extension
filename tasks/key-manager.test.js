@@ -43,6 +43,23 @@ describe('KeyManager', () => {
     expect(pubkey2).toBe(pubkey);
   });
 
+  it('should support passkey mode when credential id is provided', async () => {
+    const { pubkey } = await keyManager.generateKey(null, {
+      mode: KeyManager.MODE_PASSKEY,
+      passkeyCredentialId: 'test-passkey-credential-id'
+    });
+
+    expect(await keyManager.getProtectionMode()).toBe(KeyManager.MODE_PASSKEY);
+    expect(await keyManager.isPasswordProtected()).toBe(false);
+
+    const stored = await chrome.storage.local.get([KeyManager.PASSKEY_ID_KEY, KeyManager.PLAIN_KEY]);
+    expect(stored[KeyManager.PASSKEY_ID_KEY]).toBe('test-passkey-credential-id');
+    expect(stored[KeyManager.PLAIN_KEY]).toBeDefined();
+
+    const pubkey2 = await keyManager.getPublicKey(null);
+    expect(pubkey2).toBe(pubkey);
+  });
+
   it('should fail to retrieve key with wrong password', async () => {
     await keyManager.generateKey(password);
     

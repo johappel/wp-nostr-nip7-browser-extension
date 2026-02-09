@@ -16,10 +16,12 @@ NIP-07 Signer Extension mit WordPress-Integration (Chrome/Firefox, Manifest V3).
 npm install
 npm test
 npm run build
+npm run package:firefox
 ```
 
 Ergebnis:
 - Extension-Builds liegen in `dist/chrome` und `dist/firefox`.
+- Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.0.xpi`).
 
 ### 3. WordPress-Plugin lokal installieren
 

@@ -11,12 +11,20 @@ const CURRENT_VERSION = '1.0.0';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
 const LEGACY_PRIMARY_DOMAIN_KEY = 'primaryDomain';
 const LEGACY_DOMAIN_SECRET_KEY = 'domainSecret';
+const UNLOCK_CACHE_POLICY_KEY = 'unlockCachePolicy';
+const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
+const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
+const UNLOCK_CACHE_POLICY_DEFAULT = '15m';
+const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(['off', '5m', '15m', '30m', '60m', 'session']);
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
 
 // Passwort-Cache (nur f????r laufende Session, wird bei SW-Stop gel????scht)
 let cachedPassword = null;
+let cachedPasswordExpiresAt = null;
+let cachedPasskeyVerified = false;
+let cachedPasskeyExpiresAt = null;
 const DIALOG_TIMEOUT_MS = 25000;
 let domainSyncMigrationDone = false;
 
@@ -27,16 +35,201 @@ function extractPasswordFromDialogResult(result) {
   return typeof result.password === 'string' ? result.password : null;
 }
 
+function normalizeUnlockCachePolicy(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (UNLOCK_CACHE_ALLOWED_POLICIES.has(raw)) return raw;
+  return UNLOCK_CACHE_POLICY_DEFAULT;
+}
+
+function getUnlockCacheTtlMs(policy) {
+  if (policy === 'off') return 0;
+  if (policy === 'session') return null;
+  if (/^\d+m$/.test(policy)) {
+    return Number(policy.slice(0, -1)) * 60 * 1000;
+  }
+  return 15 * 60 * 1000;
+}
+
+function isCacheExpired(expiresAt) {
+  return typeof expiresAt === 'number' && Date.now() >= expiresAt;
+}
+
+async function getUnlockCachePolicy() {
+  const result = await chrome.storage.local.get([UNLOCK_CACHE_POLICY_KEY]);
+  const normalized = normalizeUnlockCachePolicy(result[UNLOCK_CACHE_POLICY_KEY]);
+  if (normalized !== result[UNLOCK_CACHE_POLICY_KEY]) {
+    await chrome.storage.local.set({ [UNLOCK_CACHE_POLICY_KEY]: normalized });
+  }
+  return normalized;
+}
+
+async function clearCachedPassword() {
+  cachedPassword = null;
+  cachedPasswordExpiresAt = null;
+  await chrome.storage.session.remove(UNLOCK_PASSWORD_SESSION_KEY);
+}
+
+async function clearCachedPasskeyAuth() {
+  cachedPasskeyVerified = false;
+  cachedPasskeyExpiresAt = null;
+  await chrome.storage.session.remove(UNLOCK_PASSKEY_SESSION_KEY);
+}
+
+async function clearUnlockCaches() {
+  await Promise.all([
+    clearCachedPassword(),
+    clearCachedPasskeyAuth()
+  ]);
+}
+
+async function getCachedPassword() {
+  if (typeof cachedPassword === 'string' && cachedPassword.length > 0) {
+    if (!isCacheExpired(cachedPasswordExpiresAt)) {
+      return cachedPassword;
+    }
+    await clearCachedPassword();
+    return null;
+  }
+
+  const result = await chrome.storage.session.get([UNLOCK_PASSWORD_SESSION_KEY]);
+  const sessionCache = result[UNLOCK_PASSWORD_SESSION_KEY];
+  if (!sessionCache || typeof sessionCache.password !== 'string' || sessionCache.password.length === 0) {
+    return null;
+  }
+
+  const expiresAt = typeof sessionCache.expiresAt === 'number' ? sessionCache.expiresAt : null;
+  if (isCacheExpired(expiresAt)) {
+    await clearCachedPassword();
+    return null;
+  }
+
+  cachedPassword = sessionCache.password;
+  cachedPasswordExpiresAt = expiresAt;
+  return cachedPassword;
+}
+
+async function cachePasswordWithPolicy(password) {
+  if (!password) {
+    await clearCachedPassword();
+    return;
+  }
+
+  const policy = await getUnlockCachePolicy();
+  if (policy === 'off') {
+    await clearCachedPassword();
+    return;
+  }
+
+  const ttlMs = getUnlockCacheTtlMs(policy);
+  const expiresAt = ttlMs === null ? null : (Date.now() + ttlMs);
+  cachedPassword = password;
+  cachedPasswordExpiresAt = expiresAt;
+
+  await chrome.storage.session.set({
+    [UNLOCK_PASSWORD_SESSION_KEY]: {
+      password,
+      expiresAt,
+      policy,
+      cachedAt: Date.now()
+    }
+  });
+}
+
+async function getCachedPasskeyAuth() {
+  if (cachedPasskeyVerified) {
+    if (!isCacheExpired(cachedPasskeyExpiresAt)) {
+      return true;
+    }
+    await clearCachedPasskeyAuth();
+    return false;
+  }
+
+  const result = await chrome.storage.session.get([UNLOCK_PASSKEY_SESSION_KEY]);
+  const sessionCache = result[UNLOCK_PASSKEY_SESSION_KEY];
+  if (!sessionCache || sessionCache.verified !== true) {
+    return false;
+  }
+
+  const expiresAt = typeof sessionCache.expiresAt === 'number' ? sessionCache.expiresAt : null;
+  if (isCacheExpired(expiresAt)) {
+    await clearCachedPasskeyAuth();
+    return false;
+  }
+
+  cachedPasskeyVerified = true;
+  cachedPasskeyExpiresAt = expiresAt;
+  return true;
+}
+
+async function cachePasskeyAuthWithPolicy() {
+  const policy = await getUnlockCachePolicy();
+  if (policy === 'off') {
+    await clearCachedPasskeyAuth();
+    return;
+  }
+
+  const ttlMs = getUnlockCacheTtlMs(policy);
+  const expiresAt = ttlMs === null ? null : (Date.now() + ttlMs);
+  cachedPasskeyVerified = true;
+  cachedPasskeyExpiresAt = expiresAt;
+
+  await chrome.storage.session.set({
+    [UNLOCK_PASSKEY_SESSION_KEY]: {
+      verified: true,
+      expiresAt,
+      policy,
+      cachedAt: Date.now()
+    }
+  });
+}
+
 async function ensurePasswordIfNeeded(passwordProtected) {
   if (!passwordProtected) return null;
-  if (cachedPassword) return cachedPassword;
+
+  const cached = await getCachedPassword();
+  if (cached) {
+    try {
+      const testKey = await keyManager.getKey(cached);
+      if (testKey) {
+        testKey.fill(0);
+        return cached;
+      }
+    } catch {
+      // Cache invalid/outdated - continue to interactive unlock.
+    }
+    await clearCachedPassword();
+  }
 
   const unlockResult = await promptPassword('unlock');
   const password = extractPasswordFromDialogResult(unlockResult);
   if (!password) throw new Error('Password required');
 
-  cachedPassword = password;
-  return cachedPassword;
+  await cachePasswordWithPolicy(password);
+  return password;
+}
+
+async function ensurePasskeyIfNeeded() {
+  const cached = await getCachedPasskeyAuth();
+  if (cached) return true;
+
+  const unlockResult = await promptPassword('unlock-passkey');
+  if (!unlockResult || unlockResult.passkey !== true) {
+    throw new Error('Passkey required');
+  }
+
+  await cachePasskeyAuthWithPolicy();
+  return true;
+}
+
+async function ensureUnlockForMode(mode) {
+  if (mode === KeyManager.MODE_PASSWORD) {
+    return await ensurePasswordIfNeeded(true);
+  }
+  if (mode === KeyManager.MODE_PASSKEY) {
+    await ensurePasskeyIfNeeded();
+    return null;
+  }
+  return null;
 }
 
 // ============================================================
@@ -68,32 +261,77 @@ async function handleMessage(request, sender) {
 
   // NOSTR_LOCK - Passwort-Cache l????schen
   if (request.type === 'NOSTR_LOCK') {
-    cachedPassword = null;
+    await clearUnlockCaches();
     return { locked: true };
+  }
+
+  if (request.type === 'NOSTR_SET_UNLOCK_CACHE_POLICY') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Unlock cache policy can only be set from extension UI');
+    }
+    const policy = normalizeUnlockCachePolicy(request.payload?.policy);
+    await chrome.storage.local.set({ [UNLOCK_CACHE_POLICY_KEY]: policy });
+
+    const currentCachedPassword = await getCachedPassword();
+    if (currentCachedPassword) {
+      await cachePasswordWithPolicy(currentCachedPassword);
+    }
+    const currentPasskeyAuth = await getCachedPasskeyAuth();
+    if (currentPasskeyAuth) {
+      await cachePasskeyAuthWithPolicy();
+    }
+
+    const refreshedCachedPassword = await getCachedPassword();
+    const refreshedPasskeyAuth = await getCachedPasskeyAuth();
+    return {
+      success: true,
+      policy,
+      hasCachedPassword: Boolean(refreshedCachedPassword),
+      hasCachedPasskeyAuth: Boolean(refreshedPasskeyAuth),
+      cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt
+    };
   }
 
   // NOSTR_GET_STATUS - Status f????r Popup (ben????tigt keine Domain)
   if (request.type === 'NOSTR_GET_STATUS') {
+    const unlockCachePolicy = await getUnlockCachePolicy();
+    const currentCachedPassword = await getCachedPassword();
+    const currentPasskeyAuth = await getCachedPasskeyAuth();
     const hasKey = await keyManager.hasKey();
-    const passwordProtected = hasKey ? await keyManager.isPasswordProtected() : false;
+    const protectionMode = hasKey ? await keyManager.getProtectionMode() : null;
+    const passwordProtected = protectionMode === KeyManager.MODE_PASSWORD;
+    const passkeyProtected = protectionMode === KeyManager.MODE_PASSKEY;
     let npub = null;
     
     // Wenn entsperrt, Npub berechnen und zur????ckgeben
-    if (hasKey && (!passwordProtected || cachedPassword)) {
+    const unlocked = hasKey && (
+      protectionMode === KeyManager.MODE_NONE ||
+      (passwordProtected && currentCachedPassword) ||
+      (passkeyProtected && currentPasskeyAuth)
+    );
+
+    if (unlocked) {
        try {
-         const pubkey = await keyManager.getPublicKey(passwordProtected ? cachedPassword : null);
+         const pubkey = await keyManager.getPublicKey(passwordProtected ? currentCachedPassword : null);
          npub = nip19.npubEncode(pubkey);
        } catch (e) {
-         if (passwordProtected) cachedPassword = null;
+         await clearUnlockCaches();
        }
     }
     
     return {
       hasKey,
-      locked: hasKey && passwordProtected && !cachedPassword,
+      locked: hasKey && !unlocked,
       passwordProtected,
+      passkeyProtected,
+      protectionMode,
       npub,
-      noPasswordMode: hasKey && !passwordProtected
+      noPasswordMode: protectionMode === KeyManager.MODE_NONE,
+      unlockCachePolicy,
+      cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt,
+      cacheMode: unlockCachePolicy === 'session'
+        ? 'session'
+        : (unlockCachePolicy === 'off' ? 'off' : 'timed')
     };
   }
 
@@ -205,36 +443,54 @@ async function handleMessage(request, sender) {
         const createResult = await promptPassword('create');
         if (!createResult) throw new Error('Password setup canceled');
 
-        const useNoPassword = typeof createResult === 'object' && createResult.noPassword === true;
-        const password = extractPasswordFromDialogResult(createResult);
-        if (!useNoPassword && !password) throw new Error('Password required');
+        const setupMode = typeof createResult === 'object' ? createResult.protection : null;
+        const usePasskey = setupMode === KeyManager.MODE_PASSKEY;
+        const useNoPassword = !usePasskey && typeof createResult === 'object' && createResult.noPassword === true;
+        const password = usePasskey ? null : extractPasswordFromDialogResult(createResult);
+        if (!useNoPassword && !usePasskey && !password) throw new Error('Password required');
 
-        cachedPassword = useNoPassword ? null : password;
+        if (useNoPassword) {
+          await clearUnlockCaches();
+        } else {
+          await cachePasswordWithPolicy(password);
+        }
 
         const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(
-          useNoPassword ? null : password
+          useNoPassword ? null : password,
+          usePasskey ? {
+            mode: KeyManager.MODE_PASSKEY,
+            passkeyCredentialId: createResult.credentialId
+          } : undefined
         );
+
+        if (usePasskey) {
+          await cachePasskeyAuthWithPolicy();
+        }
+
         await openBackupDialog(npub, nsecBech32);
         return pubkey;
       }
-      const passwordProtected = await keyManager.isPasswordProtected();
-      const password = await ensurePasswordIfNeeded(passwordProtected);
-      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
-      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
+      const protectionMode = await keyManager.getProtectionMode();
+      const password = await ensureUnlockForMode(protectionMode);
+      const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       const pubkey = getPublicKey(secretKey);
       secretKey.fill(0);
       return pubkey;
     }
 
     case 'NOSTR_SIGN_EVENT': {
-      const passwordProtected = await keyManager.isPasswordProtected();
-      const password = await ensurePasswordIfNeeded(passwordProtected);
+      const protectionMode = await keyManager.getProtectionMode();
+      const password = await ensureUnlockForMode(protectionMode);
       const sensitiveKinds = [0, 3, 4];
       if (sensitiveKinds.includes(request.payload?.kind)) {
         const confirmed = await promptSignConfirmation(request.payload, domain);
         if (!confirmed) throw new Error('Signing rejected by user');
       }
-      return await keyManager.signEvent(request.payload, passwordProtected ? password : null);
+      return await keyManager.signEvent(
+        request.payload,
+        protectionMode === KeyManager.MODE_PASSWORD ? password : null
+      );
     }
 
     case 'NOSTR_GET_RELAYS': {
@@ -244,10 +500,10 @@ async function handleMessage(request, sender) {
 
     case 'NOSTR_NIP04_ENCRYPT':
     case 'NOSTR_NIP04_DECRYPT': {
-      const passwordProtected = await keyManager.isPasswordProtected();
-      const password = await ensurePasswordIfNeeded(passwordProtected);
-      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
-      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
+      const protectionMode = await keyManager.getProtectionMode();
+      const password = await ensureUnlockForMode(protectionMode);
+      const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       try {
         const { pubkey, plaintext, ciphertext } = request.payload;
         if (request.type === 'NOSTR_NIP04_ENCRYPT') return await handleNIP04Encrypt(secretKey, pubkey, plaintext);
@@ -257,10 +513,10 @@ async function handleMessage(request, sender) {
 
     case 'NOSTR_NIP44_ENCRYPT':
     case 'NOSTR_NIP44_DECRYPT': {
-      const passwordProtected = await keyManager.isPasswordProtected();
-      const password = await ensurePasswordIfNeeded(passwordProtected);
-      const secretKey = await keyManager.getKey(passwordProtected ? password : null);
-      if (!secretKey) throw new Error(passwordProtected ? 'Invalid password' : 'No key found');
+      const protectionMode = await keyManager.getProtectionMode();
+      const password = await ensureUnlockForMode(protectionMode);
+      const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      if (!secretKey) throw new Error(protectionMode === KeyManager.MODE_PASSWORD ? 'Invalid password' : 'No key found');
       try {
         const { pubkey, plaintext, ciphertext } = request.payload;
         if (request.type === 'NOSTR_NIP44_ENCRYPT') return handleNIP44Encrypt(secretKey, pubkey, plaintext);

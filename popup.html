@@ -22,6 +22,22 @@
 
     <p class="hint warn">Aenderung wirkt nach Tab-Reload.</p>
 
+    <section class="unlock-section">
+      <div class="section-head">
+        <h2>Unlock Cache</h2>
+      </div>
+      <label class="field-label" for="unlock-cache-policy">Entsperrt bleiben</label>
+      <select id="unlock-cache-policy">
+        <option value="off">Nie (immer nach Passwort fragen)</option>
+        <option value="5m">5 Minuten</option>
+        <option value="15m">15 Minuten</option>
+        <option value="30m">30 Minuten</option>
+        <option value="60m">60 Minuten</option>
+        <option value="session">Bis Browser-Ende (Session)</option>
+      </select>
+      <p id="unlock-cache-hint" class="hint"></p>
+    </section>
+
     <section class="sync-section">
       <div class="section-head">
         <h2>Domain Sync</h2>

@@ -4,6 +4,8 @@
 Ein nutzerfreundlicher Recovery-Flow ohne merkpflichtige Passphrase:
 - Key-Backup wird in WordPress gespeichert.
 - Entsperrung fuer Restore erfolgt per Passkey (WebAuthn) und optional Recovery-Code.
+- Entsperrung der Extension selbst folgt ebenfalls "passkey-first" mit Fallback.
+- Unlocked-Session-Cache ist durch den User konfigurierbar (inkl. bis Session-Ende).
 - Kein Klartext-nsec auf dem Server.
 
 ## Abhaengigkeiten
@@ -18,6 +20,7 @@ Nach Abschluss dieses Tasks:
 - Ein verschluesseltes Backup wird im WP-Account gespeichert.
 - Wiederherstellung auf anderem Browser funktioniert ueber Passkey.
 - Optionaler Recovery-Code funktioniert als Fallback.
+- Unlock-Cache ist einstellbar: `off`, `5m`, `15m`, `30m`, `60m`, `session`.
 - Bestehender `nostr_pubkey` wird nicht still ueberschrieben (bereits umgesetzt).
 
 ---
@@ -28,6 +31,7 @@ Nach Abschluss dieses Tasks:
 2. Standardpfad: Biometrie/PIN ueber Passkey.
 3. Fallbackpfad: einmalig angezeigter Recovery-Code.
 4. Klare Warnung bei Key-Wechsel (anderer Pubkey).
+5. Unlock-Cache ist transparent und vom User steuerbar.
 
 ---
 
@@ -64,7 +68,9 @@ Nach Abschluss dieses Tasks:
   - `NOSTR_BACKUP_STATUS`
   - `NOSTR_BACKUP_RESTORE`
   - `NOSTR_BACKUP_DELETE`
+  - `NOSTR_SET_UNLOCK_CACHE_POLICY`
 - Orchestrierung Backup/Restore.
+- Verwaltung des passwortbasierten Unlock-Caches (inkl. Session-Option).
 
 ### 3. `lib/key-manager.js`
 - Methoden:
@@ -79,6 +85,7 @@ Nach Abschluss dieses Tasks:
   - "Aus WP wiederherstellen"
   - "Backup loeschen"
   - "Recovery-Code anzeigen/herunterladen" (nur einmal bei Setup)
+  - "Unlock Cache" Policy-Auswahl (`off`, `5m`, `15m`, `30m`, `60m`, `session`)
 
 ### 5. `tasks/*.test.js`
 - Tests fuer Backup-Blob-Format, Key-Wrapping, Restore-Checks, API-Fehlerfaelle.
@@ -143,6 +150,8 @@ Nach Abschluss dieses Tasks:
 3. Fehlversuche sind rate-limitiert und nachvollziehbar.
 4. Bestehender WP-Pubkey wird nicht still ersetzt.
 5. Cross-Browser Restore (Chrome <-> Firefox) funktioniert mit identischem Pubkey.
+6. Unlock-Cache-Policy ist im Popup aenderbar und wirkt sofort.
+7. Option `session` haelt den Unlock maximal bis Browser-Ende.
 
 ---
 

@@ -9,9 +9,11 @@ export class KeyManager {
   static SALT_KEY = 'encryption_salt';
   static IV_KEY = 'encryption_iv';
   static PLAIN_KEY = 'plain_nsec';
+  static PASSKEY_ID_KEY = 'passkey_credential_id';
   static MODE_KEY = 'key_protection';
 
   static MODE_PASSWORD = 'password';
+  static MODE_PASSKEY = 'passkey';
   static MODE_NONE = 'none';
 
   constructor(storage = chrome.storage.local) {
@@ -31,6 +33,7 @@ export class KeyManager {
     ]);
 
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSWORD) return true;
+    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSKEY) return false;
     if (result[KeyManager.MODE_KEY] === KeyManager.MODE_NONE) return false;
 
     // Backward compatibility for older stored keys.
@@ -39,17 +42,35 @@ export class KeyManager {
     return false;
   }
 
+  async getProtectionMode() {
+    const result = await this.storage.get([
+      KeyManager.MODE_KEY,
+      KeyManager.STORAGE_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PASSKEY_ID_KEY
+    ]);
+
+    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSWORD) return KeyManager.MODE_PASSWORD;
+    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSKEY) return KeyManager.MODE_PASSKEY;
+    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_NONE) return KeyManager.MODE_NONE;
+
+    if (result[KeyManager.STORAGE_KEY]) return KeyManager.MODE_PASSWORD;
+    if (result[KeyManager.PLAIN_KEY] && result[KeyManager.PASSKEY_ID_KEY]) return KeyManager.MODE_PASSKEY;
+    if (result[KeyManager.PLAIN_KEY]) return KeyManager.MODE_NONE;
+    return null;
+  }
+
   /**
    * @param {string|null} password
    * @returns {Promise<{pubkey: string, npub: string, nsecBech32: string}>}
    */
-  async generateKey(password = null) {
+  async generateKey(password = null, options = {}) {
     const secretKey = generateSecretKey();
     const pubkey = getPublicKey(secretKey);
     const npub = nip19.npubEncode(pubkey);
     const nsecBech32 = nip19.nsecEncode(secretKey);
 
-    await this.storeKey(secretKey, password);
+    await this.storeKey(secretKey, password, options);
     secretKey.fill(0);
 
     return { pubkey, npub, nsecBech32 };
@@ -59,14 +80,33 @@ export class KeyManager {
    * @param {Uint8Array} secretKey
    * @param {string|null} password
    */
-  async storeKey(secretKey, password = null) {
+  async storeKey(secretKey, password = null, options = {}) {
+    const requestedMode = typeof options.mode === 'string' ? options.mode : null;
+    const mode = requestedMode || (password ? KeyManager.MODE_PASSWORD : KeyManager.MODE_NONE);
+
+    if (mode === KeyManager.MODE_PASSKEY) {
+      const passkeyCredentialId = String(options.passkeyCredentialId || '').trim();
+      if (!passkeyCredentialId) {
+        throw new Error('Passkey credential id required');
+      }
+
+      await this.storage.set({
+        [KeyManager.PLAIN_KEY]: Array.from(secretKey),
+        [KeyManager.PASSKEY_ID_KEY]: passkeyCredentialId,
+        [KeyManager.MODE_KEY]: KeyManager.MODE_PASSKEY,
+        created: Date.now()
+      });
+      await this.storage.remove([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY]);
+      return;
+    }
+
     if (!password) {
       await this.storage.set({
         [KeyManager.PLAIN_KEY]: Array.from(secretKey),
         [KeyManager.MODE_KEY]: KeyManager.MODE_NONE,
         created: Date.now()
       });
-      await this.storage.remove([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY]);
+      await this.storage.remove([KeyManager.STORAGE_KEY, KeyManager.SALT_KEY, KeyManager.IV_KEY, KeyManager.PASSKEY_ID_KEY]);
       return;
     }
 
@@ -90,7 +130,7 @@ export class KeyManager {
       [KeyManager.MODE_KEY]: KeyManager.MODE_PASSWORD,
       created: Date.now()
     });
-    await this.storage.remove(KeyManager.PLAIN_KEY);
+    await this.storage.remove([KeyManager.PLAIN_KEY, KeyManager.PASSKEY_ID_KEY]);
   }
 
   /**
@@ -103,14 +143,21 @@ export class KeyManager {
       KeyManager.STORAGE_KEY,
       KeyManager.SALT_KEY,
       KeyManager.IV_KEY,
-      KeyManager.PLAIN_KEY
+      KeyManager.PLAIN_KEY,
+      KeyManager.PASSKEY_ID_KEY
     ]);
 
     const mode = result[KeyManager.MODE_KEY]
       || (result[KeyManager.STORAGE_KEY] ? KeyManager.MODE_PASSWORD : null)
+      || (result[KeyManager.PLAIN_KEY] && result[KeyManager.PASSKEY_ID_KEY] ? KeyManager.MODE_PASSKEY : null)
       || (result[KeyManager.PLAIN_KEY] ? KeyManager.MODE_NONE : null);
 
     if (!mode) return null;
+
+    if (mode === KeyManager.MODE_PASSKEY) {
+      if (!result[KeyManager.PLAIN_KEY]) return null;
+      return new Uint8Array(result[KeyManager.PLAIN_KEY]);
+    }
 
     if (mode === KeyManager.MODE_NONE) {
       if (!result[KeyManager.PLAIN_KEY]) return null;

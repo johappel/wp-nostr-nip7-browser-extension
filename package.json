@@ -5,6 +5,8 @@
   "scripts": {
     "clean": "rimraf dist",
     "build": "npm run clean && rollup -c",
+    "package:firefox": "npm run build && node scripts/package-firefox.js",
+    "package:firefox:only": "node scripts/package-firefox.js",
     "dev": "npm run clean && rollup -c -w",
     "test": "vitest run"
   },
