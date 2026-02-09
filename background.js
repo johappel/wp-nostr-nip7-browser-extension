@@ -804,7 +804,13 @@ async function handleMessage(request, sender) {
     } catch (restoreError) {
       const isCryptoFailure = String(restoreError?.name || '') === 'OperationError';
       if (isCryptoFailure) {
-        throw new Error('Passkey passt nicht zu diesem Cloud-Backup (oder Backup ist beschaedigt). Bitte denselben Passkey wie beim Backup verwenden.');
+        throw new Error(
+          'Cloud-Restore konnte nicht entschluesselt werden. ' +
+          'Der Backup-Wrap ist an die damals verwendete Passkey-Credential gebunden ' +
+          '(Firefox/Chrome koennen unterschiedliche Credential-Stores nutzen). ' +
+          'Loesung: Key im Quell-Browser als nsec exportieren, im Ziel-Browser importieren, ' +
+          'danach dort ein neues Cloud-Backup speichern.'
+        );
       }
       throw restoreError;
     }

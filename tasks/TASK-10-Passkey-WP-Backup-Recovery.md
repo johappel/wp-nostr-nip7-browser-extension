@@ -18,7 +18,7 @@ Ein nutzerfreundlicher Recovery-Flow ohne merkpflichtige Passphrase:
 Nach Abschluss dieses Tasks:
 - User kann "Cloud-Backup aktivieren" im Popup.
 - Ein verschluesseltes Backup wird im WP-Account gespeichert.
-- Wiederherstellung auf anderem Browser funktioniert ueber Passkey.
+- Wiederherstellung per Passkey funktioniert, wenn dieselbe Passkey-Credential verfuegbar ist.
 - Optionaler Recovery-Code funktioniert als Fallback.
 - Unlock-Cache ist einstellbar: `off`, `5m`, `15m`, `30m`, `60m`, `session`.
 - Bestehender `nostr_pubkey` wird nicht still ueberschrieben (bereits umgesetzt).
@@ -136,6 +136,14 @@ Nach Abschluss dieses Tasks:
 4. Extension entpackt nsec lokal, validiert Pubkey.
 5. Bei vorhandenem anderem lokalen Key: explizite Ueberschreib-Warnung.
 
+Hinweis:
+- Firefox und Chrome koennen unter Windows unterschiedliche Passkey-Stores nutzen.
+- Dadurch kann ein in Firefox erzeugtes Backup-Wrap in Chrome ggf. nicht direkt entschluesselt werden.
+- Pragmatiker-Flow:
+  - nsec im Quell-Browser exportieren
+  - nsec im Ziel-Browser importieren
+  - neues Cloud-Backup im Ziel-Browser anlegen
+
 ### C) Key-Rotation
 1. User waehlt "Neuen Key aktivieren".
 2. Pflichtdialog mit Folgen (alter Pubkey passt nicht mehr).
@@ -149,7 +157,7 @@ Nach Abschluss dieses Tasks:
 2. Kein Klartext-nsec in WP DB/Logs/REST.
 3. Fehlversuche sind rate-limitiert und nachvollziehbar.
 4. Bestehender WP-Pubkey wird nicht still ersetzt.
-5. Cross-Browser Restore (Chrome <-> Firefox) funktioniert mit identischem Pubkey.
+5. Cross-Browser Restore ist nur dann direkt per Passkey moeglich, wenn dieselbe Credential im Ziel-Browser verfuegbar ist.
 6. Unlock-Cache-Policy ist im Popup aenderbar und wirkt sofort.
 7. Option `session` haelt den Unlock maximal bis Browser-Ende.
 
