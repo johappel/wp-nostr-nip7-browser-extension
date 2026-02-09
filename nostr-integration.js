@@ -40,6 +40,8 @@ class NostrWPIntegration {
       root.removeAttribute('data-wp-nostr-display-name');
       root.removeAttribute('data-wp-nostr-avatar-url');
       root.removeAttribute('data-wp-nostr-pubkey');
+      root.removeAttribute('data-wp-nostr-rest-url');
+      root.removeAttribute('data-wp-nostr-nonce');
       return;
     }
 
@@ -47,6 +49,8 @@ class NostrWPIntegration {
     root.setAttribute('data-wp-nostr-display-name', String(this.config.wpDisplayName || ''));
     root.setAttribute('data-wp-nostr-avatar-url', String(this.config.wpAvatarUrl || ''));
     root.setAttribute('data-wp-nostr-pubkey', String(this.config.wpPubkey || ''));
+    root.setAttribute('data-wp-nostr-rest-url', String(this.config.restUrl || ''));
+    root.setAttribute('data-wp-nostr-nonce', String(this.config.nonce || ''));
   }
 
   async init() {

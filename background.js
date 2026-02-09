@@ -293,6 +293,179 @@ function resolvePreferredScope(requestedScope, scopes, lastActiveScope) {
   return scopes[0] || KEY_SCOPE_DEFAULT;
 }
 
+function sanitizeWpApiContext(rawContext) {
+  if (!rawContext || typeof rawContext !== 'object') return null;
+  const restUrl = String(rawContext.restUrl || '').trim();
+  const nonce = String(rawContext.nonce || '').trim();
+  if (!restUrl || !nonce) return null;
+  return { restUrl, nonce };
+}
+
+function normalizeWpRestBaseUrl(restUrl) {
+  const value = String(restUrl || '').trim();
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (!/^https?:$/i.test(url.protocol)) return null;
+    return url.href.endsWith('/') ? url.href : `${url.href}/`;
+  } catch {
+    return null;
+  }
+}
+
+async function wpApiPostJson(wpApiContext, path, payload = null) {
+  const context = sanitizeWpApiContext(wpApiContext);
+  if (!context) {
+    throw new Error('WordPress API context missing (restUrl/nonce).');
+  }
+  const baseUrl = normalizeWpRestBaseUrl(context.restUrl);
+  if (!baseUrl) {
+    throw new Error('Invalid WordPress REST URL.');
+  }
+  const endpoint = new URL(path.replace(/^\//, ''), baseUrl).toString();
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-WP-Nonce': context.nonce
+    },
+    credentials: 'include',
+    cache: 'no-store',
+    body: payload === null ? '{}' : JSON.stringify(payload)
+  });
+
+  let result = {};
+  try {
+    result = await response.json();
+  } catch {
+    result = {};
+  }
+
+  if (!response.ok) {
+    const message = String(result?.message || `HTTP ${response.status}`);
+    const error = new Error(message);
+    error.code = String(result?.code || '');
+    error.status = Number(response.status || 0);
+    throw error;
+  }
+
+  return result;
+}
+
+function bytesToBase64(bytes) {
+  const value = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < value.length; i += chunkSize) {
+    const chunk = value.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(input) {
+  const normalized = String(input || '').replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function concatBytes(...arrays) {
+  const totalLength = arrays.reduce((sum, arr) => sum + (arr?.length || 0), 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    if (!arr) continue;
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
+
+async function derivePasskeyWrapKey(credentialId, scope) {
+  const id = String(credentialId || '').trim();
+  if (!id) {
+    throw new Error('Passkey credential id missing.');
+  }
+  const encoder = new TextEncoder();
+  const secretMaterial = encoder.encode(`wp-nostr-passkey-wrap-v1|${id}`);
+  const salt = encoder.encode(`wp-nostr-backup-scope|${normalizeKeyScope(scope)}`);
+  const baseKey = await crypto.subtle.importKey('raw', secretMaterial, 'PBKDF2', false, ['deriveKey']);
+  return await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 250000, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptAesGcmBytes(key, plaintextBytes, aadBytes = null) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const algorithm = { name: 'AES-GCM', iv };
+  if (aadBytes) algorithm.additionalData = aadBytes;
+  const ciphertext = await crypto.subtle.encrypt(algorithm, key, plaintextBytes);
+  return { iv, ciphertext: new Uint8Array(ciphertext) };
+}
+
+async function decryptAesGcmBytes(key, iv, ciphertextBytes, aadBytes = null) {
+  const algorithm = { name: 'AES-GCM', iv };
+  if (aadBytes) algorithm.additionalData = aadBytes;
+  const plaintext = await crypto.subtle.decrypt(algorithm, key, ciphertextBytes);
+  return new Uint8Array(plaintext);
+}
+
+async function computeKeyFingerprint(pubkeyHex) {
+  const encoder = new TextEncoder();
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(String(pubkeyHex || '').toLowerCase()));
+  return bytesToBase64(new Uint8Array(digest));
+}
+
+async function configureProtectionAndStoreSecretKey(secretKey) {
+  const setupResult = await promptPassword('create');
+  if (!setupResult) {
+    throw new Error('Key import canceled');
+  }
+
+  const setupMode = typeof setupResult === 'object' ? setupResult.protection : null;
+  const usePasskey = setupMode === KeyManager.MODE_PASSKEY;
+  const useNoPassword = !usePasskey && typeof setupResult === 'object' && setupResult.noPassword === true;
+  const password = usePasskey ? null : extractPasswordFromDialogResult(setupResult);
+
+  if (!useNoPassword && !usePasskey && !password) {
+    throw new Error('Password required');
+  }
+
+  await keyManager.storeKey(
+    secretKey,
+    useNoPassword ? null : password,
+    usePasskey
+      ? {
+        mode: KeyManager.MODE_PASSKEY,
+        passkeyCredentialId: setupResult.credentialId
+      }
+      : undefined
+  );
+
+  await clearUnlockCaches();
+  if (usePasskey) {
+    await cachePasskeyAuthWithPolicy();
+  } else if (!useNoPassword && password) {
+    await cachePasswordWithPolicy(password);
+  }
+
+  const pubkey = getPublicKey(secretKey);
+  return {
+    pubkey,
+    npub: nip19.npubEncode(pubkey),
+    protectionMode: usePasskey ? KeyManager.MODE_PASSKEY : (useNoPassword ? KeyManager.MODE_NONE : KeyManager.MODE_PASSWORD)
+  };
+}
+
 // ============================================================
 // Message Handler
 // ============================================================
@@ -311,6 +484,10 @@ async function handleMessage(request, sender) {
     'NOSTR_LOCK',
     'NOSTR_SET_UNLOCK_CACHE_POLICY',
     'NOSTR_GET_STATUS',
+    'NOSTR_BACKUP_STATUS',
+    'NOSTR_BACKUP_ENABLE',
+    'NOSTR_BACKUP_RESTORE',
+    'NOSTR_BACKUP_DELETE',
     'NOSTR_EXPORT_NSEC',
     'NOSTR_IMPORT_NSEC',
     'NOSTR_GET_PUBLIC_KEY',
@@ -434,6 +611,139 @@ async function handleMessage(request, sender) {
     };
   }
 
+  if (request.type === 'NOSTR_BACKUP_STATUS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Backup status is only available from extension UI');
+    }
+    return await wpApiPostJson(request.payload?.wpApi, 'backup/metadata', {});
+  }
+
+  if (request.type === 'NOSTR_BACKUP_ENABLE') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Backup upload is only allowed from extension UI');
+    }
+
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const unlockPassword = await ensureUnlockForMode(protectionMode);
+    const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null);
+    if (!secretKey) {
+      throw new Error('Key unlock failed.');
+    }
+
+    try {
+      const pubkey = getPublicKey(secretKey);
+      const passkeyUnlock = await promptPassword('unlock-passkey');
+      if (!passkeyUnlock?.passkey) {
+        throw new Error('Passkey confirmation is required for cloud backup.');
+      }
+      const credentialId = String(passkeyUnlock.credentialId || '').trim();
+      if (!credentialId) {
+        throw new Error('No passkey credential available for wrapping backup key.');
+      }
+
+      const wrapKey = await derivePasskeyWrapKey(credentialId, activeKeyScope);
+      const dek = crypto.getRandomValues(new Uint8Array(32));
+      const aadBytes = new TextEncoder().encode(JSON.stringify({
+        version: 1,
+        scope: activeKeyScope,
+        pubkey
+      }));
+      const blobEncrypted = await encryptAesGcmBytes(
+        await crypto.subtle.importKey('raw', dek, { name: 'AES-GCM' }, false, ['encrypt']),
+        secretKey,
+        aadBytes
+      );
+      const wrappedDekEncrypted = await encryptAesGcmBytes(wrapKey, dek, null);
+      dek.fill(0);
+
+      const wrappedDekPack = concatBytes(wrappedDekEncrypted.iv, wrappedDekEncrypted.ciphertext);
+
+      return await wpApiPostJson(request.payload?.wpApi, 'backup/upload', {
+        version: 1,
+        pubkey,
+        backupBlob: bytesToBase64(blobEncrypted.ciphertext),
+        blobIv: bytesToBase64(blobEncrypted.iv),
+        blobAad: bytesToBase64(aadBytes),
+        wrappedDekPasskey: bytesToBase64(wrappedDekPack),
+        wrappedDekRecovery: null,
+        keyFingerprint: await computeKeyFingerprint(pubkey)
+      });
+    } finally {
+      secretKey.fill(0);
+    }
+  }
+
+  if (request.type === 'NOSTR_BACKUP_RESTORE') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Backup restore is only allowed from extension UI');
+    }
+
+    const metadata = await wpApiPostJson(request.payload?.wpApi, 'backup/metadata', {});
+    if (!metadata?.hasBackup) {
+      throw new Error('No cloud backup found for this account.');
+    }
+
+    const expectedPubkey = String(metadata?.pubkey || '').trim().toLowerCase();
+    const downloaded = await wpApiPostJson(request.payload?.wpApi, 'backup/download', {
+      expectedPubkey: expectedPubkey || undefined
+    });
+
+    const wrappedPack = base64ToBytes(downloaded?.wrappedDekPasskey);
+    if (wrappedPack.length <= 12) {
+      throw new Error('Backup payload is invalid (wrapped key).');
+    }
+    const wrapIv = wrappedPack.subarray(0, 12);
+    const wrappedDekCiphertext = wrappedPack.subarray(12);
+
+    const passkeyUnlock = await promptPassword('unlock-passkey');
+    if (!passkeyUnlock?.passkey) {
+      throw new Error('Passkey confirmation is required for restore.');
+    }
+    const credentialId = String(passkeyUnlock.credentialId || '').trim();
+    if (!credentialId) {
+      throw new Error('No passkey credential available for restore.');
+    }
+
+    const wrapKey = await derivePasskeyWrapKey(credentialId, activeKeyScope);
+    const dek = await decryptAesGcmBytes(wrapKey, wrapIv, wrappedDekCiphertext, null);
+
+    const blobIv = base64ToBytes(downloaded?.blobIv);
+    const blobCiphertext = base64ToBytes(downloaded?.backupBlob);
+    const blobAad = base64ToBytes(downloaded?.blobAad);
+    const dekKey = await crypto.subtle.importKey('raw', dek, { name: 'AES-GCM' }, false, ['decrypt']);
+    dek.fill(0);
+
+    const restoredSecret = await decryptAesGcmBytes(dekKey, blobIv, blobCiphertext, blobAad);
+    if (restoredSecret.length !== 32) {
+      restoredSecret.fill(0);
+      throw new Error('Backup payload has invalid key length.');
+    }
+
+    try {
+      const restoredPubkey = getPublicKey(restoredSecret);
+      const expected = String(downloaded?.pubkey || '').trim().toLowerCase();
+      if (expected && restoredPubkey !== expected) {
+        throw new Error('Restored key does not match backup pubkey metadata.');
+      }
+
+      return await configureProtectionAndStoreSecretKey(restoredSecret);
+    } finally {
+      restoredSecret.fill(0);
+    }
+  }
+
+  if (request.type === 'NOSTR_BACKUP_DELETE') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Backup deletion is only allowed from extension UI');
+    }
+    return await wpApiPostJson(request.payload?.wpApi, 'backup/delete', {});
+  }
+
   if (request.type === 'NOSTR_EXPORT_NSEC') {
     if (!isInternalExtensionRequest) {
       throw new Error('Key export is only allowed from extension UI');
@@ -481,50 +791,16 @@ async function handleMessage(request, sender) {
       importedSecret.fill(0);
       throw new Error('Invalid nsec length');
     }
-
-    const setupResult = await promptPassword('create');
-    if (!setupResult) {
-      importedSecret.fill(0);
-      throw new Error('Import canceled');
-    }
-    const setupMode = typeof setupResult === 'object' ? setupResult.protection : null;
-    const usePasskey = setupMode === KeyManager.MODE_PASSKEY;
-    const useNoPassword = !usePasskey && typeof setupResult === 'object' && setupResult.noPassword === true;
-    const password = usePasskey ? null : extractPasswordFromDialogResult(setupResult);
-
-    if (!useNoPassword && !usePasskey && !password) {
-      importedSecret.fill(0);
-      throw new Error('Password required');
-    }
-
     try {
-      await keyManager.storeKey(
-        importedSecret,
-        useNoPassword ? null : password,
-        usePasskey
-          ? {
-            mode: KeyManager.MODE_PASSKEY,
-            passkeyCredentialId: setupResult.credentialId
-          }
-          : undefined
-      );
+      const result = await configureProtectionAndStoreSecretKey(importedSecret);
+      return {
+        success: true,
+        pubkey: result.pubkey,
+        npub: result.npub
+      };
     } finally {
       importedSecret.fill(0);
     }
-
-    await clearUnlockCaches();
-    if (usePasskey) {
-      await cachePasskeyAuthWithPolicy();
-    } else if (!useNoPassword && password) {
-      await cachePasswordWithPolicy(password);
-    }
-
-    const pubkey = await keyManager.getPublicKey(usePasskey || useNoPassword ? null : password);
-    return {
-      success: true,
-      pubkey,
-      npub: nip19.npubEncode(pubkey)
-    };
   }
 
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen

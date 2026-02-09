@@ -79,6 +79,12 @@ h1 {
   font-size: 11px;
 }
 
+.cloud-backup {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #d8dee9;
+}
+
 .row {
   display: flex;
   align-items: center;

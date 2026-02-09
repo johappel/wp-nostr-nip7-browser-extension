@@ -106,8 +106,13 @@ function showPasswordDialog(mode) {
         if (!passkeySupported) {
           throw new Error('Passkey is not supported in this browser context');
         }
-        await runPasskeyAssertion();
-        await chrome.storage.session.set({ passwordResult: { passkey: true } });
+        const assertionResult = await runPasskeyAssertion();
+        await chrome.storage.session.set({
+          passwordResult: {
+            passkey: true,
+            credentialId: assertionResult?.credentialId || null
+          }
+        });
         window.close();
       } catch (err) {
         errorEl.textContent = err?.message || String(err) || 'Passkey unlock failed';
@@ -253,30 +258,51 @@ function showPasswordDialog(mode) {
 async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
+  const commonOptions = {
+    challenge,
+    rp: {
+      name: 'WP Nostr Signer'
+    },
+    user: {
+      id: userId,
+      name: 'wp-nostr-user',
+      displayName: 'WP Nostr User'
+    },
+    pubKeyCredParams: [
+      { type: 'public-key', alg: -7 }, // ES256
+      { type: 'public-key', alg: -257 } // RS256
+    ],
+    timeout: 60000,
+    attestation: 'none'
+  };
 
-  const credential = await navigator.credentials.create({
-    publicKey: {
-      challenge,
-      rp: {
-        name: 'WP Nostr Signer'
-      },
-      user: {
-        id: userId,
-        name: 'wp-nostr-user',
-        displayName: 'WP Nostr User'
-      },
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 }, // ES256
-        { type: 'public-key', alg: -257 } // RS256
-      ],
-      authenticatorSelection: {
-        userVerification: 'preferred',
-        residentKey: 'preferred'
-      },
-      timeout: 60000,
-      attestation: 'none'
-    }
-  });
+  let credential;
+  try {
+    // First choice: local platform authenticator (Windows Hello / Touch ID / etc.)
+    credential = await navigator.credentials.create({
+      publicKey: {
+        ...commonOptions,
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'preferred',
+          residentKey: 'preferred'
+        }
+      }
+    });
+  } catch (primaryError) {
+    // Fallback: allow cross-device/security-key authenticators.
+    credential = await navigator.credentials.create({
+      publicKey: {
+        ...commonOptions,
+        authenticatorSelection: {
+          userVerification: 'preferred',
+          residentKey: 'preferred'
+        }
+      }
+    }).catch(() => {
+      throw primaryError;
+    });
+  }
 
   if (!credential || !credential.rawId) {
     throw new Error('Passkey setup was canceled');
@@ -289,29 +315,51 @@ async function runPasskeyAssertion() {
   const credentialStorageKey = keyName('passkey_credential_id');
   const storage = await chrome.storage.local.get([credentialStorageKey]);
   const storedCredentialId = storage[credentialStorageKey];
-  const credentialId = String(storedCredentialId || '').trim();
-  if (!credentialId) {
-    throw new Error('No passkey is configured for this extension key');
-  }
+  const knownCredentialId = String(storedCredentialId || '').trim();
 
   const challenge = crypto.getRandomValues(new Uint8Array(32));
-  const allowCredentials = [{
-    type: 'public-key',
-    id: fromBase64Url(credentialId)
-  }];
+  const request = {
+    challenge,
+    userVerification: 'preferred',
+    timeout: 60000
+  };
+  let assertion = null;
 
-  const assertion = await navigator.credentials.get({
-    publicKey: {
-      challenge,
-      allowCredentials,
-      userVerification: 'preferred',
-      timeout: 60000
+  if (knownCredentialId) {
+    const descriptor = {
+      type: 'public-key',
+      id: fromBase64Url(knownCredentialId)
+    };
+
+    try {
+      // Prefer local authenticator first to avoid cross-device prompts in Chrome.
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          ...request,
+          allowCredentials: [{ ...descriptor, transports: ['internal'] }]
+        }
+      });
+    } catch {
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          ...request,
+          allowCredentials: [descriptor]
+        }
+      });
     }
-  });
+  } else {
+    assertion = await navigator.credentials.get({
+      publicKey: request
+    });
+  }
 
-  if (!assertion) {
+  if (!assertion || !assertion.rawId) {
     throw new Error('Passkey unlock failed');
   }
+
+  return {
+    credentialId: toBase64Url(assertion.rawId)
+  };
 }
 
 function normalizeKeyScope(scope) {

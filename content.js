@@ -78,10 +78,11 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
 
   if (!snapshot.configReady) {
     const viewerFromRest = await fetchViewerFromPageContext();
+    const wpApi = readWpApiFromDom();
     if (viewerFromRest) {
-      return { viewer: viewerFromRest, pending: false, source: 'rest' };
+      return { viewer: viewerFromRest, pending: false, source: 'rest', wpApi };
     }
-    return { viewer: null, pending: true };
+    return { viewer: null, pending: true, wpApi };
   }
 
   if (snapshot.userId === null) {
@@ -89,7 +90,7 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
     // to avoid false negatives in popup (especially Firefox/cookie edge cases).
     const viewerFromRest = await fetchViewerFromPageContext();
     if (viewerFromRest) {
-      return { viewer: viewerFromRest, pending: false, source: 'rest' };
+      return { viewer: viewerFromRest, pending: false, source: 'rest', wpApi: snapshot.wpApi };
     }
   }
 
@@ -102,7 +103,8 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
       pubkey: snapshot.pubkey
     },
     pending: false,
-    source: 'dom'
+    source: 'dom',
+    wpApi: snapshot.wpApi
   };
 }
 
@@ -114,7 +116,16 @@ function readViewerFromDom() {
   const displayName = String(root?.getAttribute('data-wp-nostr-display-name') || '').trim() || null;
   const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
   const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
-  return { configReady, userId, displayName, avatarUrl, pubkey };
+  const wpApi = readWpApiFromDom();
+  return { configReady, userId, displayName, avatarUrl, pubkey, wpApi };
+}
+
+function readWpApiFromDom() {
+  const root = document.documentElement;
+  const restUrl = String(root?.getAttribute('data-wp-nostr-rest-url') || '').trim();
+  const nonce = String(root?.getAttribute('data-wp-nostr-nonce') || '').trim();
+  if (!restUrl || !nonce) return null;
+  return { restUrl, nonce };
 }
 
 async function fetchViewerFromPageContext() {

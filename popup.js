@@ -13,6 +13,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const importKeyButton = document.getElementById('import-key');
   const importNsecInput = document.getElementById('import-nsec');
   const backupOutput = document.getElementById('backup-output');
+  const cloudBackupMeta = document.getElementById('cloud-backup-meta');
+  const cloudBackupEnableButton = document.getElementById('backup-enable-cloud');
+  const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
+  const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
   const syncNowButton = document.getElementById('sync-now');
   const syncList = document.getElementById('sync-list');
   const syncMeta = document.getElementById('sync-meta');
@@ -20,6 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const manualDomainSecret = document.getElementById('manual-domain-secret');
   const manualAddButton = document.getElementById('manual-add');
   let activeScope = 'global';
+  let activeWpApi = null;
 
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
@@ -34,9 +39,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const initialViewer = await loadViewerContext(wpUserCard, status);
   activeScope = initialViewer?.scope || 'global';
+  activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
   activeScope = initialSigner?.scope || activeScope;
   await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+  await refreshCloudBackupState(cloudBackupMeta, {
+    enableButton: cloudBackupEnableButton,
+    restoreButton: cloudBackupRestoreButton,
+    deleteButton: cloudBackupDeleteButton
+  }, activeScope, activeWpApi);
 
   checkbox.addEventListener('change', async () => {
     try {
@@ -54,9 +65,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const viewer = await loadViewerContext(wpUserCard, status);
       activeScope = viewer?.scope || 'global';
+      activeWpApi = sanitizeWpApi(viewer?.wpApi);
       const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
       activeScope = signerContext?.scope || activeScope;
       await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
       if (viewer?.pending) {
         status.textContent = 'WP-User-Kontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
       } else {
@@ -150,6 +167,117 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
     } finally {
       importKeyButton.disabled = false;
+    }
+  });
+
+  cloudBackupEnableButton.addEventListener('click', async () => {
+    if (!activeWpApi) {
+      status.textContent = 'Cloud-Backup ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      return;
+    }
+    setCloudButtonsDisabled({
+      enableButton: cloudBackupEnableButton,
+      restoreButton: cloudBackupRestoreButton,
+      deleteButton: cloudBackupDeleteButton
+    }, true);
+    status.textContent = 'Speichere Cloud-Backup...';
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_BACKUP_ENABLE',
+        payload: { scope: activeScope, wpApi: activeWpApi }
+      });
+      if (response?.error) throw new Error(response.error);
+      status.textContent = 'Cloud-Backup gespeichert.';
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+    } catch (e) {
+      status.textContent = `Cloud-Backup fehlgeschlagen: ${e.message || e}`;
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+    }
+  });
+
+  cloudBackupRestoreButton.addEventListener('click', async () => {
+    if (!activeWpApi) {
+      status.textContent = 'Restore ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      return;
+    }
+    const confirmed = confirm('Cloud-Restore ersetzt den lokalen Schluessel im aktiven Scope. Fortfahren?');
+    if (!confirmed) return;
+
+    setCloudButtonsDisabled({
+      enableButton: cloudBackupEnableButton,
+      restoreButton: cloudBackupRestoreButton,
+      deleteButton: cloudBackupDeleteButton
+    }, true);
+    status.textContent = 'Stelle aus Cloud-Backup wieder her...';
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_BACKUP_RESTORE',
+        payload: { scope: activeScope, wpApi: activeWpApi }
+      });
+      if (response?.error) throw new Error(response.error);
+      const pubkey = String(response?.result?.pubkey || '');
+      status.textContent = pubkey
+        ? `Cloud-Restore erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
+        : 'Cloud-Restore erfolgreich. Seite neu laden.';
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      activeScope = signerContext?.scope || activeScope;
+      await refreshUnlockState(unlockCacheSelect, unlockCacheHint, activeScope);
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+    } catch (e) {
+      status.textContent = `Cloud-Restore fehlgeschlagen: ${e.message || e}`;
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+    }
+  });
+
+  cloudBackupDeleteButton.addEventListener('click', async () => {
+    if (!activeWpApi) {
+      status.textContent = 'Cloud-Backup-Loeschen ist nur auf einem eingeloggten WordPress-Tab verfuegbar.';
+      return;
+    }
+    const confirmed = confirm('Cloud-Backup fuer diesen WP-User wirklich loeschen?');
+    if (!confirmed) return;
+
+    setCloudButtonsDisabled({
+      enableButton: cloudBackupEnableButton,
+      restoreButton: cloudBackupRestoreButton,
+      deleteButton: cloudBackupDeleteButton
+    }, true);
+    status.textContent = 'Loesche Cloud-Backup...';
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_BACKUP_DELETE',
+        payload: { scope: activeScope, wpApi: activeWpApi }
+      });
+      if (response?.error) throw new Error(response.error);
+      status.textContent = 'Cloud-Backup geloescht.';
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
+    } catch (e) {
+      status.textContent = `Cloud-Backup konnte nicht geloescht werden: ${e.message || e}`;
+      await refreshCloudBackupState(cloudBackupMeta, {
+        enableButton: cloudBackupEnableButton,
+        restoreButton: cloudBackupRestoreButton,
+        deleteButton: cloudBackupDeleteButton
+      }, activeScope, activeWpApi);
     }
   });
 
@@ -279,6 +407,59 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function sanitizeWpApi(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const restUrl = String(raw.restUrl || '').trim();
+  const nonce = String(raw.nonce || '').trim();
+  if (!restUrl || !nonce) return null;
+  return { restUrl, nonce };
+}
+
+function setCloudButtonsDisabled(buttons, disabled) {
+  if (!buttons) return;
+  if (buttons.enableButton) buttons.enableButton.disabled = disabled;
+  if (buttons.restoreButton) buttons.restoreButton.disabled = disabled;
+  if (buttons.deleteButton) buttons.deleteButton.disabled = disabled;
+}
+
+async function refreshCloudBackupState(metaNode, buttons, scope, wpApi) {
+  if (!metaNode) return;
+  if (!wpApi) {
+    metaNode.textContent = 'Cloud-Backup nur auf aktivem, eingeloggtem WordPress-Tab verfuegbar.';
+    setCloudButtonsDisabled(buttons, true);
+    return;
+  }
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_BACKUP_STATUS',
+      payload: { scope: normalizeScope(scope), wpApi }
+    });
+    if (response?.error) throw new Error(response.error);
+    const data = response?.result || {};
+    if (!data.hasBackup) {
+      metaNode.textContent = 'Kein Cloud-Backup vorhanden.';
+      if (buttons?.enableButton) buttons.enableButton.disabled = false;
+      if (buttons?.restoreButton) buttons.restoreButton.disabled = true;
+      if (buttons?.deleteButton) buttons.deleteButton.disabled = true;
+      return;
+    }
+
+    const updatedText = typeof data.updatedAt === 'number'
+      ? new Date(data.updatedAt * 1000).toLocaleString()
+      : 'unbekannt';
+    metaNode.textContent = `Backup vorhanden fuer ${formatShortHex(data.pubkey || '')}. Letztes Update: ${updatedText}.`;
+    if (buttons?.enableButton) buttons.enableButton.disabled = false;
+    if (buttons?.restoreButton) buttons.restoreButton.disabled = false;
+    if (buttons?.deleteButton) buttons.deleteButton.disabled = false;
+  } catch (error) {
+    metaNode.textContent = `Cloud-Status konnte nicht geladen werden: ${error.message || error}`;
+    setCloudButtonsDisabled(buttons, false);
+    if (buttons?.restoreButton) buttons.restoreButton.disabled = true;
+    if (buttons?.deleteButton) buttons.deleteButton.disabled = true;
+  }
+}
+
 async function refreshSignerIdentity(cardNode, requestedScope, allowFallback = true) {
   try {
     let activeScope = normalizeScope(requestedScope);
@@ -397,13 +578,13 @@ async function loadViewerContext(cardNode, statusNode) {
   const origin = tabContext?.origin || null;
   if (!origin) {
     renderViewerCard(cardNode, null, null);
-    return { isLoggedIn: false, scope: 'global', origin: null };
+    return { isLoggedIn: false, scope: 'global', origin: null, wpApi: null };
   }
 
   const viewerFromTab = await getViewerFromActiveTab(tabContext?.id);
   if (viewerFromTab?.pending) {
     renderViewerCard(cardNode, { pending: true }, origin);
-    return { isLoggedIn: false, pending: true, scope: 'global', origin };
+    return { isLoggedIn: false, pending: true, scope: 'global', origin, wpApi: sanitizeWpApi(viewerFromTab.wpApi) };
   }
   if (viewerFromTab?.viewer) {
     const viewer = viewerFromTab.viewer;
@@ -412,7 +593,7 @@ async function loadViewerContext(cardNode, statusNode) {
       ? buildWpScope(origin, viewer.userId)
       : 'global';
     renderViewerCard(cardNode, viewer, origin);
-    return { ...viewer, scope, origin };
+    return { ...viewer, scope, origin, wpApi: sanitizeWpApi(viewerFromTab.wpApi) };
   }
 
   try {
@@ -422,7 +603,7 @@ async function loadViewerContext(cardNode, statusNode) {
       ? buildWpScope(origin, viewer.userId)
       : 'global';
     renderViewerCard(cardNode, viewer, origin);
-    return { ...viewer, scope, origin };
+    return { ...viewer, scope, origin, wpApi: null };
   } catch (error) {
     const errorText = String(error?.message || error || '');
     const likelyNoWpEndpoint =
@@ -433,14 +614,14 @@ async function loadViewerContext(cardNode, statusNode) {
 
     if (likelyNoWpEndpoint) {
       renderViewerCard(cardNode, null, origin);
-      return { isLoggedIn: false, scope: 'global', origin };
+      return { isLoggedIn: false, scope: 'global', origin, wpApi: null };
     }
 
     renderViewerCard(cardNode, null, origin, error);
     if (statusNode) {
       statusNode.textContent = `WP-Viewer konnte nicht geladen werden: ${error.message || error}`;
     }
-    return { isLoggedIn: false, scope: 'global', origin };
+    return { isLoggedIn: false, scope: 'global', origin, wpApi: null };
   }
 }
 
@@ -462,13 +643,14 @@ async function getViewerFromActiveTab(tabId) {
   if (typeof tabId !== 'number') return null;
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'NOSTR_GET_PAGE_CONTEXT' });
-    if (response?.pending === true) return { pending: true };
+    if (response?.pending === true) return { pending: true, wpApi: sanitizeWpApi(response?.wpApi) };
     const viewer = response?.viewer;
     if (!viewer || typeof viewer !== 'object') return null;
     const source = String(response?.source || '').trim().toLowerCase();
     return {
       pending: false,
       source: source === 'rest' ? 'rest' : 'dom',
+      wpApi: sanitizeWpApi(response?.wpApi),
       viewer: {
         isLoggedIn: viewer.isLoggedIn === true,
         userId: Number(viewer.userId) || null,
