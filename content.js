@@ -77,7 +77,20 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
   }
 
   if (!snapshot.configReady) {
+    const viewerFromRest = await fetchViewerFromPageContext();
+    if (viewerFromRest) {
+      return { viewer: viewerFromRest, pending: false, source: 'rest' };
+    }
     return { viewer: null, pending: true };
+  }
+
+  if (snapshot.userId === null) {
+    // DOM marker says "logged out" - verify via same-origin fetch in tab context
+    // to avoid false negatives in popup (especially Firefox/cookie edge cases).
+    const viewerFromRest = await fetchViewerFromPageContext();
+    if (viewerFromRest) {
+      return { viewer: viewerFromRest, pending: false, source: 'rest' };
+    }
   }
 
   return {
@@ -88,7 +101,8 @@ async function resolvePageViewerContext(maxWaitMs = 1600, stepMs = 80) {
       avatarUrl: snapshot.avatarUrl,
       pubkey: snapshot.pubkey
     },
-    pending: false
+    pending: false,
+    source: 'dom'
   };
 }
 
@@ -101,6 +115,28 @@ function readViewerFromDom() {
   const avatarUrl = String(root?.getAttribute('data-wp-nostr-avatar-url') || '').trim() || null;
   const pubkey = String(root?.getAttribute('data-wp-nostr-pubkey') || '').trim() || null;
   return { configReady, userId, displayName, avatarUrl, pubkey };
+}
+
+async function fetchViewerFromPageContext() {
+  try {
+    const response = await fetch('/wp-json/nostr/v1/viewer', {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store'
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data || typeof data !== 'object') return null;
+    return {
+      isLoggedIn: data.isLoggedIn === true,
+      userId: Number(data.userId) || null,
+      displayName: data.displayName || null,
+      avatarUrl: data.avatarUrl || null,
+      pubkey: data.pubkey || null
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function sendMessageWithRetry(message) {

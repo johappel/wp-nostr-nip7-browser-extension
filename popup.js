@@ -245,6 +245,7 @@ async function loadViewerContext(cardNode, statusNode) {
   }
   if (viewerFromTab?.viewer) {
     const viewer = viewerFromTab.viewer;
+    if (viewerFromTab.source) viewer.source = viewerFromTab.source;
     const scope = viewer?.isLoggedIn && viewer?.userId
       ? buildWpScope(origin, viewer.userId)
       : 'global';
@@ -302,8 +303,10 @@ async function getViewerFromActiveTab(tabId) {
     if (response?.pending === true) return { pending: true };
     const viewer = response?.viewer;
     if (!viewer || typeof viewer !== 'object') return null;
+    const source = String(response?.source || '').trim().toLowerCase();
     return {
       pending: false,
+      source: source === 'rest' ? 'rest' : 'dom',
       viewer: {
         isLoggedIn: viewer.isLoggedIn === true,
         userId: Number(viewer.userId) || null,

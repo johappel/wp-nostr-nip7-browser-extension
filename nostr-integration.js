@@ -559,12 +559,16 @@ class NostrWPIntegration {
 
   showKeyMismatchWarning(expected, actual) {
     console.warn('[Nostr] Key mismatch:', { expected, actual });
+    const expectedShort = this.formatShortPubkey(expected);
+    const actualShort = this.formatShortPubkey(actual);
 
     const warning = document.createElement('div');
     warning.className = 'nostr-warning';
     warning.innerHTML = `
       <p>Dein Nostr-Schluessel stimmt nicht mit dem registrierten Schluessel ueberein.</p>
-      <p>Bitte pruefe, ob du die richtige Extension verwendest.</p>
+      <p>Registriert: <code>${expectedShort}</code></p>
+      <p>Aktueller Browser: <code>${actualShort}</code></p>
+      <p>Bitte denselben privaten Schluessel in beiden Browsern importieren (Backup/Restore), damit beide dieselbe Identitaet nutzen.</p>
     `;
 
     const target = document.querySelector('.entry-content') ||
