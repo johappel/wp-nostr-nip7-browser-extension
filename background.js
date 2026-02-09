@@ -709,16 +709,25 @@ async function handleMessage(request, sender) {
       throw new Error('No passkey credential available for restore.');
     }
 
-    const wrapKey = await derivePasskeyWrapKey(credentialId, activeKeyScope);
-    const dek = await decryptAesGcmBytes(wrapKey, wrapIv, wrappedDekCiphertext, null);
+    let restoredSecret;
+    try {
+      const wrapKey = await derivePasskeyWrapKey(credentialId, activeKeyScope);
+      const dek = await decryptAesGcmBytes(wrapKey, wrapIv, wrappedDekCiphertext, null);
 
-    const blobIv = base64ToBytes(downloaded?.blobIv);
-    const blobCiphertext = base64ToBytes(downloaded?.backupBlob);
-    const blobAad = base64ToBytes(downloaded?.blobAad);
-    const dekKey = await crypto.subtle.importKey('raw', dek, { name: 'AES-GCM' }, false, ['decrypt']);
-    dek.fill(0);
+      const blobIv = base64ToBytes(downloaded?.blobIv);
+      const blobCiphertext = base64ToBytes(downloaded?.backupBlob);
+      const blobAad = base64ToBytes(downloaded?.blobAad);
+      const dekKey = await crypto.subtle.importKey('raw', dek, { name: 'AES-GCM' }, false, ['decrypt']);
+      dek.fill(0);
 
-    const restoredSecret = await decryptAesGcmBytes(dekKey, blobIv, blobCiphertext, blobAad);
+      restoredSecret = await decryptAesGcmBytes(dekKey, blobIv, blobCiphertext, blobAad);
+    } catch (restoreError) {
+      const isCryptoFailure = String(restoreError?.name || '') === 'OperationError';
+      if (isCryptoFailure) {
+        throw new Error('Passkey passt nicht zu diesem Cloud-Backup (oder Backup ist beschaedigt). Bitte denselben Passkey wie beim Backup verwenden.');
+      }
+      throw restoreError;
+    }
     if (restoredSecret.length !== 32) {
       restoredSecret.fill(0);
       throw new Error('Backup payload has invalid key length.');

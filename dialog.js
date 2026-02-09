@@ -3,6 +3,7 @@
 const params = new URLSearchParams(window.location.search);
 const type = params.get('type');
 const keyScope = normalizeKeyScope(params.get('scope'));
+const PASSKEY_TIMEOUT_MS = 120000;
 
 document.addEventListener('DOMContentLoaded', () => {
   switch (type) {
@@ -115,7 +116,7 @@ function showPasswordDialog(mode) {
         });
         window.close();
       } catch (err) {
-        errorEl.textContent = err?.message || String(err) || 'Passkey unlock failed';
+        errorEl.textContent = mapPasskeyError(err, 'unlock');
         errorEl.hidden = false;
       }
     };
@@ -199,7 +200,7 @@ function showPasswordDialog(mode) {
           });
           window.close();
         } catch (err) {
-          errorEl.textContent = err?.message || String(err) || 'Passkey setup failed';
+          errorEl.textContent = mapPasskeyError(err, 'setup');
           errorEl.hidden = false;
         }
       };
@@ -272,7 +273,7 @@ async function createPasskeyCredential() {
       { type: 'public-key', alg: -7 }, // ES256
       { type: 'public-key', alg: -257 } // RS256
     ],
-    timeout: 60000,
+    timeout: PASSKEY_TIMEOUT_MS,
     attestation: 'none'
   };
 
@@ -321,7 +322,7 @@ async function runPasskeyAssertion() {
   const request = {
     challenge,
     userVerification: 'preferred',
-    timeout: 60000
+    timeout: PASSKEY_TIMEOUT_MS
   };
   let assertion = null;
 
@@ -339,13 +340,25 @@ async function runPasskeyAssertion() {
           allowCredentials: [{ ...descriptor, transports: ['internal'] }]
         }
       });
-    } catch {
-      assertion = await navigator.credentials.get({
-        publicKey: {
-          ...request,
-          allowCredentials: [descriptor]
+    } catch (firstError) {
+      try {
+        assertion = await navigator.credentials.get({
+          publicKey: {
+            ...request,
+            allowCredentials: [descriptor]
+          }
+        });
+      } catch (secondError) {
+        // Last fallback: allow discoverable credentials for this RP
+        // (helps when stored credential id became stale after profile migration).
+        try {
+          assertion = await navigator.credentials.get({
+            publicKey: request
+          });
+        } catch {
+          throw secondError || firstError;
         }
-      });
+      }
     }
   } else {
     assertion = await navigator.credentials.get({
@@ -360,6 +373,28 @@ async function runPasskeyAssertion() {
   return {
     credentialId: toBase64Url(assertion.rawId)
   };
+}
+
+function mapPasskeyError(error, phase) {
+  const rawMessage = String(error?.message || error || '');
+  const name = String(error?.name || '').trim();
+
+  if (name === 'NotAllowedError') {
+    if (phase === 'unlock') {
+      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identitaet gefunden. Bitte erneut versuchen und in Chrome nach Moeglichkeit Windows Hello waehlen.';
+    }
+    return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geraete-Passkey (z. B. Windows Hello) waehlen.';
+  }
+
+  if (name === 'SecurityError') {
+    return 'Passkey ist in diesem Kontext nicht erlaubt (Sicherheitsrichtlinie). Bitte Seite/Extension neu laden.';
+  }
+
+  if (name === 'InvalidStateError') {
+    return 'Passkey ist bereits registriert oder nicht im erwarteten Zustand. Bitte erneut versuchen.';
+  }
+
+  return rawMessage || 'Passkey operation failed';
 }
 
 function normalizeKeyScope(scope) {
