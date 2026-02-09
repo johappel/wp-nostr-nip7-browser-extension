@@ -343,9 +343,12 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
       type: 'public-key',
       id: fromBase64Url(knownCredentialId).buffer
     };
-    if (isChromium) {
-      descriptor.transports = ['internal'];
-    }
+    // Do NOT restrict transports to ['internal'] — Chrome and Firefox use
+    // different credential stores on Windows.  When a credential was created
+    // in Firefox it does not exist in Windows Hello, so Chrome would skip the
+    // platform authenticator and only show cross-device options (USB / phone).
+    // Omitting transports lets the browser probe all available authenticators
+    // including Windows Hello.
     try {
       assertion = await navigator.credentials.get({
         publicKey: {
@@ -357,7 +360,8 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
       if (!shouldRetryPasskeyWithoutAllowCredentials(error)) {
         throw error;
       }
-      // Fallback for stale credential ids / authenticator migration.
+      // Fallback: discoverable credential flow (no allowCredentials).
+      // This lets Windows Hello / platform authenticator search its own store.
       assertion = await navigator.credentials.get({
         publicKey: request
       });
