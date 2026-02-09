@@ -29,6 +29,9 @@ Passkey-Assertions sollen ueber eine stabile Primary-Domain-Origin laufen, auch 
    - Lokaler Passkey-Flow bleibt als Fallback aktiv.
 6. Cloud Backup/Restore:
    - uebergibt Broker-Kontext an den Passkey-Unlock.
+7. Sicherheitsgurt im Runtime-Flow:
+   - Broker-Nutzung ist aktuell Opt-in (`useAuthBroker=1`) statt Default.
+   - Standard bleibt lokaler Passkey-Unlock, bis Credential-Enrollment fuer Broker produktiv vorhanden ist.
 
 ## Aktueller Sicherheitsstatus
 1. Challenge/Origin-Checks sind serverseitig aktiv.

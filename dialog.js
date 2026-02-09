@@ -268,7 +268,8 @@ function showPasswordDialog(mode) {
 async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
-  const commonOptions = {
+  const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
+  const publicKey = {
     challenge,
     rp: {
       name: 'WP Nostr Signer'
@@ -283,36 +284,17 @@ async function createPasskeyCredential() {
       { type: 'public-key', alg: -257 } // RS256
     ],
     timeout: PASSKEY_TIMEOUT_MS,
-    attestation: 'none'
+    attestation: 'none',
+    authenticatorSelection: {
+      userVerification: 'preferred',
+      residentKey: 'preferred',
+      ...(isFirefox ? {} : { authenticatorAttachment: 'platform' })
+    }
   };
 
-  let credential;
-  try {
-    // First choice: local platform authenticator (Windows Hello / Touch ID / etc.)
-    credential = await navigator.credentials.create({
-      publicKey: {
-        ...commonOptions,
-        authenticatorSelection: {
-          authenticatorAttachment: 'platform',
-          userVerification: 'preferred',
-          residentKey: 'preferred'
-        }
-      }
-    });
-  } catch (primaryError) {
-    // Fallback: allow cross-device/security-key authenticators.
-    credential = await navigator.credentials.create({
-      publicKey: {
-        ...commonOptions,
-        authenticatorSelection: {
-          userVerification: 'preferred',
-          residentKey: 'preferred'
-        }
-      }
-    }).catch(() => {
-      throw primaryError;
-    });
-  }
+  const credential = await navigator.credentials.create({
+    publicKey
+  });
 
   if (!credential || !credential.rawId) {
     throw new Error('Passkey setup was canceled');
@@ -343,6 +325,7 @@ async function runPasskeyAssertion(options = {}) {
 }
 
 async function runLocalPasskeyAssertion(knownCredentialId = '') {
+  const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const request = {
     challenge,
@@ -356,35 +339,15 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
       type: 'public-key',
       id: fromBase64Url(knownCredentialId)
     };
-
-    try {
-      // Prefer local authenticator first to avoid cross-device prompts in Chrome.
-      assertion = await navigator.credentials.get({
-        publicKey: {
-          ...request,
-          allowCredentials: [{ ...descriptor, transports: ['internal'] }]
-        }
-      });
-    } catch (firstError) {
-      try {
-        assertion = await navigator.credentials.get({
-          publicKey: {
-            ...request,
-            allowCredentials: [descriptor]
-          }
-        });
-      } catch (secondError) {
-        // Last fallback: allow discoverable credentials for this RP
-        // (helps when stored credential id became stale after profile migration).
-        try {
-          assertion = await navigator.credentials.get({
-            publicKey: request
-          });
-        } catch {
-          throw secondError || firstError;
-        }
-      }
+    if (!isFirefox) {
+      descriptor.transports = ['internal'];
     }
+    assertion = await navigator.credentials.get({
+      publicKey: {
+        ...request,
+        allowCredentials: [descriptor]
+      }
+    });
   } else {
     assertion = await navigator.credentials.get({
       publicKey: request
@@ -535,6 +498,10 @@ function mapPasskeyError(error, phase) {
       return 'Passkey abgebrochen oder keine passende lokale Passkey-Identitaet gefunden. Bitte erneut versuchen und in Chrome nach Moeglichkeit Windows Hello waehlen.';
     }
     return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geraete-Passkey (z. B. Windows Hello) waehlen.';
+  }
+
+  if (name === 'UnknownError' || /unknown transient reason/i.test(rawMessage)) {
+    return 'Temporarer Passkey-Fehler im Browser. Bitte Dialog erneut oeffnen und nochmal versuchen.';
   }
 
   if (name === 'SecurityError') {

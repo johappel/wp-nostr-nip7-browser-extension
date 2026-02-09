@@ -493,6 +493,21 @@ async function configureProtectionAndStoreSecretKey(secretKey) {
 }
 
 async function resolvePasskeyAuthOptions(request, domain, isInternalExtensionRequest) {
+  const useAuthBroker =
+    request?.payload?.useAuthBroker === true
+    || request?.payload?.useAuthBroker === 1
+    || request?.payload?.useAuthBroker === '1'
+    || request?.useAuthBroker === true
+    || request?.useAuthBroker === 1
+    || request?.useAuthBroker === '1';
+
+  // Safety default:
+  // Keep local passkey unlock as default path until broker credential enrollment
+  // is fully implemented end-to-end.
+  if (!useAuthBroker) {
+    return null;
+  }
+
   const topLevelBroker = sanitizePasskeyAuthBroker(request?.authBroker);
   if (topLevelBroker) {
     return topLevelBroker;
