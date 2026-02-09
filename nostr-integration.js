@@ -13,6 +13,8 @@ class NostrWPIntegration {
     this.config = window.nostrConfig || legacyConfigObject || {};
     this.hasExtension = false;
     this.npub = null;
+    this.flowPromise = null;
+    this.extensionRecoveryActive = false;
     this.init();
   }
 
@@ -32,22 +34,11 @@ class NostrWPIntegration {
 
     if (!this.hasExtension) {
       this.showInstallPrompt();
+      this.startExtensionRecoveryWatcher();
       return;
     }
 
-    // Domain-Sync fuer Trusted Domains initialisieren
-    await this.configureDomainSync();
-
-    // 2. Pruefe ob User registriert ist
-    const wpUser = await this.getCurrentWPUser();
-
-    if (!wpUser.pubkey) {
-      // 3. Registrierungs-Flow
-      await this.handleRegistration();
-    } else {
-      // 4. Pruefe ob Npub uebereinstimmt
-      await this.verifyExistingUser(wpUser.pubkey);
-    }
+    await this.runMainFlow();
   }
 
   async detectExtension() {
@@ -66,6 +57,74 @@ class NostrWPIntegration {
     }
 
     return this.isNostrApiAvailable() || this.isBridgeAvailable();
+  }
+
+  async runMainFlow() {
+    if (this.flowPromise) {
+      return this.flowPromise;
+    }
+
+    this.flowPromise = (async () => {
+      // Domain-Sync fuer Trusted Domains initialisieren
+      await this.configureDomainSync();
+
+      // 2. Pruefe ob User registriert ist
+      const wpUser = await this.getCurrentWPUser();
+
+      if (!wpUser.pubkey) {
+        // 3. Registrierungs-Flow
+        await this.handleRegistration();
+      } else {
+        // 4. Pruefe ob Npub uebereinstimmt
+        await this.verifyExistingUser(wpUser.pubkey);
+      }
+    })();
+
+    try {
+      await this.flowPromise;
+    } catch (error) {
+      this.flowPromise = null;
+      throw error;
+    }
+  }
+
+  startExtensionRecoveryWatcher() {
+    if (this.extensionRecoveryActive) {
+      return;
+    }
+    this.extensionRecoveryActive = true;
+    this.scheduleExtensionRecoveryCheck(1);
+  }
+
+  async scheduleExtensionRecoveryCheck(attempt) {
+    const maxAttempts = 60; // ~30s
+    if (attempt > maxAttempts) {
+      this.extensionRecoveryActive = false;
+      return;
+    }
+
+    let available = false;
+    try {
+      available = await this.detectExtension();
+    } catch {
+      available = false;
+    }
+
+    if (available) {
+      this.extensionRecoveryActive = false;
+      this.hasExtension = true;
+      document.getElementById('nostr-install-modal')?.remove();
+      try {
+        await this.runMainFlow();
+      } catch (error) {
+        console.error('[Nostr] Recovery flow failed:', error);
+      }
+      return;
+    }
+
+    setTimeout(() => {
+      this.scheduleExtensionRecoveryCheck(attempt + 1);
+    }, 500);
   }
 
   async configureDomainSync() {
@@ -224,6 +283,11 @@ class NostrWPIntegration {
   }
 
   showInstallPrompt() {
+    // Last-minute guard against stale detection state.
+    if (this.isNostrApiAvailable() || this.isBridgeAvailable()) {
+      return;
+    }
+
     if (document.getElementById('nostr-install-modal')) {
       return;
     }
