@@ -195,7 +195,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_IMPORT_NSEC',
-        payload: { scope: activeScope, nsec }
+        payload: { scope: activeScope, nsec, wpApi: activeWpApi }
       });
       if (response?.error) throw new Error(response.error);
       const pubkey = String(response?.result?.pubkey || '');
@@ -224,7 +224,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: 'NOSTR_CREATE_NEW_KEY',
-        payload: { scope: activeScope }
+        payload: { scope: activeScope, wpApi: activeWpApi }
       });
       if (response?.error) throw new Error(response.error);
       const pubkey = String(response?.result?.pubkey || '').trim();

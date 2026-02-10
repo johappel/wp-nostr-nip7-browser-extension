@@ -1182,6 +1182,20 @@ async function handleMessage(request, sender) {
     const secretKey = generateSecretKey();
     try {
       const result = await configureProtectionAndStoreSecretKey(secretKey);
+
+      // Register new pubkey in WordPress if wpApi context available
+      const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+      if (wpApi && result.pubkey) {
+        try {
+          await wpApiPostJson(wpApi, 'register/replace', {
+            pubkey: result.pubkey,
+            expectedCurrentPubkey: ''
+          });
+        } catch (regErr) {
+          console.warn('[Nostr] WP pubkey registration after key creation failed:', regErr.message);
+        }
+      }
+
       return {
         success: true,
         pubkey: result.pubkey,
@@ -1218,6 +1232,20 @@ async function handleMessage(request, sender) {
     }
     try {
       const result = await configureProtectionAndStoreSecretKey(importedSecret);
+
+      // Register imported pubkey in WordPress if wpApi context available
+      const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+      if (wpApi && result.pubkey) {
+        try {
+          await wpApiPostJson(wpApi, 'register/replace', {
+            pubkey: result.pubkey,
+            expectedCurrentPubkey: ''
+          });
+        } catch (regErr) {
+          console.warn('[Nostr] WP pubkey registration after import failed:', regErr.message);
+        }
+      }
+
       return {
         success: true,
         pubkey: result.pubkey,
