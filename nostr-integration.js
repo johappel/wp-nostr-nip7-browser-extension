@@ -476,10 +476,14 @@ class NostrWPIntegration {
     container.id = 'nostr-register-container';
     container.innerHTML = `
       <div class="nostr-register-prompt">
-        <p>Verknuepfe deinen Nostr-Account mit deinem WordPress-Profil</p>
+        <p>Verknuepfe dein WordPress-Account mit Nostr</p>
         <button id="nostr-register-btn" class="nostr-btn nostr-btn-primary">
           Mit Nostr verknuepfen
         </button>
+        <p class="nostr-register-hint">
+          Du bekommst einen einmaligen Nostr-Key, der mit deinem Account verknuepft wird.
+          Du kannst ihn zusätzlich mit einem Passwort oder einem Passkey in deinem Browser verschllüsseln, damit keine anderen Nutzer deines Computers darauf zugreifen koennen.
+        </p>
       </div>
     `;
 
@@ -824,34 +828,55 @@ class NostrWPIntegration {
     const restoreBlockedByCredential = backupStatus?.restoreLikelyAvailable === false
       && String(backupStatus?.restoreUnavailableReason || '') === 'credential_mismatch';
 
-    const backupInfo = !backupStatus
-      ? 'Cloud-Backup-Status konnte nicht automatisch geprueft werden. Du kannst Restore im Popup trotzdem direkt versuchen.'
+    const backupStatusText = !backupStatus
+      ? 'Backup-Status wird geprüft...'
       : hasBackup
         ? backupMatches
-          ? `Cloud-Backup mit passendem Pubkey gefunden (${this.formatShortPubkey(backupPubkey)}).`
-          : `Cloud-Backup gefunden, aber mit anderem Pubkey (${this.formatShortPubkey(backupPubkey)}).`
-        : 'Kein Cloud-Backup fuer diesen User vorhanden.';
+          ? '✓ Wir haben ein Backup deines Schlüssels gefunden!'
+          : '⚠ Wir haben ein Backup, aber es passt möglicherweise nicht zu diesem Account.'
+        : 'Kein Backup vorhanden. Wenn du ein anderes Gerät hast, kannst du von dort importieren.';
 
     const restoreHint = restoreBlockedByCredential
-      ? '<p>Hinweis: Restore ist in diesem Browser vermutlich blockiert (Passkey-Credential stammt aus einem anderen Browser-Profil).</p>'
+      ? '<p class="nostr-hint"><strong>Hinweis:</strong> Das Backup lässt sich möglicherweise in diesem Browser nicht automatisch abspielen. Das ist normal, wenn du es auf einem anderen Gerät erstellt hast. Du kannst es manuell importieren.</p>'
       : '';
 
     const warning = document.createElement('div');
     warning.className = 'nostr-warning';
     warning.innerHTML = `
-      <p>Dieser WordPress-Account ist bereits mit Nostr verknuepft, aber im aktuellen Browser-Scope ist noch kein lokaler Schluessel vorhanden.</p>
-      <p>Registriert: <code>${expectedShort}</code></p>
-      <p>${backupInfo}</p>
-      ${restoreHint}
-      <p><strong>Empfohlener Ablauf:</strong></p>
-      <p>1) Extension-Popup oeffnen -> <strong>WP Cloud Backup</strong> -> <strong>Aus Cloud wiederherstellen</strong>.</p>
-      <p>2) Falls Restore nicht funktioniert: nsec im alten Browser exportieren und hier importieren (Popup -> Backup / Restore).</p>
-      <p>3) Seite neu laden oder unten auf <strong>Neu pruefen</strong> klicken.</p>
-      <p>4) Nur wenn du bewusst rotieren willst: neuen lokalen Key erzeugen und explizit uebernehmen.</p>
-      <div class="nostr-modal-actions">
-        <button type="button" class="nostr-btn nostr-btn-secondary" id="nostr-recheck-key">
-          Jetzt neu pruefen
-        </button>
+      <div class="nostr-warning-content">
+        <h4>🔐 Dein Nostr-Schlüssel ist noch nicht in diesem Browser hinterlegt</h4>
+        
+        <p>Du hast deinen WordPress-Account bereits mit Nostr verknüpft – aber in diesem Browser fehlt dein privater Schlüssel, um Aktionen auszuführen.</p>
+        
+        <p style="margin: 16px 0; padding: 12px; background: #f5f5f5; border-left: 3px solid #2196F3; border-radius: 4px;">
+          <strong>Status:</strong> ${backupStatusText}
+        </p>
+
+        <p><strong>Wie geht es weiter?</strong></p>
+        
+        <ol style="margin: 12px 0 16px 20px;">
+          <li><strong>Öffne die wp-nostr Erweiterung</strong> (oben rechts in der Browser-Leiste, neben der Adresszeile)</li>
+          <li><strong>Gehe zu „Backup & Restore"</strong> oder „Mein Schlüssel"</li>
+          <li><strong>Wähle „Wiederherstellen"</strong> – entweder:
+            <ul style="margin-top: 8px;">
+              <li><strong>Cloud-Backup verwenden</strong> (wenn vorhanden) – am einfachsten!</li>
+              <li><strong>Vom anderen Gerät kopieren</strong> – nutze dein Smartphone/alten Computer</li>
+              <li><strong>Neuen Schlüssel erstellen</strong> (nur falls nötig – bitte Anleitung beachten!)</li>
+            </ul>
+          </li>
+          <li><strong>Seite neu laden</strong> – fertig!</li>
+        </ol>
+
+        ${restoreHint}
+
+        <div class="nostr-modal-actions">
+          <button type="button" class="nostr-btn nostr-btn-primary" id="nostr-open-guide">
+            📖 Schritt-für-Schritt Anleitung
+          </button>
+          <button type="button" class="nostr-btn nostr-btn-secondary" id="nostr-recheck-key">
+            Erneut prüfen
+          </button>
+        </div>
       </div>
     `;
 
@@ -859,6 +884,13 @@ class NostrWPIntegration {
       document.querySelector('main') ||
       document.body;
     target.insertBefore(warning, target.firstChild);
+
+    const guideButton = warning.querySelector('#nostr-open-guide');
+    if (guideButton) {
+      guideButton.onclick = () => {
+        this.showStepByStepGuide();
+      };
+    }
 
     const recheckButton = warning.querySelector('#nostr-recheck-key');
     if (recheckButton) {
@@ -871,6 +903,102 @@ class NostrWPIntegration {
         }
       };
     }
+  }
+
+  showStepByStepGuide() {
+    const existingGuide = document.getElementById('nostr-guide-modal');
+    if (existingGuide) {
+      existingGuide.remove();
+    }
+
+    const guide = document.createElement('div');
+    guide.id = 'nostr-guide-modal';
+    guide.className = 'nostr-guide-modal';
+    guide.innerHTML = `
+      <div class="nostr-modal-backdrop">
+        <div class="nostr-modal nostr-modal-large">
+          <button class="nostr-modal-close" id="nostr-guide-close" aria-label="Schließen">×</button>
+          
+          <h3>🚀 So importierst du deinen Nostr-Schlüssel</h3>
+          
+          <div class="nostr-steps">
+            <div class="nostr-step">
+              <div class="nostr-step-number">1</div>
+              <div class="nostr-step-content">
+                <h4>wp-nostr Erweiterung öffnen</h4>
+                <p>Schau oben rechts in deinem Browser nach einem kleinen Icon (💜 oder ⚡). Klick darauf!</p>
+                <p style="font-size: 12px; color: #666;">Wenn du es nicht siehst: <a href="https://chrome.google.com/webstore" target="_blank">Chrome Web Store</a> oder <a href="https://addons.mozilla.org" target="_blank">Firefox Add-ons</a></p>
+              </div>
+            </div>
+
+            <div class="nostr-step">
+              <div class="nostr-step-number">2</div>
+              <div class="nostr-step-content">
+                <h4>„Backup & Restore" oder „Schlüssel" aufrufen</h4>
+                <p>Im Popup der Erweiterung findest du einen Menüpunkt oder Button für Backup/Schlüssel-Verwaltung.</p>
+              </div>
+            </div>
+
+            <div class="nostr-step">
+              <div class="nostr-step-number">3</div>
+              <div class="nostr-step-content">
+                <h4>Schlüssel wiederherstellen – deine beste Option:</h4>
+                <ul style="margin: 8px 0;">
+                  <li><strong>📱 Cloud-Backup</strong> (am einfachsten!) – falls verfügbar, einfach klicken</li>
+                  <li><strong>📲 Von anderem Gerät</strong> – nutze dein Smartphone oder alten Computer mit der Erweiterung</li>
+                  <li><strong>🔑 Manueller Import</strong> – wenn du einen Backup-Code oder nsec hast</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="nostr-step">
+              <div class="nostr-step-number">4</div>
+              <div class="nostr-step-content">
+                <h4>Diese Seite neu laden</h4>
+                <p>Drücke <strong>F5</strong> oder klick auf die Refresh-Schaltfläche. Fertig! 🎉</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="nostr-guide-tips">
+            <h4>💡 Häufige Fragen</h4>
+            <details>
+              <summary><strong>Ich sehe die Erweiterung nicht?</strong></summary>
+              <p>Installiere zuerst die <strong>wp-nostr Erweiterung</strong> aus dem <a href="https://chrome.google.com/webstore" target="_blank">Chrome Web Store</a> oder <a href="https://addons.mozilla.org" target="_blank">Firefox Add-ons</a>. Nach der Installation brauchst du diese Seite neu laden.</p>
+            </details>
+            
+            <details>
+              <summary><strong>Ich habe keinen Backup-Code und keinen anderen Browser?</strong></summary>
+              <p>Du kannst in der Erweiterung einen neuen Schlüssel erstellen. Aber Achtung: Das ist nur sicher, wenn dein jetziger Schlüssel nicht wichtig für andere Nostr-Apps ist. Im Zweiffel contakt den Website-Admin.</p>
+            </details>
+            
+            <details>
+              <summary><strong>Was ist ein „Schlüssel" oder „nsec"?</strong></summary>
+              <p>Das ist deine Nostr-Identität. Wie ein Passwort für die Nostr-Welt. Du brauchst ihn, um etwas zu signieren (unterschreiben) – aber nur die Erweiterung sieht ihn tatsächlich!</p>
+            </details>
+          </div>
+
+          <div class="nostr-modal-actions">
+            <button type="button" class="nostr-btn nostr-btn-primary" id="nostr-guide-close-btn">
+              Verstanden!
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(guide);
+
+    const closeBtn = guide.querySelector('#nostr-guide-close-btn');
+    const closeX = guide.querySelector('#nostr-guide-close');
+    const backdrop = guide.querySelector('.nostr-modal-backdrop');
+
+    const closeGuide = () => guide.remove();
+    closeBtn.onclick = closeGuide;
+    closeX.onclick = closeGuide;
+    backdrop.onclick = (e) => {
+      if (e.target === backdrop) closeGuide();
+    };
   }
 
   showKeyMismatchWarning(expected, actual) {
