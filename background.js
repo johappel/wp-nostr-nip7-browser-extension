@@ -1595,16 +1595,43 @@ async function handleMessage(request, sender) {
 async function getExistingProtectionPreference() {
   const scopes = await listStoredKeyScopes();
   if (!scopes.length) return { hasOtherScopes: false, preferredProtection: null };
+
+  // When the active scope is user-specific (wp:host:u:N), prefer a source scope
+  // with the same user-id so the same identity is inherited across domains.
+  const currentUserIdMatch = activeKeyScope.match(/:u:(\d+)$/);
+  const preferredUserId = currentUserIdMatch ? currentUserIdMatch[1] : null;
+
+  let bestMatch = null;
+  let fallbackMatch = null;
+
   for (const scope of scopes) {
+    if (scope === activeKeyScope) continue; // skip the scope we are trying to populate
     try {
       const tmpKm = new KeyManager(chrome.storage.local, scope);
       const mode = await tmpKm.getProtectionMode();
-      if (mode) return { hasOtherScopes: true, preferredProtection: mode, sourceScope: scope };
+      if (!mode) continue;
+
+      const candidate = { hasOtherScopes: true, preferredProtection: mode, sourceScope: scope };
+
+      if (preferredUserId) {
+        const candidateUserIdMatch = scope.match(/:u:(\d+)$/);
+        if (candidateUserIdMatch && candidateUserIdMatch[1] === preferredUserId) {
+          // Exact user-id match – use immediately
+          return candidate;
+        }
+      }
+
+      // Remember first valid scope as fallback
+      if (!fallbackMatch) {
+        fallbackMatch = candidate;
+      }
     } catch {
       // skip broken scopes
     }
   }
-  return { hasOtherScopes: true, preferredProtection: null };
+
+  if (fallbackMatch) return fallbackMatch;
+  return { hasOtherScopes: scopes.length > 0, preferredProtection: null };
 }
 
 async function promptPassword(mode, passkeyAuthOptions = null) {
