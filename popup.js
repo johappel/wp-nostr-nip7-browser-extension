@@ -22,7 +22,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudBackupEnableButton = document.getElementById('backup-enable-cloud');
   const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
   const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
-  const signerCard = document.getElementById('signer-card');
+  const protectionRow = document.getElementById('protection-row');
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
@@ -46,7 +46,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
-  const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
+  const initialSigner = await refreshSignerIdentity(protectionRow, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -79,7 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeScope = viewer?.scope || 'global';
       activeWpApi = sanitizeWpApi(viewer?.wpApi);
       activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
+      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -201,7 +201,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const pubkey = String(response?.result?.pubkey || '');
       importNsecInput.value = '';
       backupOutput.value = '';
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -232,7 +232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       importNsecInput.value = '';
       backupOutput.value = '';
 
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, false);
+      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -310,7 +310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = pubkey
         ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
         : 'Wiederherstellung erfolgreich. Seite neu laden.';
-      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
+      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -612,11 +612,11 @@ async function refreshSignerIdentity(cardNode, requestedScope, allowFallback = t
       }
     }
 
-    renderSignerCard(cardNode, runtimeStatus);
+    renderProtectionRow(cardNode, runtimeStatus);
     return { scope: activeScope, runtimeStatus };
   } catch (error) {
     if (cardNode) {
-      cardNode.innerHTML = `<p class="empty">Signer-Status konnte nicht geladen werden: ${escapeHtml(error.message || String(error))}</p>`;
+      cardNode.innerHTML = `<p class="empty">Schutzart konnte nicht geladen werden: ${escapeHtml(error.message || String(error))}</p>`;
     }
     return { scope: normalizeScope(requestedScope), runtimeStatus: null };
   }
@@ -631,25 +631,17 @@ async function getScopedRuntimeStatus(scope) {
   return response?.result || null;
 }
 
-function renderSignerCard(cardNode, runtimeStatus) {
-  if (!cardNode) return;
+function renderProtectionRow(rowNode, runtimeStatus) {
+  if (!rowNode) return;
 
   if (!runtimeStatus || !runtimeStatus.hasKey) {
-    cardNode.innerHTML = `
-      <p class="empty">Kein lokaler Nostr-Schlüssel eingerichtet.</p>
-      <p class="hint">Importiere einen nsec oder richte zuerst einen Schlüssel ein.</p>
-    `;
+    rowNode.innerHTML = '';
     return;
   }
 
-  const locked = Boolean(runtimeStatus.locked);
-  const npub = String(runtimeStatus.npub || '').trim();
-  const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
   const currentMode = String(runtimeStatus.protectionMode || '');
-  const lockState = locked ? 'nicht aktiv' : 'aktiv';
-  const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
 
-  cardNode.innerHTML = `
+  rowNode.innerHTML = `
     <div class="wp-user-meta protection-row">
       <strong>Schutzart:</strong>
       <select id="protection-mode-select" class="protection-select">
@@ -659,23 +651,15 @@ function renderSignerCard(cardNode, runtimeStatus) {
       </select>
       <span id="protection-change-status" class="protection-status"></span>
     </div>
-    <div class="wp-user-meta"><strong>Login für sensible Aktionen:</strong> ${escapeHtml(lockState)}</div>
-    <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfügbar')}</div>
-    <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfügbar')}</div>
-    <div class="signer-badges">
-      <span class="badge">Public Key ist immer sichtbar</span>
-      <span class="badge warn">Login nur für Signieren und Schlüsseländerungen</span>
-    </div>
-    ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil öffnen (njump)</a></div>` : ''}
   `;
 
-  const protectionSelect = cardNode.querySelector('#protection-mode-select');
+  const protectionSelect = rowNode.querySelector('#protection-mode-select');
   if (protectionSelect) {
     protectionSelect.addEventListener('change', async () => {
       const newMode = protectionSelect.value;
-      const statusEl = cardNode.querySelector('#protection-change-status');
+      const statusEl = rowNode.querySelector('#protection-change-status');
       protectionSelect.disabled = true;
-      if (statusEl) { statusEl.textContent = 'Wird geändert...'; statusEl.className = 'protection-status changing'; }
+      if (statusEl) { statusEl.textContent = 'Wird ge\u00e4ndert...'; statusEl.className = 'protection-status changing'; }
 
       try {
         const response = await chrome.runtime.sendMessage({
@@ -683,11 +667,10 @@ function renderSignerCard(cardNode, runtimeStatus) {
           payload: { mode: newMode, scope: runtimeStatus.keyScope }
         });
         if (response?.error) throw new Error(response.error);
-        if (statusEl) { statusEl.textContent = '✓ Gespeichert'; statusEl.className = 'protection-status success'; }
+        if (statusEl) { statusEl.textContent = '\u2713 Gespeichert'; statusEl.className = 'protection-status success'; }
         setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2500);
       } catch (err) {
-        if (statusEl) { statusEl.textContent = '✗ ' + (err.message || 'Fehler'); statusEl.className = 'protection-status error'; }
-        // Revert dropdown to previous value
+        if (statusEl) { statusEl.textContent = '\u2717 ' + (err.message || 'Fehler'); statusEl.className = 'protection-status error'; }
         protectionSelect.value = currentMode;
         setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
       } finally {
@@ -741,6 +724,7 @@ function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus) {
     ${missingFields.length
       ? `<div class="wp-user-meta"><strong>Fehlende Angaben:</strong> ${escapeHtml(missingFields.join(', '))}</div>`
       : '<div class="wp-user-meta"><strong>Fehlende Angaben:</strong> keine</div>'}
+    ${npub ? `<div class="wp-user-meta"><a href="https://njump.me/${encodeURIComponent(npub)}" target="_blank" rel="noopener noreferrer">Profil öffnen (njump)</a></div>` : ''}
   `;
 
   if (!hintNode) return;

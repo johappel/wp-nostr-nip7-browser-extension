@@ -621,7 +621,7 @@ async function getStoredPasskeyCredentialIdForActiveScope() {
   return String(storage[credentialStorageKey] || '').trim() || null;
 }
 
-async function configureProtectionAndStoreSecretKey(secretKey) {
+async function configureProtectionAndStoreSecretKey(secretKey, passkeyAuthOptions = null) {
   // If user already has a preference from another scope, inherit silently.
   const existingPref = await getExistingProtectionPreference();
 
@@ -657,7 +657,7 @@ async function configureProtectionAndStoreSecretKey(secretKey) {
       const srcStorage = await chrome.storage.local.get([srcCredKey]);
       const existingCredentialId = String(srcStorage[srcCredKey] || '').trim();
       if (existingCredentialId) {
-        await ensurePasskeyIfNeeded(await getPasskeyAuthOptions());
+        await ensurePasskeyIfNeeded(passkeyAuthOptions);
         await keyManager.storeKey(secretKey, null, {
           mode: KeyManager.MODE_PASSKEY,
           passkeyCredentialId: existingCredentialId
@@ -1138,7 +1138,7 @@ async function handleMessage(request, sender) {
         throw new Error('Restored key does not match backup pubkey metadata.');
       }
 
-      return await configureProtectionAndStoreSecretKey(restoredSecret);
+      return await configureProtectionAndStoreSecretKey(restoredSecret, await getPasskeyAuthOptions());
     } finally {
       restoredSecret.fill(0);
     }
@@ -1181,7 +1181,7 @@ async function handleMessage(request, sender) {
     }
     const secretKey = generateSecretKey();
     try {
-      const result = await configureProtectionAndStoreSecretKey(secretKey);
+      const result = await configureProtectionAndStoreSecretKey(secretKey, await getPasskeyAuthOptions());
 
       // Register new pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
@@ -1231,7 +1231,7 @@ async function handleMessage(request, sender) {
       throw new Error('Invalid nsec length');
     }
     try {
-      const result = await configureProtectionAndStoreSecretKey(importedSecret);
+      const result = await configureProtectionAndStoreSecretKey(importedSecret, await getPasskeyAuthOptions());
 
       // Register imported pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
