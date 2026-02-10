@@ -155,40 +155,63 @@ function showPasswordDialog(mode) {
     return;
   }
 
+  // This dialog is now only shown for first-time users (no existing scopes).
+  // Returning users get their protection mode inherited automatically.
   app.innerHTML = `
     <div class="dialog password">
-      <h2>${isCreate ? 'Passwort festlegen' : 'Extension entsperren'}</h2>
+      <h2>${isCreate ? 'Schlüssel-Schutz festlegen' : 'Extension entsperren'}</h2>
       <p>${isCreate
-        ? 'Dieses Passwort schützt deinen privaten Schlüssel. Mindestens 8 Zeichen.'
+        ? 'Wähle, wie dein privater Schlüssel geschützt werden soll:'
         : 'Bitte Passwort eingeben, um fortzufahren.'}</p>
 
-      <div class="input-group">
-        <input type="password" id="password" placeholder="Passwort" autofocus />
-      </div>
-
       ${isCreate ? `
+        <div class="protection-options">
+
+          <div class="option-card ${passkeySupported ? '' : 'disabled'}">
+            <button id="setup-passkey" class="btn-option" type="button" ${passkeySupported ? '' : 'disabled'}>
+              🔐 Passkey verwenden (empfohlen)
+            </button>
+            <p class="hint">${passkeySupported
+              ? 'Biometrie oder PIN – einfach und sicher. Funktioniert auf allen Websites.'
+              : 'Passkey ist in diesem Browser nicht verfügbar.'}</p>
+          </div>
+
+          <div class="option-card">
+            <div class="input-group">
+              <input type="password" id="password" placeholder="Passwort (mind. 8 Zeichen)" />
+            </div>
+            <div class="input-group">
+              <input type="password" id="password-confirm" placeholder="Passwort wiederholen" />
+            </div>
+            <div class="actions">
+              <button id="submit" class="btn-primary" type="button">Mit Passwort speichern</button>
+            </div>
+          </div>
+
+          <div class="option-card option-less-secure">
+            <label class="checkbox-label">
+              <input type="checkbox" id="no-password" />
+              Ohne Passwort speichern
+            </label>
+            <p class="hint">Nur auf privaten Geräten. Der Schlüssel wird unverschlüsselt gespeichert.</p>
+            <div class="actions">
+              <button id="submit-no-pw" class="btn-secondary" type="button" disabled>
+                Ohne Passwort fortfahren
+              </button>
+            </div>
+          </div>
+        </div>
+
+      ` : `
         <div class="input-group">
-          <input type="password" id="password-confirm" placeholder="Passwort wiederholen" />
+          <input type="password" id="password" placeholder="Passwort" autofocus />
         </div>
-        <label class="checkbox-label">
-          <input type="checkbox" id="no-password" />
-          Ohne Passwort speichern (weniger sicher)
-        </label>
-        <p class="hint">Nur auf privaten Geräten verwenden. Der private Schlüssel wird unverschlüsselt gespeichert.</p>
-        <div class="actions">
-          <button id="setup-passkey" class="btn-secondary" type="button" ${passkeySupported ? '' : 'disabled'}>
-            Stattdessen Passkey verwenden (empfohlen)
-          </button>
-        </div>
-        <p class="hint">${passkeySupported
-          ? 'Passkey-Entsperrung nutzt Biometrie/PIN und vereinfacht die Nutzung über Geräte hinweg.'
-          : 'Passkey ist in diesem Browser-Kontext nicht verfügbar.'}</p>
-      ` : ''}
+      `}
 
       <p id="error" class="error" hidden></p>
 
       <div class="actions">
-        <button id="submit" class="btn-primary">${isCreate ? 'Speichern' : 'Entsperren'}</button>
+        ${!isCreate ? '<button id="submit" class="btn-primary">Entsperren</button>' : ''}
         <button id="cancel" class="btn-secondary">Abbrechen</button>
       </div>
     </div>
@@ -197,17 +220,24 @@ function showPasswordDialog(mode) {
   const passwordEl = document.getElementById('password');
   const confirmEl = isCreate ? document.getElementById('password-confirm') : null;
   const noPasswordEl = isCreate ? document.getElementById('no-password') : null;
+  const submitNoPwBtn = isCreate ? document.getElementById('submit-no-pw') : null;
 
-  if (isCreate && noPasswordEl) {
-    const toggleInputs = () => {
-      const disabled = noPasswordEl.checked;
-      passwordEl.disabled = disabled;
-      if (confirmEl) confirmEl.disabled = disabled;
+  // "Ohne Passwort" checkbox toggles the submit button
+  if (isCreate && noPasswordEl && submitNoPwBtn) {
+    noPasswordEl.onchange = () => {
+      submitNoPwBtn.disabled = !noPasswordEl.checked;
     };
-    noPasswordEl.onchange = toggleInputs;
-    toggleInputs();
   }
 
+  // Submit for "Ohne Passwort" explicit button
+  if (submitNoPwBtn) {
+    submitNoPwBtn.onclick = async () => {
+      await chrome.storage.session.set({ passwordResult: { noPassword: true } });
+      window.close();
+    };
+  }
+
+  // Passkey setup button
   if (isCreate) {
     const passkeyBtn = document.getElementById('setup-passkey');
     if (passkeyBtn) {
@@ -234,51 +264,51 @@ function showPasswordDialog(mode) {
     }
   }
 
-  document.getElementById('submit').onclick = async () => {
-    const pw = passwordEl.value;
-    const errorEl = document.getElementById('error');
+  // Submit for password mode
+  const submitBtn = document.getElementById('submit');
+  if (submitBtn) {
+    submitBtn.onclick = async () => {
+      const pw = passwordEl ? passwordEl.value : '';
+      const errorEl = document.getElementById('error');
 
-    if (isCreate) {
-      if (noPasswordEl?.checked) {
-        await chrome.storage.session.set({ passwordResult: { noPassword: true } });
-        window.close();
-        return;
+      if (isCreate) {
+        const pw2 = confirmEl ? confirmEl.value : '';
+        if (pw !== pw2) {
+          errorEl.textContent = 'Passwörter stimmen nicht überein';
+          errorEl.hidden = false;
+          return;
+        }
+        if (pw.length < 8) {
+          errorEl.textContent = 'Mindestens 8 Zeichen erforderlich';
+          errorEl.hidden = false;
+          return;
+        }
       }
 
-      const pw2 = confirmEl.value;
-      if (pw !== pw2) {
-        errorEl.textContent = 'Passwörter stimmen nicht überein';
+      if (!pw) {
+        errorEl.textContent = 'Passwort erforderlich';
         errorEl.hidden = false;
         return;
       }
-      if (pw.length < 8) {
-        errorEl.textContent = 'Mindestens 8 Zeichen erforderlich';
-        errorEl.hidden = false;
-        return;
-      }
-    }
 
-    if (!pw) {
-      errorEl.textContent = 'Passwort erforderlich';
-      errorEl.hidden = false;
-      return;
-    }
-
-    await chrome.storage.session.set({ passwordResult: { password: pw } });
-    window.close();
-  };
+      await chrome.storage.session.set({ passwordResult: { password: pw } });
+      window.close();
+    };
+  }
 
   document.getElementById('cancel').onclick = () => {
     chrome.storage.session.set({ passwordResult: null });
     window.close();
   };
 
-  passwordEl.onkeypress = (e) => {
-    if (e.key === 'Enter') document.getElementById('submit').click();
-  };
+  if (passwordEl) {
+    passwordEl.onkeypress = (e) => {
+      if (e.key === 'Enter' && submitBtn) submitBtn.click();
+    };
+  }
   if (confirmEl) {
     confirmEl.onkeypress = (e) => {
-      if (e.key === 'Enter') document.getElementById('submit').click();
+      if (e.key === 'Enter' && submitBtn) submitBtn.click();
     };
   }
 }

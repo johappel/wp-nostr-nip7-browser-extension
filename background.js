@@ -622,6 +622,58 @@ async function getStoredPasskeyCredentialIdForActiveScope() {
 }
 
 async function configureProtectionAndStoreSecretKey(secretKey) {
+  // If user already has a preference from another scope, inherit silently.
+  const existingPref = await getExistingProtectionPreference();
+
+  if (existingPref.hasOtherScopes && existingPref.preferredProtection) {
+    const inheritedMode = existingPref.preferredProtection;
+
+    if (inheritedMode === KeyManager.MODE_NONE) {
+      await keyManager.storeKey(secretKey, null);
+      await clearUnlockCaches();
+      const pubkey = getPublicKey(secretKey);
+      return {
+        pubkey,
+        npub: nip19.npubEncode(pubkey),
+        protectionMode: KeyManager.MODE_NONE
+      };
+    }
+
+    if (inheritedMode === KeyManager.MODE_PASSWORD) {
+      const password = await ensurePasswordIfNeeded(true);
+      await keyManager.storeKey(secretKey, password);
+      await cachePasswordWithPolicy(password);
+      const pubkey = getPublicKey(secretKey);
+      return {
+        pubkey,
+        npub: nip19.npubEncode(pubkey),
+        protectionMode: KeyManager.MODE_PASSWORD
+      };
+    }
+
+    if (inheritedMode === KeyManager.MODE_PASSKEY) {
+      const srcCredKey = new KeyManager(existingPref.sourceScope)
+        .keyName(KeyManager.PASSKEY_ID_KEY);
+      const srcStorage = await chrome.storage.local.get([srcCredKey]);
+      const existingCredentialId = String(srcStorage[srcCredKey] || '').trim();
+      if (existingCredentialId) {
+        await ensurePasskeyIfNeeded(await getPasskeyAuthOptions());
+        await keyManager.storeKey(secretKey, null, {
+          mode: KeyManager.MODE_PASSKEY,
+          passkeyCredentialId: existingCredentialId
+        });
+        await cachePasskeyAuthWithPolicy();
+        const pubkey = getPublicKey(secretKey);
+        return {
+          pubkey,
+          npub: nip19.npubEncode(pubkey),
+          protectionMode: KeyManager.MODE_PASSKEY
+        };
+      }
+    }
+  }
+
+  // First-time: show full setup dialog
   const setupResult = await promptPassword('create');
   if (!setupResult) {
     throw new Error('Key import canceled');
@@ -1289,6 +1341,54 @@ async function handleMessage(request, sender) {
         if (!allowCreateIfMissing) {
           throw new Error('No local key found for this scope.');
         }
+
+        // Check if user already has keys in other scopes.
+        // If so, silently inherit protection mode instead of showing the full wizard.
+        const existingPref = await getExistingProtectionPreference();
+
+        if (existingPref.hasOtherScopes && existingPref.preferredProtection) {
+          // Inherit protection from existing scope — no dialog needed for MODE_NONE
+          const inheritedMode = existingPref.preferredProtection;
+
+          if (inheritedMode === KeyManager.MODE_NONE) {
+            // Silent key creation: same as nos2x "just approve" experience
+            const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(null);
+            await clearUnlockCaches();
+            await openBackupDialog(npub, nsecBech32);
+            return pubkey;
+          }
+
+          if (inheritedMode === KeyManager.MODE_PASSWORD) {
+            // Ask for existing password (unlock), not a new one
+            const srcKm = new KeyManager(existingPref.sourceScope);
+            const password = await ensurePasswordIfNeeded(true);
+            const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(password);
+            await cachePasswordWithPolicy(password);
+            await openBackupDialog(npub, nsecBech32);
+            return pubkey;
+          }
+
+          if (inheritedMode === KeyManager.MODE_PASSKEY) {
+            await ensurePasskeyIfNeeded(await getPasskeyAuthOptions());
+            // For passkey mode we still need a credential id
+            const srcCredKey = new KeyManager(existingPref.sourceScope)
+              .keyName(KeyManager.PASSKEY_ID_KEY);
+            const srcStorage = await chrome.storage.local.get([srcCredKey]);
+            const existingCredentialId = String(srcStorage[srcCredKey] || '').trim();
+            if (existingCredentialId) {
+              const { pubkey, npub, nsecBech32 } = await keyManager.generateKey(null, {
+                mode: KeyManager.MODE_PASSKEY,
+                passkeyCredentialId: existingCredentialId
+              });
+              await cachePasskeyAuthWithPolicy();
+              await openBackupDialog(npub, nsecBech32);
+              return pubkey;
+            }
+            // Fall through to full dialog if credential not found
+          }
+        }
+
+        // First-time user: full setup dialog
         const createResult = await promptPassword('create');
         if (!createResult) throw new Error('Password setup canceled');
 
@@ -1390,6 +1490,21 @@ async function handleMessage(request, sender) {
 // UI-Dialoge Helper
 // ============================================================
 
+async function getExistingProtectionPreference() {
+  const scopes = await listStoredKeyScopes();
+  if (!scopes.length) return { hasOtherScopes: false, preferredProtection: null };
+  for (const scope of scopes) {
+    try {
+      const tmpKm = new KeyManager(scope);
+      const mode = await tmpKm.getProtectionMode();
+      if (mode) return { hasOtherScopes: true, preferredProtection: mode, sourceScope: scope };
+    } catch {
+      // skip broken scopes
+    }
+  }
+  return { hasOtherScopes: true, preferredProtection: null };
+}
+
 async function promptPassword(mode, passkeyAuthOptions = null) {
   await chrome.storage.session.remove('passwordResult');
   return new Promise((resolve) => {
@@ -1449,7 +1564,7 @@ async function promptPassword(mode, passkeyAuthOptions = null) {
 function getPasswordDialogWindowSize(mode) {
   switch (mode) {
     case 'create':
-      return { width: 520, height: 640 };
+      return { width: 520, height: 720 };
     case 'unlock-passkey':
       return { width: 560, height: 760 };
     case 'unlock':
