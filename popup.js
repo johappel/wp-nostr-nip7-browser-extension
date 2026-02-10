@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudBackupEnableButton = document.getElementById('backup-enable-cloud');
   const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
   const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
+  const signerCard = document.getElementById('signer-card');
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
@@ -45,7 +46,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
-  const initialSigner = await refreshSignerIdentity(null, activeScope, !initialViewer?.isLoggedIn);
+  const initialSigner = await refreshSignerIdentity(signerCard, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -78,7 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeScope = viewer?.scope || 'global';
       activeWpApi = sanitizeWpApi(viewer?.wpApi);
       activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
-      const signerContext = await refreshSignerIdentity(null, activeScope, !viewer?.isLoggedIn);
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, !viewer?.isLoggedIn);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -200,7 +201,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const pubkey = String(response?.result?.pubkey || '');
       importNsecInput.value = '';
       backupOutput.value = '';
-      const signerContext = await refreshSignerIdentity(null, activeScope, true);
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -231,7 +232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       importNsecInput.value = '';
       backupOutput.value = '';
 
-      const signerContext = await refreshSignerIdentity(null, activeScope, false);
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, false);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -309,7 +310,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = pubkey
         ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
         : 'Wiederherstellung erfolgreich. Seite neu laden.';
-      const signerContext = await refreshSignerIdentity(null, activeScope, true);
+      const signerContext = await refreshSignerIdentity(signerCard, activeScope, true);
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -644,12 +645,20 @@ function renderSignerCard(cardNode, runtimeStatus) {
   const locked = Boolean(runtimeStatus.locked);
   const npub = String(runtimeStatus.npub || '').trim();
   const pubkeyHex = String(runtimeStatus.pubkeyHex || '').trim();
-  const mode = formatProtectionMode(runtimeStatus.protectionMode);
+  const currentMode = String(runtimeStatus.protectionMode || '');
   const lockState = locked ? 'nicht aktiv' : 'aktiv';
   const profileUrl = npub ? `https://njump.me/${encodeURIComponent(npub)}` : '';
 
   cardNode.innerHTML = `
-    <div class="wp-user-meta"><strong>Schutzart:</strong> ${escapeHtml(mode)}</div>
+    <div class="wp-user-meta protection-row">
+      <strong>Schutzart:</strong>
+      <select id="protection-mode-select" class="protection-select">
+        <option value="passkey" ${currentMode === 'passkey' ? 'selected' : ''}>🔐 Passkey</option>
+        <option value="password" ${currentMode === 'password' ? 'selected' : ''}>🔑 Passwort</option>
+        <option value="none" ${currentMode === 'none' ? 'selected' : ''}>🔓 Ohne Schutz</option>
+      </select>
+      <span id="protection-change-status" class="protection-status"></span>
+    </div>
     <div class="wp-user-meta"><strong>Login für sensible Aktionen:</strong> ${escapeHtml(lockState)}</div>
     <div class="wp-user-meta"><strong>Pubkey (hex):</strong> ${escapeHtml(pubkeyHex || 'noch nicht verfügbar')}</div>
     <div class="wp-user-meta"><strong>Npub:</strong> ${escapeHtml(npub || 'noch nicht verfügbar')}</div>
@@ -659,6 +668,33 @@ function renderSignerCard(cardNode, runtimeStatus) {
     </div>
     ${profileUrl ? `<div class="wp-user-meta"><a href="${profileUrl}" target="_blank" rel="noopener noreferrer">Profil öffnen (njump)</a></div>` : ''}
   `;
+
+  const protectionSelect = cardNode.querySelector('#protection-mode-select');
+  if (protectionSelect) {
+    protectionSelect.addEventListener('change', async () => {
+      const newMode = protectionSelect.value;
+      const statusEl = cardNode.querySelector('#protection-change-status');
+      protectionSelect.disabled = true;
+      if (statusEl) { statusEl.textContent = 'Wird geändert...'; statusEl.className = 'protection-status changing'; }
+
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_CHANGE_PROTECTION',
+          payload: { mode: newMode, scope: runtimeStatus.keyScope }
+        });
+        if (response?.error) throw new Error(response.error);
+        if (statusEl) { statusEl.textContent = '✓ Gespeichert'; statusEl.className = 'protection-status success'; }
+        setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 2500);
+      } catch (err) {
+        if (statusEl) { statusEl.textContent = '✗ ' + (err.message || 'Fehler'); statusEl.className = 'protection-status error'; }
+        // Revert dropdown to previous value
+        protectionSelect.value = currentMode;
+        setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 4000);
+      } finally {
+        protectionSelect.disabled = false;
+      }
+    });
+  }
 }
 
 function renderProfileCard(cardNode, hintNode, viewer, runtimeStatus) {

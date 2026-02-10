@@ -770,6 +770,7 @@ async function handleMessage(request, sender) {
   const scopedTypes = new Set([
     'NOSTR_LOCK',
     'NOSTR_SET_UNLOCK_CACHE_POLICY',
+    'NOSTR_CHANGE_PROTECTION',
     'NOSTR_GET_STATUS',
     'NOSTR_BACKUP_STATUS',
     'NOSTR_BACKUP_ENABLE',
@@ -844,6 +845,66 @@ async function handleMessage(request, sender) {
       hasCachedPasskeyAuth: Boolean(refreshedPasskeyAuth),
       cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt
     };
+  }
+
+  // NOSTR_CHANGE_PROTECTION - Schutzart im Popup ändern
+  if (request.type === 'NOSTR_CHANGE_PROTECTION') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Protection mode can only be changed from extension UI');
+    }
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No key found for this scope.');
+    }
+
+    const newMode = String(request.payload?.mode || '').trim();
+    if (![KeyManager.MODE_NONE, KeyManager.MODE_PASSWORD, KeyManager.MODE_PASSKEY].includes(newMode)) {
+      throw new Error(`Invalid protection mode: ${newMode}`);
+    }
+
+    const currentMode = await keyManager.getProtectionMode();
+    if (currentMode === newMode) {
+      return { success: true, protectionMode: newMode, unchanged: true };
+    }
+
+    // Unlock with current mode to get secret key
+    const unlockPassword = await ensureUnlockForMode(currentMode, await getPasskeyAuthOptions());
+    const secretKey = await keyManager.getKey(
+      currentMode === KeyManager.MODE_PASSWORD ? unlockPassword : null
+    );
+    if (!secretKey) {
+      throw new Error('Failed to unlock current key.');
+    }
+
+    try {
+      if (newMode === KeyManager.MODE_NONE) {
+        await keyManager.storeKey(secretKey, null);
+        await clearUnlockCaches();
+      } else if (newMode === KeyManager.MODE_PASSWORD) {
+        const setupResult = await promptPassword('create');
+        if (!setupResult) throw new Error('Password setup canceled');
+        const password = extractPasswordFromDialogResult(setupResult);
+        if (!password) throw new Error('Password required');
+        await keyManager.storeKey(secretKey, password);
+        await clearUnlockCaches();
+        await cachePasswordWithPolicy(password);
+      } else if (newMode === KeyManager.MODE_PASSKEY) {
+        const setupResult = await promptPassword('create');
+        if (!setupResult || setupResult.protection !== KeyManager.MODE_PASSKEY) {
+          throw new Error('Passkey setup canceled');
+        }
+        await keyManager.storeKey(secretKey, null, {
+          mode: KeyManager.MODE_PASSKEY,
+          passkeyCredentialId: setupResult.credentialId
+        });
+        await clearUnlockCaches();
+        await cachePasskeyAuthWithPolicy();
+      }
+    } finally {
+      secretKey.fill(0);
+    }
+
+    return { success: true, protectionMode: newMode };
   }
 
   // NOSTR_GET_STATUS - Status f????r Popup (ben????tigt keine Domain)

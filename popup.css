@@ -110,6 +110,58 @@ h1 {
   word-break: break-word;
 }
 
+/* Protection mode dropdown row */
+.protection-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.protection-select {
+  font-size: 11px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.protection-select:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.protection-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.protection-select:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.protection-status {
+  font-size: 10px;
+  font-weight: 600;
+  transition: opacity 0.3s;
+}
+
+.protection-status.changing {
+  color: var(--muted);
+}
+
+.protection-status.success {
+  color: var(--success);
+}
+
+.protection-status.error {
+  color: var(--danger);
+}
+
 .profile-main {
   display: flex;
   gap: 10px;
