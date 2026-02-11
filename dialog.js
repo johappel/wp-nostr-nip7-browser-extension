@@ -316,7 +316,6 @@ function showPasswordDialog(mode) {
 async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
-  const isFirefox = /\bfirefox\//i.test(navigator.userAgent);
   const passkeyIdentity = buildPasskeyIdentity(keyScope, userId);
   const publicKey = {
     challenge: challenge.buffer,
@@ -337,7 +336,7 @@ async function createPasskeyCredential() {
     authenticatorSelection: {
       userVerification: 'preferred',
       residentKey: 'preferred',
-      ...(isFirefox ? {} : { authenticatorAttachment: 'platform' })
+      authenticatorAttachment: 'platform'
     }
   };
 
@@ -374,17 +373,14 @@ async function runPasskeyAssertion(options = {}) {
 }
 
 async function runLocalPasskeyAssertion(knownCredentialId = '') {
-  const isChromium = /\b(?:Chrome|Chromium|Edg)\//i.test(navigator.userAgent);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const request = {
     challenge: challenge.buffer,
     userVerification: 'preferred',
-    timeout: PASSKEY_TIMEOUT_MS
+    timeout: PASSKEY_TIMEOUT_MS,
+    // Hint all browsers towards local device passkeys (Windows Hello / Touch ID).
+    hints: ['client-device']
   };
-  if (isChromium) {
-    // Hint Chromium towards local device passkeys (Windows Hello / Touch ID).
-    request.hints = ['client-device'];
-  }
   let assertion = null;
 
   if (knownCredentialId) {
