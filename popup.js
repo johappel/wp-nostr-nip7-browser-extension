@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const unlockCacheState = document.getElementById('unlock-cache-state');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
+  const backupOutputToggleButton = document.getElementById('backup-output-toggle');
   const backupOutputCopyButton = document.getElementById('backup-output-copy');
   const backupDownloadButton = document.getElementById('backup-download');
   const importKeyButton = document.getElementById('import-key');
@@ -160,13 +161,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!nsec) throw new Error('Export lieferte keinen nsec');
 
       backupOutput.value = nsec;
-      status.textContent = 'Schlüssel exportiert. Du kannst ihn im Feld kopieren.';
+      backupOutput.type = 'password';
+      status.textContent = 'Schlüssel exportiert (verborgen). Nutze 👁 zum Anzeigen.';
     } catch (e) {
       status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
     } finally {
       exportKeyButton.disabled = false;
     }
   });
+
+  if (backupOutputToggleButton) {
+    backupOutputToggleButton.addEventListener('click', () => {
+      const isHidden = backupOutput.type === 'password';
+      backupOutput.type = isHidden ? 'text' : 'password';
+      backupOutputToggleButton.textContent = isHidden ? '🙈' : '👁';
+      backupOutputToggleButton.title = isHidden ? 'Verbergen' : 'Anzeigen';
+    });
+  }
 
   backupOutputCopyButton.addEventListener('click', async () => {
     const nsec = String(backupOutput.value || '').trim();
@@ -183,12 +194,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   backupDownloadButton.addEventListener('click', async () => {
-    const nsec = String(backupOutput.value || '').trim();
-    if (!nsec) {
-      status.textContent = 'Bitte zuerst den Schlüssel exportieren.';
-      return;
-    }
+    backupDownloadButton.disabled = true;
     try {
+      // Fetch nsec directly from background – no prior export needed
+      const exportResponse = await chrome.runtime.sendMessage({
+        type: 'NOSTR_EXPORT_NSEC',
+        payload: { scope: activeScope }
+      });
+      if (exportResponse?.error) throw new Error(exportResponse.error);
+      const nsec = String(exportResponse?.result?.nsec || '').trim();
+      if (!nsec) throw new Error('Export lieferte keinen nsec');
+
       const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
       const npub = String(response?.result || '').trim();
       const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
@@ -205,6 +221,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = 'Backup-Datei heruntergeladen.';
     } catch (e) {
       status.textContent = `Download fehlgeschlagen: ${e.message || e}`;
+    } finally {
+      backupDownloadButton.disabled = false;
     }
   });
 
