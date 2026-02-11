@@ -150,6 +150,23 @@
             <p class="empty">Instanz-Informationen werden geladen...</p>
           </div>
         </div>
+
+        <!-- Nachrichten-Relay (für TASK-19/20) -->
+        <div class="settings-section">
+          <h3>Nachrichten-Relay</h3>
+          <div class="dm-relay-row">
+            <input id="dm-relay-url" type="text" placeholder="wss://relay.example.com" />
+            <button id="save-dm-relay" class="btn-secondary" type="button">Speichern</button>
+          </div>
+          <p class="hint">Relay für DM-Empfang/Versand (Kind 10050 / NIP-17). Leer = verwendet Relay des Gesprächspartners.</p>
+        </div>
+
+        <!-- Erweitert -->
+        <div class="settings-section">
+          <h3>Erweitert</h3>
+          <div class="wp-user-meta"><strong>Version:</strong> <span id="extension-version">-</span></div>
+          <div class="wp-user-meta"><strong>Scope:</strong> <span id="active-scope">-</span></div>
+        </div>
       </div>
     </div>
 
@@ -158,7 +175,10 @@
       <div class="dialog" id="dialog-profile" role="dialog" aria-labelledby="dialog-title">
         <div class="dialog-header">
           <h2 id="dialog-title">Profil-Details</h2>
-          <button class="dialog-close" id="dialog-close" type="button" aria-label="Schließen">✕</button>
+          <div class="dialog-header-actions">
+            <button id="refresh-profile" class="btn-small" type="button" title="Neu laden">↻</button>
+            <button class="dialog-close" id="dialog-close" type="button" aria-label="Schließen">✕</button>
+          </div>
         </div>
         <div class="dialog-content">
           <!-- Profil-Karte -->

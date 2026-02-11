@@ -337,6 +337,12 @@ body {
   font-size: 16px;
 }
 
+.dialog-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .dialog-close {
   width: 28px;
   height: 28px;
@@ -641,6 +647,13 @@ body {
 .settings-section h3 {
   margin: 0 0 8px;
   font-size: 13px;
+}
+
+.dm-relay-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
 }
 
 /* ========================================

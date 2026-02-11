@@ -3,6 +3,7 @@ const DEFAULT_VALUE = true;
 const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
 const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
 const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
+const DM_RELAY_KEY = 'dmRelayUrl';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
   off: 'Immer nachfragen',
@@ -28,10 +29,25 @@ function switchView(viewId) {
   if (view) view.classList.add('active');
   if (navItem) navItem.classList.add('active');
   
-  // View-spezifische Aktionen
-  if (viewId === 'keys') {
-    // Cloud-Backup-Status aktualisieren wenn Keys-View geöffnet wird
-    // Wird unten in der Initialisierung gesetzt
+  // View-spezifische Initialisierung
+  onViewActivated(viewId);
+}
+
+// View-spezifische Aktionen bei Aktivierung
+async function onViewActivated(viewId) {
+  // Diese Funktion wird nach dem View-Wechsel aufgerufen
+  // und aktualisiert den Zustand der jeweiligen View
+  switch (viewId) {
+    case 'keys':
+      // Protection Row und Cloud-Backup werden beim Laden aktualisiert
+      break;
+    case 'settings':
+      // Scope-Anzeige aktualisieren
+      const scopeSpan = document.getElementById('active-scope');
+      if (scopeSpan) {
+        // Der Scope wird beim Laden gesetzt
+      }
+      break;
   }
 }
 
@@ -154,6 +170,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const dialogOverlay = document.getElementById('dialog-overlay');
   const dialogClose = document.getElementById('dialog-close');
   const footerNav = document.getElementById('footer-nav');
+  const dmRelayInput = document.getElementById('dm-relay-url');
+  const saveDmRelayButton = document.getElementById('save-dm-relay');
+  const extensionVersionSpan = document.getElementById('extension-version');
+  const activeScopeSpan = document.getElementById('active-scope');
+  const refreshProfileButton = document.getElementById('refresh-profile');
   
   let activeScope = 'global';
   let activeWpApi = null;
@@ -243,6 +264,90 @@ document.addEventListener('DOMContentLoaded', async () => {
     restoreButton: cloudBackupRestoreButton,
     deleteButton: cloudBackupDeleteButton
   }, activeScope, activeWpApi);
+
+  // ========================================
+  // Version & Scope Info
+  // ========================================
+
+  if (extensionVersionSpan) {
+    try {
+      const manifest = chrome.runtime.getManifest();
+      extensionVersionSpan.textContent = manifest.version || 'unbekannt';
+    } catch {
+      extensionVersionSpan.textContent = 'unbekannt';
+    }
+  }
+
+  if (activeScopeSpan) {
+    activeScopeSpan.textContent = activeScope || 'global';
+  }
+
+  // ========================================
+  // DM-Relay Initialisierung
+  // ========================================
+
+  if (dmRelayInput) {
+    const currentDmRelay = await loadDmRelay();
+    dmRelayInput.value = currentDmRelay;
+  }
+
+  // ========================================
+  // Event Listeners: DM-Relay
+  // ========================================
+
+  if (saveDmRelayButton && dmRelayInput) {
+    saveDmRelayButton.addEventListener('click', async () => {
+      const url = String(dmRelayInput.value || '').trim();
+      saveDmRelayButton.disabled = true;
+      try {
+        const saved = await saveDmRelay(url);
+        dmRelayInput.value = saved;
+        showStatus(saved
+          ? `Nachrichten-Relay gespeichert: ${saved}`
+          : 'Nachrichten-Relay entfernt (verwendet Gegenüber-Relay).');
+      } catch (e) {
+        showStatus(`Fehler: ${e.message || e}`, true);
+      } finally {
+        saveDmRelayButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Refresh Profile Dialog
+  // ========================================
+
+  if (refreshProfileButton) {
+    refreshProfileButton.addEventListener('click', async () => {
+      refreshProfileButton.disabled = true;
+      try {
+        const viewer = await loadViewerContext(null, status);
+        await persistViewerCache(viewer);
+        activeViewer = viewer;
+        activeScope = viewer?.scope || 'global';
+        activeWpApi = sanitizeWpApi(viewer?.wpApi);
+        activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
+        
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+        
+        if (activeScopeSpan) {
+          activeScopeSpan.textContent = activeScope || 'global';
+        }
+        
+        showStatus('Profil aktualisiert.');
+      } catch (e) {
+        showStatus(`Aktualisierung fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        refreshProfileButton.disabled = false;
+      }
+    });
+  }
 
   // ========================================
   // Event Listeners: Settings
@@ -1565,4 +1670,26 @@ function formatShortHex(hex) {
   const value = String(hex || '').trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(value)) return value || 'unbekannt';
   return `${value.slice(0, 12)}...${value.slice(-8)}`;
+}
+
+// ========================================
+// DM-Relay Functions (für TASK-19/20)
+// ========================================
+
+async function loadDmRelay() {
+  try {
+    const result = await chrome.storage.local.get([DM_RELAY_KEY]);
+    return String(result[DM_RELAY_KEY] || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+async function saveDmRelay(url) {
+  const normalized = normalizeRelayUrl(url);
+  if (url && !normalized) {
+    throw new Error('Ungültige Relay-URL');
+  }
+  await chrome.storage.local.set({ [DM_RELAY_KEY]: normalized || '' });
+  return normalized;
 }
