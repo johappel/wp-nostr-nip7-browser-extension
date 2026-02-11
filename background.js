@@ -28,9 +28,30 @@ let cachedPasswordExpiresAt = null;
 let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
 let activeKeyScope = KEY_SCOPE_DEFAULT;
+let activeScopeRestored = false;
 const DIALOG_TIMEOUT_MS = 25000;
 const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
 let domainSyncMigrationDone = false;
+
+/**
+ * Restore the last active key scope from storage on service worker cold start.
+ * This ensures that the scope set on the primary domain survives SW restarts
+ * and propagates correctly to other domains via the fallback in getKeyScopeFromRequest.
+ */
+async function restoreActiveScope() {
+  if (activeScopeRestored) return;
+  activeScopeRestored = true;
+  try {
+    const stored = await chrome.storage.local.get([LAST_ACTIVE_SCOPE_KEY]);
+    const lastScope = normalizeKeyScope(stored[LAST_ACTIVE_SCOPE_KEY]);
+    if (lastScope !== KEY_SCOPE_DEFAULT && lastScope !== activeKeyScope) {
+      activeKeyScope = lastScope;
+      keyManager.setNamespace(lastScope);
+    }
+  } catch {
+    // ignore – keep default scope
+  }
+}
 
 function extractPasswordFromDialogResult(result) {
   if (!result) return null;
@@ -244,11 +265,19 @@ function normalizeKeyScope(scope) {
   return value;
 }
 
-function getKeyScopeFromRequest(request) {
+function getKeyScopeFromRequest(request, { isWebRequest = false } = {}) {
   const explicit = typeof request?.scope === 'string'
     ? request.scope
     : (typeof request?.payload?.scope === 'string' ? request.payload.scope : '');
-  return normalizeKeyScope(explicit);
+  const normalized = normalizeKeyScope(explicit);
+
+  // If scope resolves to 'global' but we have an active non-global scope,
+  // inherit it for web requests (non-WP pages without nostrConfig).
+  if (isWebRequest && normalized === KEY_SCOPE_DEFAULT && activeKeyScope !== KEY_SCOPE_DEFAULT) {
+    return activeKeyScope;
+  }
+
+  return normalized;
 }
 
 async function ensureKeyScope(scope) {
@@ -764,6 +793,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function handleMessage(request, sender) {
+  await restoreActiveScope();
   const domain = sender.tab?.url ? new URL(sender.tab.url).hostname : null;
   const isInternalExtensionRequest = sender?.id === chrome.runtime.id && !sender?.tab?.url;
   const requestType = String(request?.type || '');
@@ -789,7 +819,8 @@ async function handleMessage(request, sender) {
   ]);
 
   if (scopedTypes.has(requestType)) {
-    await ensureKeyScope(getKeyScopeFromRequest(request));
+    const isWebRequest = !isInternalExtensionRequest && Boolean(domain);
+    await ensureKeyScope(getKeyScopeFromRequest(request, { isWebRequest }));
   }
 
   let cachedPasskeyAuthOptions;
@@ -971,6 +1002,55 @@ async function handleMessage(request, sender) {
       lastActiveScope,
       activeScope: activeKeyScope
     };
+  }
+
+  if (request.type === 'NOSTR_DELETE_SCOPE_KEY') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Scope key deletion is only available from extension UI');
+    }
+    const targetScope = normalizeKeyScope(request.payload?.scope);
+    const targetKm = new KeyManager(chrome.storage.local, targetScope === KEY_SCOPE_DEFAULT ? '' : targetScope);
+
+    if (!await targetKm.hasKey()) {
+      return { deleted: false, reason: 'No key found in scope: ' + targetScope };
+    }
+
+    // Remove all key-related storage entries for the target scope
+    const keysToRemove = targetKm.keyNames([
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.MODE_KEY,
+      KeyManager.CREATED_KEY,
+      KeyManager.LEGACY_MIGRATED_KEY
+    ]);
+    await chrome.storage.local.remove(keysToRemove);
+
+    // If the deleted scope was the active one, reset caches
+    if (targetScope === activeKeyScope) {
+      await clearUnlockCaches();
+    }
+
+    return { deleted: true, scope: targetScope };
+  }
+
+  if (request.type === 'NOSTR_LIST_ALL_SCOPE_KEYS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Scope key listing is only available from extension UI');
+    }
+    const scopes = await listStoredKeyScopes();
+    const scopeDetails = [];
+    for (const scope of scopes) {
+      const km = new KeyManager(chrome.storage.local, scope === KEY_SCOPE_DEFAULT ? '' : scope);
+      const hasKey = await km.hasKey();
+      const pubkey = await km.getStoredPublicKey();
+      const mode = hasKey ? await km.getProtectionMode() : null;
+      scopeDetails.push({ scope, hasKey, pubkey, protectionMode: mode });
+    }
+    return { scopes: scopeDetails, activeScope: activeKeyScope };
   }
 
   if (request.type === 'NOSTR_BACKUP_STATUS') {
