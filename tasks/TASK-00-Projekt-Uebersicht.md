@@ -76,6 +76,26 @@ flowchart TD
     T07 --> T15[TASK-15: Deployment]
     T09 --> T15
     T14 --> T15
+
+    %% Neue Tasks: Popup-Redesign & Messaging
+    T08 --> T16[TASK-16: App-Shell & Navigation]
+    T13 --> T16
+    T16 --> T17[TASK-17: Sub-Dialoge]
+    T10 --> T17
+    T11 --> T17
+    T12 --> T17
+    T16 --> T18[TASK-18: Kontaktliste & Profile]
+    T03 --> T18
+    T04 --> T18
+    T07 --> T18
+    T04 --> T19[TASK-19: NIP-17 DM Backend]
+    T07 --> T19
+    T18 --> T19
+    T03 --> T19
+    T16 --> T20[TASK-20: Chat-UI]
+    T18 --> T20
+    T19 --> T20
+    T13 --> T20
 ```
 
 ### Task-Beschreibungen
@@ -95,8 +115,13 @@ flowchart TD
 | TASK-11 | WP Backup Restore Routinen | TASK-10 | Hoch |
 | TASK-12 | Primary-Domain Auth Broker | TASK-10 | Hoch |
 | TASK-13 | CSS-Design-System (UTF-8, Dark/Light, Blue Glow) | TASK-03, TASK-08, TASK-12 | Mittel |
-| TASK-14 | E2E Test-Automatisierung | TASK-01, TASK-02, TASK-03, TASK-09, TASK-10, TASK-11, TASK-12, TASK-13 | Hoch |
+| TASK-14 | E2E Test-Automatisierung | TASK-01–13 | Hoch |
 | TASK-15 | Deployment (Release, Stores, WordPress Rollout) | TASK-07, TASK-09, TASK-14 | Hoch |
+| TASK-16 | Popup-Redesign: App-Shell, Navigation & View-Router | TASK-08, TASK-13 | Hoch |
+| TASK-17 | Sub-Dialoge: Profil, Schluessel, Settings | TASK-16, TASK-10, TASK-11, TASK-12 | Hoch |
+| TASK-18 | Nostr-Kontaktliste & Profil-Aufloesung (Kind 3, Kind 0) | TASK-16, TASK-03, TASK-04, TASK-07 | Hoch |
+| TASK-19 | Nostr-Direktnachrichten Backend (NIP-17 Gift-Wrapped DMs) | TASK-04, TASK-07, TASK-18, TASK-03 | Hoch |
+| TASK-20 | Chat-UI: Kontaktliste & Nachrichten-Ansicht | TASK-16, TASK-18, TASK-19, TASK-13 | Hoch |
 
 ### Aktueller Task-Stand
 
@@ -116,6 +141,11 @@ flowchart TD
 14. `TASK-13-CSS-Design-UTF8-Dark-Light-Blue-Glow.md`
 15. `TASK-14-e2e-Test.md`
 16. `TASK-15-Deoloyment.md`
+17. `TASK-16-Popup-Redesign-App-Shell.md`
+18. `TASK-17-Sub-Dialoge-Profil-Keys-Settings.md`
+19. `TASK-18-Nostr-Kontaktliste-Profil-Aufloesung.md`
+20. `TASK-19-Nostr-Direktnachrichten-NIP17.md`
+21. `TASK-20-Chat-UI-Kontaktliste-Nachrichten.md`
 
 ---
 
