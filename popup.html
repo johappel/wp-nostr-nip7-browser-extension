@@ -41,11 +41,20 @@
         <h2>ReLogin für sensible Aktionen</h2>
       </div>
       <div class="relogin-row">
-        <span class="relogin-duration">15 Minuten</span>
+        <select id="unlock-cache-policy" class="relogin-duration" aria-label="ReLogin-Dauer">
+          <option value="off">Immer nachfragen</option>
+          <option value="5m">5 Minuten</option>
+          <option value="15m">15 Minuten</option>
+          <option value="30m">30 Minuten</option>
+          <option value="60m">60 Minuten</option>
+          <option value="session">Bis Browser-Neustart</option>
+        </select>
         <span id="unlock-cache-state" class="state-pill state-inactive">inaktiv</span>
       </div>
-      <p id="unlock-cache-hint" class="hint"></p>
-      <p class="hint">Gilt für Signieren sowie Schlüssel sichern/wiederherstellen.</p>
+      <p id="unlock-cache-hint" class="hint">
+        Gilt für Signieren sowie Schlüssel sichern/wiederherstellen.
+      </p>
+      
     </section>
 
     <section class="backup-section">

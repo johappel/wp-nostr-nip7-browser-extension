@@ -1,6 +1,17 @@
 const SETTING_KEY = 'preferWpNostrLock';
 const DEFAULT_VALUE = true;
 const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
+const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
+const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
+
+const UNLOCK_CACHE_POLICY_LABELS = {
+  off: 'Immer nachfragen',
+  '5m': '5 Minuten',
+  '15m': '15 Minuten',
+  '30m': '30 Minuten',
+  '60m': '60 Minuten',
+  session: 'Bis Browser-Neustart'
+};
 
 document.addEventListener('DOMContentLoaded', async () => {
   const checkbox = document.getElementById('prefer-lock');
@@ -10,6 +21,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const profileHint = document.getElementById('profile-hint');
   const instanceCard = document.getElementById('instance-card');
   const publishProfileButton = document.getElementById('publish-profile');
+  const unlockCachePolicySelect = document.getElementById('unlock-cache-policy');
   const unlockCacheState = document.getElementById('unlock-cache-state');
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
@@ -53,8 +65,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   activeScope = initialSigner?.scope || activeScope;
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
   renderInstanceCard(instanceCard, activeViewer);
-  await ensureFixedUnlockPolicy(activeScope);
-  await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+  await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
   await refreshCloudBackupState(cloudBackupMeta, {
     enableButton: cloudBackupEnableButton,
     restoreButton: cloudBackupRestoreButton,
@@ -72,6 +83,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  if (unlockCachePolicySelect) {
+    unlockCachePolicySelect.addEventListener('change', async () => {
+      const selectedPolicy = normalizeUnlockCachePolicy(unlockCachePolicySelect.value);
+      unlockCachePolicySelect.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_SET_UNLOCK_CACHE_POLICY',
+          payload: { policy: selectedPolicy, scope: activeScope }
+        });
+        if (response?.error) throw new Error(response.error);
+        const updatedPolicy = normalizeUnlockCachePolicy(response?.result?.policy || selectedPolicy);
+        unlockCachePolicySelect.value = updatedPolicy;
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        status.textContent = `ReLogin-Dauer gespeichert: ${formatUnlockCachePolicyLabel(updatedPolicy)}.`;
+      } catch (e) {
+        status.textContent = `ReLogin-Dauer konnte nicht gespeichert werden: ${e.message || e}`;
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+      } finally {
+        unlockCachePolicySelect.disabled = false;
+      }
+    });
+  }
+
   refreshUserButton.addEventListener('click', async () => {
     refreshUserButton.disabled = true;
     try {
@@ -86,8 +120,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
       renderInstanceCard(instanceCard, activeViewer);
-      await ensureFixedUnlockPolicy(activeScope);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -250,7 +283,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       status.textContent = pubkey
         ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
         : 'Schlüssel importiert. Seite neu laden.';
@@ -281,7 +314,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -359,7 +392,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeRuntimeStatus = signerContext?.runtimeStatus || null;
       activeScope = signerContext?.scope || activeScope;
       renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, activeScope);
+      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       await refreshCloudBackupState(cloudBackupMeta, {
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
@@ -916,18 +949,54 @@ function setUnlockStateBadge(unlockCacheState, runtimeStatus) {
   unlockCacheState.classList.toggle('state-inactive', !isActive);
 }
 
-async function ensureFixedUnlockPolicy(scope) {
-  try {
-    await chrome.runtime.sendMessage({
-      type: 'NOSTR_SET_UNLOCK_CACHE_POLICY',
-      payload: { policy: '15m', scope }
-    });
-  } catch {
-    // Nicht blockierend: UI soll auch ohne Policy-Write nutzbar bleiben.
-  }
+function normalizeUnlockCachePolicy(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (FALLBACK_UNLOCK_CACHE_POLICIES.includes(normalized)) return normalized;
+  return DEFAULT_UNLOCK_CACHE_POLICY;
 }
 
-async function refreshUnlockState(unlockCacheState, unlockCacheHint, scope) {
+function getAllowedUnlockPolicies(runtimeStatus) {
+  const rawPolicies = runtimeStatus?.unlockCacheAllowedPolicies;
+  if (!Array.isArray(rawPolicies) || rawPolicies.length === 0) {
+    return FALLBACK_UNLOCK_CACHE_POLICIES;
+  }
+
+  const allowed = rawPolicies
+    .map((entry) => normalizeUnlockCachePolicy(entry))
+    .filter((entry, index, arr) => arr.indexOf(entry) === index);
+
+  return allowed.length ? allowed : FALLBACK_UNLOCK_CACHE_POLICIES;
+}
+
+function formatUnlockCachePolicyLabel(policy) {
+  return UNLOCK_CACHE_POLICY_LABELS[normalizeUnlockCachePolicy(policy)] || 'Unbekannt';
+}
+
+function updateUnlockPolicySelect(unlockCachePolicySelect, runtimeStatus) {
+  if (!unlockCachePolicySelect) return;
+
+  const allowedPolicies = getAllowedUnlockPolicies(runtimeStatus);
+  const selectedPolicy = normalizeUnlockCachePolicy(runtimeStatus?.unlockCachePolicy);
+  const existingOptions = Array.from(unlockCachePolicySelect.options).map((option) => option.value);
+  const sameOptions = existingOptions.length === allowedPolicies.length
+    && existingOptions.every((value, index) => value === allowedPolicies[index]);
+
+  if (!sameOptions) {
+    unlockCachePolicySelect.innerHTML = '';
+    for (const policy of allowedPolicies) {
+      const option = document.createElement('option');
+      option.value = policy;
+      option.textContent = formatUnlockCachePolicyLabel(policy);
+      unlockCachePolicySelect.appendChild(option);
+    }
+  }
+
+  unlockCachePolicySelect.value = allowedPolicies.includes(selectedPolicy)
+    ? selectedPolicy
+    : normalizeUnlockCachePolicy(allowedPolicies[0]);
+}
+
+async function refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, scope) {
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'NOSTR_GET_STATUS',
@@ -937,9 +1006,11 @@ async function refreshUnlockState(unlockCacheState, unlockCacheHint, scope) {
     if (response?.error) throw new Error(response.error);
 
     setUnlockStateBadge(unlockCacheState, runtimeStatus);
+    updateUnlockPolicySelect(unlockCachePolicySelect, runtimeStatus);
     unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
   } catch {
     setUnlockStateBadge(unlockCacheState, null);
+    updateUnlockPolicySelect(unlockCachePolicySelect, null);
     unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
   }
 }

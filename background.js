@@ -15,7 +15,8 @@ const UNLOCK_CACHE_POLICY_KEY = 'unlockCachePolicy';
 const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
 const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
 const UNLOCK_CACHE_POLICY_DEFAULT = '15m';
-const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(['off', '5m', '15m', '30m', '60m', 'session']);
+const UNLOCK_CACHE_ALLOWED_POLICY_LIST = ['off', '5m', '15m', '30m', '60m', 'session'];
+const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(UNLOCK_CACHE_ALLOWED_POLICY_LIST);
 const KEY_SCOPE_DEFAULT = 'global';
 const LAST_ACTIVE_SCOPE_KEY = 'lastActiveKeyScope';
 
@@ -872,6 +873,7 @@ async function handleMessage(request, sender) {
     return {
       success: true,
       policy,
+      allowedPolicies: UNLOCK_CACHE_ALLOWED_POLICY_LIST,
       hasCachedPassword: Boolean(refreshedCachedPassword),
       hasCachedPasskeyAuth: Boolean(refreshedPasskeyAuth),
       cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt
@@ -980,6 +982,7 @@ async function handleMessage(request, sender) {
       npub,
       noPasswordMode: protectionMode === KeyManager.MODE_NONE,
       unlockCachePolicy,
+      unlockCacheAllowedPolicies: UNLOCK_CACHE_ALLOWED_POLICY_LIST,
       cacheExpiresAt: cachedPasswordExpiresAt ?? cachedPasskeyExpiresAt,
       keyScope: activeKeyScope,
       cacheMode: unlockCachePolicy === 'session'
@@ -2192,4 +2195,3 @@ chrome.alarms.create('domainSync', { periodInMinutes: 5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'domainSync') updateDomainWhitelist();
 });
-
