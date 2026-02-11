@@ -9,6 +9,7 @@ const passkeyBrokerRpId = String(params.get('passkeyBrokerRpId') || '').trim();
 const passkeyIntent = String(params.get('passkeyIntent') || '').trim();
 const wpDisplayName = String(params.get('wpDisplayName') || '').trim();
 const PASSKEY_TIMEOUT_MS = 120000;
+const isFirefox = /\bFirefox\//i.test(navigator.userAgent);
 
 document.addEventListener('DOMContentLoaded', () => {
   switch (type) {
@@ -91,7 +92,7 @@ function showBackupDialog(npub, nsec) {
 
   document.getElementById('download').onclick = () => {
     const blob = new Blob(
-      [`Nostr Backup\n===========\n\nnpub: ${npub}\nnsec: ${nsec}\n\nDO NOT SHARE.\n`],
+      [`Nostr Backup\n===========\n\nnpub: ${npub}\nnsec: ${nsec}\n\n!! GEHEIM HALTEN – NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich "Nostr-Schluessel" den nsec in das Import-Feld einfuegen\n4. "Importieren" klicken\n`],
       { type: 'text/plain' }
     );
     const url = URL.createObjectURL(blob);
@@ -319,7 +320,12 @@ async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
   const passkeyIdentity = buildPasskeyIdentity(keyScope, userId, wpDisplayName);
-  const publicKey = {
+
+  // Do NOT set rp.id explicitly – the browser derives the RP ID from the
+  // extension origin (chrome-extension:// or moz-extension://) automatically.
+  // Setting it explicitly fails: Chrome rejects extension IDs as invalid
+  // domains, and Firefox's runtime.id ≠ moz-extension hostname → SecurityError.
+  const baseOptions = {
     challenge: challenge.buffer,
     rp: {
       name: 'WP Nostr Signer'
@@ -334,22 +340,28 @@ async function createPasskeyCredential() {
       { type: 'public-key', alg: -257 } // RS256
     ],
     timeout: PASSKEY_TIMEOUT_MS,
-    attestation: 'none',
+    attestation: 'none'
+  };
+
+  // Strategy: one single attempt with relaxed constraints.
+  // We avoid sequential retries because the browser's WebAuthn prompt consumes
+  // the user activation – a second attempt without a fresh click will instantly
+  // fail with NotAllowedError.
+  // On non-Firefox Chromium we hint 'platform' to prefer Windows Hello / Touch ID
+  // but do NOT require it (no authenticatorAttachment) so the browser can fall
+  // back to other authenticators if needed.
+  const publicKey = {
+    ...baseOptions,
     authenticatorSelection: {
       userVerification: 'preferred',
-      residentKey: 'preferred',
-      authenticatorAttachment: 'platform'
+      residentKey: 'preferred'
     }
   };
 
-  const credential = await navigator.credentials.create({
-    publicKey
-  });
-
-  if (!credential || !credential.rawId) {
+  const credential = await navigator.credentials.create({ publicKey });
+  if (!credential?.rawId) {
     throw new Error('Passkey-Einrichtung wurde abgebrochen');
   }
-
   return toBase64Url(credential.rawId);
 }
 
@@ -375,48 +387,36 @@ async function runPasskeyAssertion(options = {}) {
 }
 
 async function runLocalPasskeyAssertion(knownCredentialId = '') {
+  const isChromium = /\b(?:Chrome|Chromium|Edg)\//i.test(navigator.userAgent);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
+  // Do NOT set rpId explicitly – let the browser derive it from the extension
+  // origin, same as during credential creation.  Explicit values cause
+  // SecurityError (Firefox) or NotAllowedError (Chrome).
   const request = {
     challenge: challenge.buffer,
     userVerification: 'preferred',
-    timeout: PASSKEY_TIMEOUT_MS,
-    // Hint all browsers towards local device passkeys (Windows Hello / Touch ID).
-    hints: ['client-device']
+    timeout: PASSKEY_TIMEOUT_MS
   };
-  let assertion = null;
+  // hints is Chromium-only (Chrome 128+). Firefox does not support it.
+  if (isChromium) {
+    request.hints = ['client-device'];
+  }
 
+  // Use allowCredentials with stored credential ID when available – this is
+  // more reliable in extension contexts than discoverable credential lookups.
+  // Only ONE attempt: sequential retries fail because the browser consumes the
+  // user activation on the first WebAuthn prompt.
+  let assertion = null;
   if (knownCredentialId) {
     const descriptor = {
       type: 'public-key',
       id: fromBase64Url(knownCredentialId).buffer
     };
-    // Do NOT restrict transports to ['internal'] — Chrome and Firefox use
-    // different credential stores on Windows.  When a credential was created
-    // in Firefox it does not exist in Windows Hello, so Chrome would skip the
-    // platform authenticator and only show cross-device options (USB / phone).
-    // Omitting transports lets the browser probe all available authenticators
-    // including Windows Hello.
-    try {
-      assertion = await navigator.credentials.get({
-        publicKey: {
-          ...request,
-          allowCredentials: [descriptor]
-        }
-      });
-    } catch (error) {
-      if (!shouldRetryPasskeyWithoutAllowCredentials(error)) {
-        throw error;
-      }
-      // Fallback: discoverable credential flow (no allowCredentials).
-      // This lets Windows Hello / platform authenticator search its own store.
-      assertion = await navigator.credentials.get({
-        publicKey: request
-      });
-    }
-  } else {
     assertion = await navigator.credentials.get({
-      publicKey: request
+      publicKey: { ...request, allowCredentials: [descriptor] }
     });
+  } else {
+    assertion = await navigator.credentials.get({ publicKey: request });
   }
 
   if (!assertion || !assertion.rawId) {
@@ -428,16 +428,6 @@ async function runLocalPasskeyAssertion(knownCredentialId = '') {
   await chrome.storage.local.set({ [credentialStorageKey]: resolvedCredentialId });
 
   return { credentialId: resolvedCredentialId };
-}
-
-function shouldRetryPasskeyWithoutAllowCredentials(error) {
-  const name = String(error?.name || '').trim();
-  const message = String(error?.message || '').trim();
-  if (name === 'NotAllowedError') return true;
-  if (name === 'UnknownError') return true;
-  if (name === 'InvalidStateError') return true;
-  if (/unknown transient reason/i.test(message)) return true;
-  return false;
 }
 
 function normalizeBrokerOptions(options) {
@@ -565,6 +555,7 @@ async function runPasskeyAssertionViaBroker(brokerOptions) {
 function mapPasskeyError(error, phase) {
   const rawMessage = String(error?.message || error || '');
   const name = String(error?.name || '').trim();
+  const debugSuffix = name ? ` [${name}: ${rawMessage.slice(0, 80)}]` : '';
 
   if (/Auth-Broker/i.test(rawMessage)) {
     return rawMessage;
@@ -572,21 +563,24 @@ function mapPasskeyError(error, phase) {
 
   if (name === 'NotAllowedError') {
     if (phase === 'unlock') {
-      return 'Passkey abgebrochen oder keine passende lokale Passkey-Identität gefunden. In Chrome bitte prüfen, ob für diese Extension bereits eine lokale Passkey-Identität (Windows Hello) existiert.';
+      return `Passkey abgebrochen oder keine passende lokale Passkey-Identität gefunden.${debugSuffix}`;
     }
-    return 'Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geräte-Passkey (z. B. Windows Hello) wählen.';
+    return `Passkey-Einrichtung abgebrochen oder nicht erlaubt. Bitte erneut versuchen und den lokalen Geräte-Passkey (z. B. Windows Hello) wählen.${debugSuffix}`;
   }
 
   if (name === 'UnknownError' || /unknown transient reason/i.test(rawMessage)) {
-    return 'Temporärer Passkey-Fehler im Browser. Bitte Dialog erneut öffnen und noch einmal versuchen.';
+    const firefoxHint = isFirefox
+      ? ' Firefox unterstützt Passkeys in Erweiterungen nur eingeschränkt – verwende alternativ das Passwort-Verfahren.'
+      : '';
+    return `Temporärer Passkey-Fehler im Browser.${firefoxHint} Bitte Dialog erneut öffnen und noch einmal versuchen.${debugSuffix}`;
   }
 
   if (name === 'SecurityError') {
-    return 'Passkey ist in diesem Kontext nicht erlaubt (Sicherheitsrichtlinie). Bitte Seite/Extension neu laden.';
+    return `Passkey ist in diesem Kontext nicht erlaubt (Sicherheitsrichtlinie). Bitte Seite/Extension neu laden.${debugSuffix}`;
   }
 
   if (name === 'InvalidStateError') {
-    return 'Passkey ist bereits registriert oder nicht im erwarteten Zustand. Bitte erneut versuchen.';
+    return `Passkey ist bereits registriert oder nicht im erwarteten Zustand.${debugSuffix}`;
   }
 
   return rawMessage || 'Passkey-Vorgang fehlgeschlagen';

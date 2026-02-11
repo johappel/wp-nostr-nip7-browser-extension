@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const unlockCacheHint = document.getElementById('unlock-cache-hint');
   const exportKeyButton = document.getElementById('export-key');
   const backupOutputCopyButton = document.getElementById('backup-output-copy');
+  const backupDownloadButton = document.getElementById('backup-download');
   const importKeyButton = document.getElementById('import-key');
   const createKeyButton = document.getElementById('create-key');
   const importNsecInput = document.getElementById('import-nsec');
@@ -178,6 +179,32 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.textContent = 'Exportierter Schlüssel wurde kopiert.';
     } catch {
       status.textContent = 'Kopieren des exportierten Schlüssels fehlgeschlagen.';
+    }
+  });
+
+  backupDownloadButton.addEventListener('click', async () => {
+    const nsec = String(backupOutput.value || '').trim();
+    if (!nsec) {
+      status.textContent = 'Bitte zuerst den Schlüssel exportieren.';
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
+      const npub = String(response?.result || '').trim();
+      const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
+      const namePart = displayName ? `-${displayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
+      const datePart = new Date().toISOString().split('T')[0];
+      const content = `Nostr Backup\n===========\n\n${npub ? `npub: ${npub}\n` : ''}nsec: ${nsec}\n\n!! GEHEIM HALTEN \u2013 NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich \"Nostr-Schluessel\" den nsec in das Import-Feld einfuegen\n4. \"Importieren\" klicken\n`;
+      const blob = new Blob([content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `nostr-backup${namePart}-${datePart}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+      status.textContent = 'Backup-Datei heruntergeladen.';
+    } catch (e) {
+      status.textContent = `Download fehlgeschlagen: ${e.message || e}`;
     }
   });
 
