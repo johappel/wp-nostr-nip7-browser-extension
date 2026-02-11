@@ -7,6 +7,7 @@ const passkeyBrokerUrl = String(params.get('passkeyBrokerUrl') || '').trim();
 const passkeyBrokerOrigin = String(params.get('passkeyBrokerOrigin') || '').trim();
 const passkeyBrokerRpId = String(params.get('passkeyBrokerRpId') || '').trim();
 const passkeyIntent = String(params.get('passkeyIntent') || '').trim();
+const wpDisplayName = String(params.get('wpDisplayName') || '').trim();
 const PASSKEY_TIMEOUT_MS = 120000;
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -96,7 +97,8 @@ function showBackupDialog(npub, nsec) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `nostr-backup-${new Date().toISOString().split('T')[0]}.txt`;
+    const backupNamePart = wpDisplayName ? `-${wpDisplayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
+    a.download = `nostr-backup${backupNamePart}-${new Date().toISOString().split('T')[0]}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -316,7 +318,7 @@ function showPasswordDialog(mode) {
 async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
-  const passkeyIdentity = buildPasskeyIdentity(keyScope, userId);
+  const passkeyIdentity = buildPasskeyIdentity(keyScope, userId, wpDisplayName);
   const publicKey = {
     challenge: challenge.buffer,
     rp: {
@@ -609,21 +611,25 @@ function normalizeKeyScope(scope) {
   return value;
 }
 
-function buildPasskeyIdentity(scope, userIdBytes) {
+function buildPasskeyIdentity(scope, userIdBytes, humanName = '') {
   const normalizedScope = normalizeKeyScope(scope);
   const suffix = shortHex(userIdBytes, 2);
   const wpMatch = normalizedScope.match(/^wp:(.+):u:(\d+)$/i);
+  const cleanName = String(humanName || '').trim().replace(/[^a-zA-Z0-9._\- ]/g, '').trim();
 
   let accountLabel = 'global';
   if (wpMatch) {
     const host = String(wpMatch[1] || '').toLowerCase().replace(/[^a-z0-9.:-]/g, '-');
     const wpUserId = String(wpMatch[2] || '').trim();
-    accountLabel = `u${wpUserId}@${host || 'site'}`;
+    // Include human-readable name when available: u2-joachim@host
+    accountLabel = cleanName
+      ? `u${wpUserId}-${cleanName}@${host || 'site'}`
+      : `u${wpUserId}@${host || 'site'}`;
   } else if (normalizedScope !== 'global') {
     accountLabel = normalizedScope.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
   }
 
-  const compactLabel = accountLabel.slice(0, 36) || 'global';
+  const compactLabel = accountLabel.slice(0, 48) || 'global';
   return {
     name: `wp-nostr-${compactLabel}-${suffix}`.slice(0, 64),
     displayName: `WP Nostr ${compactLabel} #${suffix}`.slice(0, 64)

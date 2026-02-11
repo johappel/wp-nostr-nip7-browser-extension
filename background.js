@@ -1716,6 +1716,14 @@ async function getExistingProtectionPreference() {
 
 async function promptPassword(mode, passkeyAuthOptions = null) {
   await chrome.storage.session.remove('passwordResult');
+
+  // Pre-fetch cached WP display name so the passkey label is human-readable.
+  let wpDisplayName = '';
+  try {
+    const vc = await chrome.storage.local.get(['nostrViewerProfileCacheV1']);
+    wpDisplayName = String(vc?.nostrViewerProfileCacheV1?.displayName || vc?.nostrViewerProfileCacheV1?.userLogin || '').trim();
+  } catch { /* best-effort */ }
+
   return new Promise((resolve) => {
     let timeoutId = null;
     const normalizedMode = String(mode || '').trim();
@@ -1748,6 +1756,8 @@ async function promptPassword(mode, passkeyAuthOptions = null) {
       mode: String(mode || ''),
       scope: activeKeyScope || KEY_SCOPE_DEFAULT
     });
+
+    if (wpDisplayName) query.set('wpDisplayName', wpDisplayName);
 
     const broker = sanitizePasskeyAuthBroker(passkeyAuthOptions);
     if (broker?.enabled && broker.url) {
@@ -1815,8 +1825,19 @@ async function promptSignConfirmation(event, domain) {
 }
 
 async function openBackupDialog(npub, nsecBech32) {
+  let wpDisplayName = '';
+  try {
+    const vc = await chrome.storage.local.get(['nostrViewerProfileCacheV1']);
+    wpDisplayName = String(vc?.nostrViewerProfileCacheV1?.displayName || vc?.nostrViewerProfileCacheV1?.userLogin || '').trim();
+  } catch { /* best-effort */ }
+  const qs = new URLSearchParams({
+    type: 'backup',
+    npub: npub || '',
+    nsec: nsecBech32 || ''
+  });
+  if (wpDisplayName) qs.set('wpDisplayName', wpDisplayName);
   await chrome.windows.create({
-    url: `dialog.html?type=backup&npub=${encodeURIComponent(npub)}&nsec=${encodeURIComponent(nsecBech32)}`,
+    url: `dialog.html?${qs.toString()}`,
     type: 'popup', width: 500, height: 650, focused: true
   });
 }
