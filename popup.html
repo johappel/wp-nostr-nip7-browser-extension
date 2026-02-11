@@ -7,102 +7,194 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <main class="popup">
-    <h1>WP Nostr Signer</h1>
+  <main class="app-shell">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-title">
+        <h1>WP Nostr Signer</h1>
+        <span class="connection-status" id="connection-status">
+          <span class="status-dot"></span>
+          <span class="status-text">Connected</span>
+        </span>
+      </div>
+    </header>
 
-    <section class="profile-section">
-      <div class="section-head">
-        <h2>Öffentliches Nostr-Profil</h2>
-        <button id="refresh-user" class="btn-secondary" type="button">Neu laden</button>
+    <!-- User Hero (klickbar → Profil-Dialog) -->
+    <section class="user-hero" id="user-hero" role="button" tabindex="0" aria-label="Profil-Details öffnen">
+      <div class="hero-avatar" id="hero-avatar">
+        <!-- Avatar wird via JS gesetzt -->
       </div>
-      <div id="profile-card" class="wp-user-card">
-        <p class="empty">Profil wird geladen...</p>
+      <div class="hero-info">
+        <div class="hero-name" id="hero-name">Wird geladen...</div>
+        <div class="hero-nip05" id="hero-nip05">-</div>
       </div>
-      <div class="section-head">
-        <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
-      </div>
-      <p id="profile-hint" class="hint"></p>
+      <div class="hero-chevron">›</div>
     </section>
 
-    <label class="row">
-      <input type="checkbox" id="prefer-lock" />
-      <span>WP-Nostr-Lock bevorzugen</span>
-    </label>
-
-    <p class="hint">
-      Wenn aktiv, versucht die Extension, <code>window.nostr</code> gegen Überschreiben
-      durch andere Extensions zu schützen.
-    </p>
-
-    <p class="hint warn">Änderung wirkt nach Tab-Reload.</p>
-
-    <section class="unlock-section">
-      <div class="section-head">
-        <h2>ReLogin für sensible Aktionen</h2>
-      </div>
-      <div class="relogin-row">
-        <select id="unlock-cache-policy" class="relogin-duration" aria-label="ReLogin-Dauer">
-          <option value="off">Immer nachfragen</option>
-          <option value="5m">5 Minuten</option>
-          <option value="15m">15 Minuten</option>
-          <option value="30m">30 Minuten</option>
-          <option value="60m">60 Minuten</option>
-          <option value="session">Bis Browser-Neustart</option>
-        </select>
-        <span id="unlock-cache-state" class="state-pill state-inactive">inaktiv</span>
-      </div>
-      <p id="unlock-cache-hint" class="hint">
-        Gilt für Signieren sowie Schlüssel sichern/wiederherstellen.
-      </p>
-      
-    </section>
-
-    <section class="backup-section">
-      <div class="section-head">
-        <h2>Nostr-Schlüssel</h2>
-      </div>
-      <div id="protection-row"></div>
-
-      <div class="key-row key-row-export">
-        <button id="export-key" class="btn-secondary" type="button">Exportieren</button>
-        <input id="backup-output" class="backup-output" type="password" readonly placeholder="nsec1... (Export)" />
-        <button id="backup-output-toggle" class="btn-copy" type="button" title="Anzeigen/Verbergen">👁</button>
-        <button id="backup-output-copy" class="btn-copy" type="button">Kopieren</button>
-        <button id="backup-download" class="btn-secondary" type="button" title="Schlüsseldatei lokal sichern">⬇ Datei</button>
-      </div>
-
-      <div class="key-row key-row-import">
-        <input id="import-nsec" type="text" placeholder="nsec1... (Import)" />
-        <button id="import-key" class="btn-secondary" type="button">Importieren</button>
-      </div>
-
-      <div class="key-row key-row-create">
-        <p class="hint warn compact-hint">Neue Schlüssel (Warnung: Identitätsverlust)</p>
-        <button id="create-key" class="btn-danger" type="button">Erstellen</button>
-      </div>
-
-      <div class="cloud-backup">
-        <div class="section-head">
-          <h2>Schlüsselkopie in WordPress</h2>
+    <!-- View Container -->
+    <div class="view-container">
+      <!-- View: Home -->
+      <div class="view active" id="view-home">
+        <div class="view-header">
+          <h2>Home</h2>
+          <button id="refresh-user" class="btn-secondary btn-small" type="button" title="Neu laden">↻</button>
         </div>
-        <p id="cloud-backup-meta" class="hint">Status wird geladen...</p>
-        <div class="backup-actions">
-          <button id="backup-enable-cloud" class="btn-secondary" type="button">Speichern/Ersetzen</button>
-          <button id="backup-restore-cloud" class="btn-secondary" type="button">Wiederherstellen</button>
-          <button id="backup-delete-cloud" class="btn-danger" type="button">Löschen</button>
+        <div class="home-content">
+          <p class="hint">Kontaktliste und Chat-Übersicht werden in TASK-20 implementiert.</p>
+          <div id="home-placeholder" class="wp-user-card">
+            <p class="empty">Willkommen bei WP Nostr Signer!</p>
+            <p class="hint">Klicke auf dein Profil oben, um deine Nostr-Identität zu verwalten.</p>
+          </div>
         </div>
       </div>
-    </section>
 
-    <section class="instance-section">
-      <div class="section-head">
-        <h2>Mitglieder-Instanz</h2>
-      </div>
-      <div id="instance-card" class="wp-user-card">
-        <p class="empty">Instanz-Informationen werden geladen...</p>
-      </div>
-    </section>
+      <!-- View: Keys -->
+      <div class="view" id="view-keys">
+        <div class="view-header">
+          <h2>Schlüssel-Verwaltung</h2>
+        </div>
 
+        <!-- Protection Mode -->
+        <div id="protection-row" class="key-section"></div>
+
+        <!-- Export Section -->
+        <div class="key-section">
+          <h3>Exportieren</h3>
+          <div class="key-row key-row-export">
+            <button id="export-key" class="btn-secondary" type="button">Exportieren</button>
+            <input id="backup-output" class="backup-output" type="password" readonly placeholder="nsec1... (Export)" />
+            <button id="backup-output-toggle" class="btn-copy" type="button" title="Anzeigen/Verbergen">👁</button>
+            <button id="backup-output-copy" class="btn-copy" type="button">Kopieren</button>
+            <button id="backup-download" class="btn-secondary" type="button" title="Schlüsseldatei lokal sichern">⬇ Datei</button>
+          </div>
+        </div>
+
+        <!-- Import Section -->
+        <div class="key-section">
+          <h3>Importieren</h3>
+          <div class="key-row key-row-import">
+            <input id="import-nsec" type="text" placeholder="nsec1... (Import)" />
+            <button id="import-key" class="btn-secondary" type="button">Importieren</button>
+          </div>
+        </div>
+
+        <!-- Create Section -->
+        <div class="key-section">
+          <h3>Neue Schlüssel erstellen</h3>
+          <p class="hint warn compact-hint">Warnung: Erstellen neuer Schlüssel ersetzt die aktuelle Identität!</p>
+          <div class="key-row key-row-create">
+            <button id="create-key" class="btn-danger" type="button">Erstellen</button>
+          </div>
+        </div>
+
+        <!-- Cloud Backup (Tresor) -->
+        <div class="key-section cloud-backup">
+          <h3>Schlüsselkopie in WordPress</h3>
+          <p id="cloud-backup-meta" class="hint">Status wird geladen...</p>
+          <div class="backup-actions">
+            <button id="backup-enable-cloud" class="btn-secondary" type="button">Speichern/Ersetzen</button>
+            <button id="backup-restore-cloud" class="btn-secondary" type="button">Wiederherstellen</button>
+            <button id="backup-delete-cloud" class="btn-danger" type="button">Löschen</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- View: History -->
+      <div class="view" id="view-history">
+        <div class="view-header">
+          <h2>Aktivitätsverlauf</h2>
+        </div>
+        <div class="history-list" id="history-list">
+          <p class="empty">Noch keine Signing-Events vorhanden.</p>
+          <p class="hint">Hier werden zukünftig signierte Aktionen angezeigt.</p>
+        </div>
+      </div>
+
+      <!-- View: Settings -->
+      <div class="view" id="view-settings">
+        <div class="view-header">
+          <h2>Einstellungen</h2>
+        </div>
+
+        <!-- WP-Nostr-Lock -->
+        <div class="settings-section">
+          <label class="row">
+            <input type="checkbox" id="prefer-lock" />
+            <span>WP-Nostr-Lock bevorzugen</span>
+          </label>
+          <p class="hint">Wenn aktiv, versucht die Extension, <code>window.nostr</code> gegen Überschreiben durch andere Extensions zu schützen.</p>
+          <p class="hint warn">Änderung wirkt nach Tab-Reload.</p>
+        </div>
+
+        <!-- ReLogin-Dauer -->
+        <div class="settings-section">
+          <h3>ReLogin für sensible Aktionen</h3>
+          <div class="relogin-row">
+            <select id="unlock-cache-policy" class="relogin-duration" aria-label="ReLogin-Dauer">
+              <option value="off">Immer nachfragen</option>
+              <option value="5m">5 Minuten</option>
+              <option value="15m">15 Minuten</option>
+              <option value="30m">30 Minuten</option>
+              <option value="60m">60 Minuten</option>
+              <option value="session">Bis Browser-Neustart</option>
+            </select>
+            <span id="unlock-cache-state" class="state-pill state-inactive">inaktiv</span>
+          </div>
+          <p id="unlock-cache-hint" class="hint">Gilt für Signieren sowie Schlüssel sichern/wiederherstellen.</p>
+        </div>
+
+        <!-- Instance Info -->
+        <div class="settings-section">
+          <h3>Mitglieder-Instanz</h3>
+          <div id="instance-card" class="wp-user-card">
+            <p class="empty">Instanz-Informationen werden geladen...</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dialog Overlay -->
+    <div class="dialog-overlay" id="dialog-overlay" aria-hidden="true">
+      <div class="dialog" id="dialog-profile" role="dialog" aria-labelledby="dialog-title">
+        <div class="dialog-header">
+          <h2 id="dialog-title">Profil-Details</h2>
+          <button class="dialog-close" id="dialog-close" type="button" aria-label="Schließen">✕</button>
+        </div>
+        <div class="dialog-content">
+          <!-- Profil-Karte -->
+          <div id="profile-card" class="wp-user-card">
+            <p class="empty">Profil wird geladen...</p>
+          </div>
+          <p id="profile-hint" class="hint"></p>
+          <!-- Publish Button -->
+          <div class="dialog-actions">
+            <button id="publish-profile" class="btn-primary" type="button">Profil an Nostr senden</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer Navigation -->
+    <nav class="footer-nav" id="footer-nav" aria-label="Hauptnavigation">
+      <button class="nav-item active" data-view="home" type="button">
+        <span class="nav-icon">🏠</span>
+        <span class="nav-label">Home</span>
+      </button>
+      <button class="nav-item" data-view="keys" type="button">
+        <span class="nav-icon">🔑</span>
+        <span class="nav-label">Keys</span>
+      </button>
+      <button class="nav-item" data-view="history" type="button">
+        <span class="nav-icon">🕐</span>
+        <span class="nav-label">History</span>
+      </button>
+      <button class="nav-item" data-view="settings" type="button">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-label">Settings</span>
+      </button>
+    </nav>
+
+    <!-- Status Bar -->
     <p id="status" class="status"></p>
   </main>
 

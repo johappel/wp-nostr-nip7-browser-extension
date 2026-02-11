@@ -56,25 +56,358 @@ body {
   color: var(--text);
 }
 
-.popup {
+/* ========================================
+   App-Shell Layout
+   ======================================== */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
   width: 420px;
-  padding: 14px;
+  height: 580px;
+  overflow: hidden;
+  position: relative;
 }
 
-h1 {
-  margin: 0 0 12px;
-  font-size: 17px;
+/* ========================================
+   Header
+   ======================================== */
+
+.app-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 15px;
   letter-spacing: 0.2px;
 }
 
-.wp-user-section,
-.signer-section,
-.profile-section {
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  transition: background 0.3s;
+}
+
+.status-dot.offline {
+  background: var(--danger);
+}
+
+.status-text {
+  font-weight: 500;
+}
+
+/* ========================================
+   User Hero
+   ======================================== */
+
+.user-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, var(--accent-soft), transparent);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.user-hero:hover {
+  background: linear-gradient(135deg, var(--accent-soft), var(--accent-soft));
+}
+
+.user-hero:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.hero-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.hero-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hero-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.hero-name {
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hero-nip05 {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hero-chevron {
+  font-size: 18px;
+  color: var(--muted);
+  transition: transform 0.2s;
+}
+
+.user-hero:hover .hero-chevron {
+  transform: translateX(2px);
+}
+
+/* ========================================
+   View Container
+   ======================================== */
+
+.view-container {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+  background: var(--bg);
+}
+
+.view {
+  display: none;
+  padding: 10px 14px;
+}
+
+.view.active {
+  display: block;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 10px;
 }
 
-.wp-user-card {
+.view-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* ========================================
+   Footer Navigation
+   ======================================== */
+
+.footer-nav {
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 4px 0;
+  height: 48px;
+  flex-shrink: 0;
+}
+
+.nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color 0.2s, transform 0.1s;
+  padding: 4px 0;
+}
+
+.nav-item:hover {
+  color: var(--text);
+}
+
+.nav-item:active {
+  transform: scale(0.95);
+}
+
+.nav-item.active {
+  color: var(--accent);
+}
+
+.nav-item:focus-visible {
+  outline: none;
+  background: var(--accent-soft);
+  border-radius: 8px;
+}
+
+.nav-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.nav-label {
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* ========================================
+   Dialog Overlay
+   ======================================== */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  display: none;
+  align-items: flex-end;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.dialog-overlay.open {
+  display: flex;
+}
+
+.dialog {
+  width: 100%;
+  max-height: 85%;
+  background: var(--surface);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 16px;
+  overflow-y: auto;
+  transform: translateY(100%);
+  transition: transform 0.25s ease;
+}
+
+.dialog.open {
+  transform: translateY(0);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.dialog-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, color 0.2s;
+}
+
+.dialog-close:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dialog-actions {
   margin-top: 8px;
+}
+
+/* ========================================
+   Status Bar
+   ======================================== */
+
+.status {
+  position: fixed;
+  bottom: 52px;
+  left: 8px;
+  right: 8px;
+  margin: 0;
+  min-height: 18px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--success);
+  background: var(--surface);
+  padding: 6px 10px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  z-index: 50;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.3s, transform 0.3s;
+  pointer-events: none;
+}
+
+.status.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+/* ========================================
+   Cards & Sections
+   ======================================== */
+
+.wp-user-card {
+  margin-top: 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: linear-gradient(160deg, var(--surface), var(--surface-2));
@@ -223,6 +556,97 @@ h1 {
   }
 }
 
+/* ========================================
+   Key Sections
+   ======================================== */
+
+.key-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.key-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.key-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.key-row {
+  display: grid;
+  gap: 8px;
+  align-items: center;
+}
+
+.key-row-export {
+  grid-template-columns: auto 1fr auto;
+}
+
+.key-row-import {
+  grid-template-columns: 1fr auto;
+}
+
+.key-row-create {
+  grid-template-columns: 1fr;
+}
+
+.compact-hint {
+  margin: 0 0 8px;
+}
+
+.backup-output {
+  margin: 0;
+}
+
+.cloud-backup {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.backup-actions .btn-secondary,
+.backup-actions .btn-danger {
+  flex: 1;
+  min-width: 100px;
+}
+
+/* ========================================
+   Settings Sections
+   ======================================== */
+
+.settings-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.settings-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+/* ========================================
+   Form Elements
+   ======================================== */
+
 .section-head {
   display: flex;
   align-items: center;
@@ -239,13 +663,12 @@ h1 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
   font-size: 13px;
   font-weight: 600;
 }
 
 .hint {
-  margin: 9px 0 0;
+  margin: 6px 0 0;
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted);
@@ -253,15 +676,6 @@ h1 {
 
 .warn {
   color: #a15f00;
-}
-
-.unlock-section,
-.backup-section,
-.sync-section,
-.instance-section {
-  margin-top: 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
 }
 
 .field-label {
@@ -272,7 +686,6 @@ h1 {
 }
 
 .relogin-row {
-  margin-top: 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -350,93 +763,15 @@ code {
   font-size: 11px;
 }
 
-.manual-config {
-  margin-top: 8px;
-  display: grid;
-  gap: 6px;
-}
-
-.backup-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.backup-actions .btn-secondary,
-.backup-actions .btn-danger {
-  flex: 1;
-  min-width: 120px;
-}
-
-.key-row {
-  display: grid;
-  gap: 8px;
-  align-items: center;
-  margin-top: 8px;
-}
-
-.key-row-export {
-  grid-template-columns: auto 1fr auto;
-}
-
-.key-row-import,
-.key-row-create {
-  grid-template-columns: 1fr auto;
-}
-
-.compact-hint {
-  margin: 0;
-}
-
-.backup-output {
-  margin: 0;
-}
-
-.cloud-backup {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border);
-}
-
-.sync-list {
-  margin-top: 8px;
-  display: grid;
-  gap: 8px;
-}
-
-.sync-item {
-  border: 1px solid var(--border);
-  border-radius: 11px;
-  background: linear-gradient(160deg, var(--surface), var(--surface-2));
-  padding: 9px;
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-.sync-main {
-  min-width: 0;
-  flex: 1;
-}
-
-.sync-host {
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.sync-origin,
-.sync-status {
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--muted);
-  word-break: break-word;
-}
+/* ========================================
+   Buttons
+   ======================================== */
 
 .btn-primary,
 .btn-secondary,
 .btn-copy,
-.btn-danger {
+.btn-danger,
+.btn-small {
   border-radius: 10px;
   border: 1px solid transparent;
   padding: 6px 10px;
@@ -467,6 +802,14 @@ code {
   padding: 4px 8px;
 }
 
+.btn-small {
+  font-size: 11px;
+  padding: 4px 8px;
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
 .btn-danger {
   color: var(--danger);
   background: var(--danger-bg);
@@ -476,7 +819,8 @@ code {
 .btn-primary:hover,
 .btn-secondary:hover,
 .btn-copy:hover,
-.btn-danger:hover {
+.btn-danger:hover,
+.btn-small:hover {
   transform: translateY(-1px);
 }
 
@@ -490,7 +834,8 @@ code {
 .btn-primary:focus-visible,
 .btn-secondary:focus-visible,
 .btn-copy:focus-visible,
-.btn-danger:focus-visible {
+.btn-danger:focus-visible,
+.btn-small:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow:
@@ -501,34 +846,73 @@ code {
 .btn-primary:active,
 .btn-secondary:active,
 .btn-copy:active,
-.btn-danger:active {
+.btn-danger:active,
+.btn-small:active {
   transform: translateY(0);
 }
 
 .btn-primary:disabled,
 .btn-secondary:disabled,
 .btn-copy:disabled,
-.btn-danger:disabled {
+.btn-danger:disabled,
+.btn-small:disabled {
   cursor: not-allowed;
   opacity: 0.56;
   transform: none;
   box-shadow: none;
 }
 
-.status {
-  margin: 10px 0 0;
-  min-height: 18px;
-  font-size: 12px;
-  line-height: 1.35;
-  color: var(--success);
-}
-
-.status.error {
-  color: var(--danger);
-}
+/* ========================================
+   Empty State
+   ======================================== */
 
 .empty {
   margin: 0;
   font-size: 12px;
   color: var(--muted);
+}
+
+/* ========================================
+   Home View Placeholder
+   ======================================== */
+
+.home-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ========================================
+   History View
+   ======================================== */
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ========================================
+   Responsive / Scrollbar
+   ======================================== */
+
+.view-container::-webkit-scrollbar,
+.dialog::-webkit-scrollbar {
+  width: 6px;
+}
+
+.view-container::-webkit-scrollbar-track,
+.dialog::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.view-container::-webkit-scrollbar-thumb,
+.dialog::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.view-container::-webkit-scrollbar-thumb:hover,
+.dialog::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }

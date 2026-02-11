@@ -13,6 +13,119 @@ const UNLOCK_CACHE_POLICY_LABELS = {
   session: 'Bis Browser-Neustart'
 };
 
+// ========================================
+// View-Router
+// ========================================
+
+function switchView(viewId) {
+  // Alle Views deaktivieren
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  
+  // Ziel-View aktivieren
+  const view = document.getElementById(`view-${viewId}`);
+  const navItem = document.querySelector(`[data-view="${viewId}"]`);
+  if (view) view.classList.add('active');
+  if (navItem) navItem.classList.add('active');
+  
+  // View-spezifische Aktionen
+  if (viewId === 'keys') {
+    // Cloud-Backup-Status aktualisieren wenn Keys-View geöffnet wird
+    // Wird unten in der Initialisierung gesetzt
+  }
+}
+
+// ========================================
+// Dialog-Management
+// ========================================
+
+function openDialog(dialogId) {
+  const overlay = document.getElementById('dialog-overlay');
+  const dialog = document.getElementById(dialogId);
+  if (overlay) {
+    overlay.classList.add('open');
+    overlay.setAttribute('aria-hidden', 'false');
+  }
+  if (dialog) {
+    dialog.classList.add('open');
+  }
+}
+
+function closeDialog() {
+  const overlay = document.getElementById('dialog-overlay');
+  if (overlay) {
+    overlay.classList.remove('open');
+    overlay.setAttribute('aria-hidden', 'true');
+  }
+  document.querySelectorAll('.dialog.open').forEach(d => d.classList.remove('open'));
+}
+
+// ========================================
+// Status-Management
+// ========================================
+
+let statusTimeout = null;
+
+function showStatus(message, isError = false) {
+  const status = document.getElementById('status');
+  if (!status) return;
+  
+  status.textContent = message;
+  status.classList.toggle('error', isError);
+  status.classList.add('visible');
+  
+  // Auto-Hide nach 4 Sekunden
+  if (statusTimeout) clearTimeout(statusTimeout);
+  statusTimeout = setTimeout(() => {
+    status.classList.remove('visible');
+  }, 4000);
+}
+
+// ========================================
+// User Hero Update
+// ========================================
+
+function updateUserHero(viewer, runtimeStatus) {
+  const heroAvatar = document.getElementById('hero-avatar');
+  const heroName = document.getElementById('hero-name');
+  const heroNip05 = document.getElementById('hero-nip05');
+  
+  if (!heroAvatar || !heroName || !heroNip05) return;
+  
+  const avatarUrl = String(viewer?.avatarUrl || '').trim();
+  const displayName = String(viewer?.displayName || viewer?.userLogin || 'Gast').trim();
+  const nip05 = String(viewer?.profileNip05 || '').trim();
+  
+  if (avatarUrl) {
+    heroAvatar.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="Avatar">`;
+  } else {
+    heroAvatar.innerHTML = '<span style="font-size: 20px;">👤</span>';
+  }
+  
+  heroName.textContent = displayName;
+  heroNip05.textContent = nip05 || '(keine NIP-05)';
+}
+
+// ========================================
+// Connection Status Update
+// ========================================
+
+function updateConnectionStatus(connected) {
+  const statusDot = document.querySelector('.status-dot');
+  const statusText = document.querySelector('.status-text');
+  
+  if (statusDot) {
+    statusDot.classList.toggle('offline', !connected);
+  }
+  if (statusText) {
+    statusText.textContent = connected ? 'Connected' : 'Offline';
+  }
+}
+
+// ========================================
+// Main Initialization
+// ========================================
+
 document.addEventListener('DOMContentLoaded', async () => {
   const checkbox = document.getElementById('prefer-lock');
   const status = document.getElementById('status');
@@ -37,21 +150,76 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
   const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
   const protectionRow = document.getElementById('protection-row');
+  const userHero = document.getElementById('user-hero');
+  const dialogOverlay = document.getElementById('dialog-overlay');
+  const dialogClose = document.getElementById('dialog-close');
+  const footerNav = document.getElementById('footer-nav');
+  
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
   let activeViewer = null;
   let activeRuntimeStatus = null;
 
+  // ========================================
+  // Event Listeners: Navigation & Dialogs
+  // ========================================
+
+  // Footer Navigation
+  if (footerNav) {
+    footerNav.addEventListener('click', (e) => {
+      const navItem = e.target.closest('.nav-item');
+      if (!navItem) return;
+      const viewId = navItem.dataset.view;
+      if (viewId) switchView(viewId);
+    });
+  }
+
+  // User Hero → Profil-Dialog
+  if (userHero) {
+    userHero.addEventListener('click', () => {
+      openDialog('dialog-profile');
+    });
+    userHero.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openDialog('dialog-profile');
+      }
+    });
+  }
+
+  // Dialog schließen
+  if (dialogClose) {
+    dialogClose.addEventListener('click', closeDialog);
+  }
+  
+  if (dialogOverlay) {
+    dialogOverlay.addEventListener('click', (e) => {
+      if (e.target === dialogOverlay) {
+        closeDialog();
+      }
+    });
+  }
+
+  // ESC-Taste schließt Dialog
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeDialog();
+    }
+  });
+
+  // ========================================
+  // Load Initial Data
+  // ========================================
+
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
     const value = typeof result[SETTING_KEY] === 'boolean'
       ? result[SETTING_KEY]
       : DEFAULT_VALUE;
-    checkbox.checked = value;
+    if (checkbox) checkbox.checked = value;
   } catch (e) {
-    status.textContent = 'Einstellungen konnten nicht geladen werden.';
-    return;
+    showStatus('Einstellungen konnten nicht geladen werden.', true);
   }
 
   const initialViewer = await loadViewerContext(null, status);
@@ -63,8 +231,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const initialSigner = await refreshSignerIdentity(protectionRow, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
+  
+  // UI aktualisieren
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
   renderInstanceCard(instanceCard, activeViewer);
+  updateUserHero(activeViewer, activeRuntimeStatus);
+  updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
   await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
   await refreshCloudBackupState(cloudBackupMeta, {
     enableButton: cloudBackupEnableButton,
@@ -72,16 +244,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     deleteButton: cloudBackupDeleteButton
   }, activeScope, activeWpApi);
 
-  checkbox.addEventListener('change', async () => {
-    try {
-      await chrome.storage.local.set({ [SETTING_KEY]: checkbox.checked });
-      status.textContent = checkbox.checked
-        ? 'Lock aktiviert.'
-        : 'Lock deaktiviert.';
-    } catch (e) {
-      status.textContent = 'Speichern fehlgeschlagen.';
-    }
-  });
+  // ========================================
+  // Event Listeners: Settings
+  // ========================================
+
+  if (checkbox) {
+    checkbox.addEventListener('change', async () => {
+      try {
+        await chrome.storage.local.set({ [SETTING_KEY]: checkbox.checked });
+        showStatus(checkbox.checked ? 'Lock aktiviert.' : 'Lock deaktiviert.');
+      } catch (e) {
+        showStatus('Speichern fehlgeschlagen.', true);
+      }
+    });
+  }
 
   if (unlockCachePolicySelect) {
     unlockCachePolicySelect.addEventListener('change', async () => {
@@ -96,9 +272,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const updatedPolicy = normalizeUnlockCachePolicy(response?.result?.policy || selectedPolicy);
         unlockCachePolicySelect.value = updatedPolicy;
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-        status.textContent = `ReLogin-Dauer gespeichert: ${formatUnlockCachePolicyLabel(updatedPolicy)}.`;
+        showStatus(`ReLogin-Dauer gespeichert: ${formatUnlockCachePolicyLabel(updatedPolicy)}.`);
       } catch (e) {
-        status.textContent = `ReLogin-Dauer konnte nicht gespeichert werden: ${e.message || e}`;
+        showStatus(`ReLogin-Dauer konnte nicht gespeichert werden: ${e.message || e}`, true);
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       } finally {
         unlockCachePolicySelect.disabled = false;
@@ -106,104 +282,126 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  refreshUserButton.addEventListener('click', async () => {
-    refreshUserButton.disabled = true;
-    try {
-      const viewer = await loadViewerContext(null, status);
-      await persistViewerCache(viewer);
-      activeViewer = viewer;
-      activeScope = viewer?.scope || 'global';
-      activeWpApi = sanitizeWpApi(viewer?.wpApi);
-      activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      renderInstanceCard(instanceCard, activeViewer);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-      if (viewer?.pending) {
-        status.textContent = 'Profilkontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
-      } else if (viewer?.isCached) {
-        status.textContent = 'Profil aus Extension-Speicher geladen.';
-      } else {
-        status.textContent = viewer?.isLoggedIn
-          ? 'Profilinformationen aktualisiert.'
-          : 'Kein eingeloggter WordPress-Benutzer auf aktivem Tab.';
-      }
-    } catch (e) {
-      status.textContent = `Profilinformationen konnten nicht geladen werden: ${e.message || e}`;
-    } finally {
-      refreshUserButton.disabled = false;
-    }
-  });
+  // ========================================
+  // Event Listeners: Refresh
+  // ========================================
 
-  publishProfileButton.addEventListener('click', async () => {
-    if (!hasProfileContext(activeViewer)) {
-      status.textContent = 'Kein Profilkontext verfügbar. Öffne eine WordPress-Seite und lade das Popup neu.';
-      return;
-    }
-
-    const profilePayload = buildProfilePublishPayload(activeViewer);
-    if (!profilePayload.relays.length) {
-      status.textContent = 'Kein Profil-Relay konfiguriert. Bitte in WordPress "Profil-Relay (kind:0)" setzen.';
-      return;
-    }
-
-    publishProfileButton.disabled = true;
-    status.textContent = 'Sende Profil-Event (kind:0) an Relay...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_PUBLISH_PROFILE',
-        payload: {
-          scope: activeScope,
-          relays: profilePayload.relays,
-          profile: profilePayload.profile,
-          expectedPubkey: activeRuntimeStatus?.pubkeyHex || null,
-          origin: activeViewer?.origin || null,
-          authBroker: activeAuthBroker
+  if (refreshUserButton) {
+    refreshUserButton.addEventListener('click', async () => {
+      refreshUserButton.disabled = true;
+      try {
+        const viewer = await loadViewerContext(null, status);
+        await persistViewerCache(viewer);
+        activeViewer = viewer;
+        activeScope = viewer?.scope || 'global';
+        activeWpApi = sanitizeWpApi(viewer?.wpApi);
+        activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        renderInstanceCard(instanceCard, activeViewer);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+        if (viewer?.pending) {
+          showStatus('Profilkontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.');
+        } else if (viewer?.isCached) {
+          showStatus('Profil aus Extension-Speicher geladen.');
+        } else {
+          showStatus(viewer?.isLoggedIn
+            ? 'Profilinformationen aktualisiert.'
+            : 'Kein eingeloggter WordPress-Benutzer auf aktivem Tab.');
         }
-      });
-      if (response?.error) throw new Error(response.error);
-      const result = response?.result || {};
-      const relay = String(result.relay || profilePayload.relays[0] || '').trim();
-      const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
-      status.textContent = relay
-        ? `Profil veröffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
-        : `Profil veröffentlicht (${formatShortHex(pubkey)}).`;
-    } catch (e) {
-      status.textContent = `Profil-Publish fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      publishProfileButton.disabled = false;
-    }
-  });
+      } catch (e) {
+        showStatus(`Profilinformationen konnten nicht geladen werden: ${e.message || e}`, true);
+      } finally {
+        refreshUserButton.disabled = false;
+      }
+    });
+  }
 
-  exportKeyButton.addEventListener('click', async () => {
-    exportKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_EXPORT_NSEC',
-        payload: { scope: activeScope }
-      });
-      if (response?.error) throw new Error(response.error);
-      const nsec = String(response?.result?.nsec || '').trim();
-      if (!nsec) throw new Error('Export lieferte keinen nsec');
+  // ========================================
+  // Event Listeners: Profile Publish
+  // ========================================
 
-      backupOutput.value = nsec;
-      backupOutput.type = 'password';
-      status.textContent = 'Schlüssel exportiert (verborgen). Nutze 👁 zum Anzeigen.';
-    } catch (e) {
-      status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      exportKeyButton.disabled = false;
-    }
-  });
+  if (publishProfileButton) {
+    publishProfileButton.addEventListener('click', async () => {
+      if (!hasProfileContext(activeViewer)) {
+        showStatus('Kein Profilkontext verfügbar. Öffne eine WordPress-Seite und lade das Popup neu.', true);
+        return;
+      }
 
-  if (backupOutputToggleButton) {
+      const profilePayload = buildProfilePublishPayload(activeViewer);
+      if (!profilePayload.relays.length) {
+        showStatus('Kein Profil-Relay konfiguriert. Bitte in WordPress "Profil-Relay (kind:0)" setzen.', true);
+        return;
+      }
+
+      publishProfileButton.disabled = true;
+      showStatus('Sende Profil-Event (kind:0) an Relay...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_PUBLISH_PROFILE',
+          payload: {
+            scope: activeScope,
+            relays: profilePayload.relays,
+            profile: profilePayload.profile,
+            expectedPubkey: activeRuntimeStatus?.pubkeyHex || null,
+            origin: activeViewer?.origin || null,
+            authBroker: activeAuthBroker
+          }
+        });
+        if (response?.error) throw new Error(response.error);
+        const result = response?.result || {};
+        const relay = String(result.relay || profilePayload.relays[0] || '').trim();
+        const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
+        showStatus(relay
+          ? `Profil veröffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
+          : `Profil veröffentlicht (${formatShortHex(pubkey)}).`);
+      } catch (e) {
+        showStatus(`Profil-Publish fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        publishProfileButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Key Export
+  // ========================================
+
+  if (exportKeyButton) {
+    exportKeyButton.addEventListener('click', async () => {
+      exportKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_EXPORT_NSEC',
+          payload: { scope: activeScope }
+        });
+        if (response?.error) throw new Error(response.error);
+        const nsec = String(response?.result?.nsec || '').trim();
+        if (!nsec) throw new Error('Export lieferte keinen nsec');
+
+        if (backupOutput) {
+          backupOutput.value = nsec;
+          backupOutput.type = 'password';
+        }
+        showStatus('Schlüssel exportiert (verborgen). Nutze 👁 zum Anzeigen.');
+      } catch (e) {
+        showStatus(`Export fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        exportKeyButton.disabled = false;
+      }
+    });
+  }
+
+  if (backupOutputToggleButton && backupOutput) {
     backupOutputToggleButton.addEventListener('click', () => {
       const isHidden = backupOutput.type === 'password';
       backupOutput.type = isHidden ? 'text' : 'password';
@@ -212,237 +410,271 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  backupOutputCopyButton.addEventListener('click', async () => {
-    const nsec = String(backupOutput.value || '').trim();
-    if (!nsec) {
-      status.textContent = 'Kein exportierter Schlüssel zum Kopieren vorhanden.';
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(nsec);
-      status.textContent = 'Exportierter Schlüssel wurde kopiert.';
-    } catch {
-      status.textContent = 'Kopieren des exportierten Schlüssels fehlgeschlagen.';
-    }
-  });
+  if (backupOutputCopyButton && backupOutput) {
+    backupOutputCopyButton.addEventListener('click', async () => {
+      const nsec = String(backupOutput.value || '').trim();
+      if (!nsec) {
+        showStatus('Kein exportierter Schlüssel zum Kopieren vorhanden.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(nsec);
+        showStatus('Exportierter Schlüssel wurde kopiert.');
+      } catch {
+        showStatus('Kopieren des exportierten Schlüssels fehlgeschlagen.', true);
+      }
+    });
+  }
 
-  backupDownloadButton.addEventListener('click', async () => {
-    backupDownloadButton.disabled = true;
-    try {
-      // Fetch nsec directly from background – no prior export needed
-      const exportResponse = await chrome.runtime.sendMessage({
-        type: 'NOSTR_EXPORT_NSEC',
-        payload: { scope: activeScope }
-      });
-      if (exportResponse?.error) throw new Error(exportResponse.error);
-      const nsec = String(exportResponse?.result?.nsec || '').trim();
-      if (!nsec) throw new Error('Export lieferte keinen nsec');
+  if (backupDownloadButton) {
+    backupDownloadButton.addEventListener('click', async () => {
+      backupDownloadButton.disabled = true;
+      try {
+        // Fetch nsec directly from background – no prior export needed
+        const exportResponse = await chrome.runtime.sendMessage({
+          type: 'NOSTR_EXPORT_NSEC',
+          payload: { scope: activeScope }
+        });
+        if (exportResponse?.error) throw new Error(exportResponse.error);
+        const nsec = String(exportResponse?.result?.nsec || '').trim();
+        if (!nsec) throw new Error('Export lieferte keinen nsec');
 
-      const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
-      const npub = String(response?.result || '').trim();
-      const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
-      const namePart = displayName ? `-${displayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
-      const datePart = new Date().toISOString().split('T')[0];
-      const content = `Nostr Backup\n===========\n\n${npub ? `npub: ${npub}\n` : ''}nsec: ${nsec}\n\n!! GEHEIM HALTEN \u2013 NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich \"Nostr-Schluessel\" den nsec in das Import-Feld einfuegen\n4. \"Importieren\" klicken\n`;
-      const blob = new Blob([content], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `nostr-backup${namePart}-${datePart}.txt`;
-      a.click();
-      URL.revokeObjectURL(url);
-      status.textContent = 'Backup-Datei heruntergeladen.';
-    } catch (e) {
-      status.textContent = `Download fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      backupDownloadButton.disabled = false;
-    }
-  });
+        const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
+        const npub = String(response?.result || '').trim();
+        const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
+        const namePart = displayName ? `-${displayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
+        const datePart = new Date().toISOString().split('T')[0];
+        const content = `Nostr Backup\n===========\n\n${npub ? `npub: ${npub}\n` : ''}nsec: ${nsec}\n\n!! GEHEIM HALTEN \u2013 NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich "Schluessel" den nsec in das Import-Feld einfuegen\n4. "Importieren" klicken\n`;
+        const blob = new Blob([content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `nostr-backup${namePart}-${datePart}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showStatus('Backup-Datei heruntergeladen.');
+      } catch (e) {
+        showStatus(`Download fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        backupDownloadButton.disabled = false;
+      }
+    });
+  }
 
-  importKeyButton.addEventListener('click', async () => {
-    const nsec = String(importNsecInput.value || '').trim();
-    if (!nsec) {
-      status.textContent = 'Bitte zuerst einen nsec eingeben.';
-      return;
-    }
+  // ========================================
+  // Event Listeners: Key Import
+  // ========================================
 
-    const confirmed = confirm('Das ersetzt den bestehenden Nostr-Schlüssel für dieses Profil. Fortfahren?');
-    if (!confirmed) return;
+  if (importKeyButton && importNsecInput) {
+    importKeyButton.addEventListener('click', async () => {
+      const nsec = String(importNsecInput.value || '').trim();
+      if (!nsec) {
+        showStatus('Bitte zuerst einen nsec eingeben.', true);
+        return;
+      }
 
-    importKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_IMPORT_NSEC',
-        payload: { scope: activeScope, nsec, wpApi: activeWpApi }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '');
-      importNsecInput.value = '';
-      backupOutput.value = '';
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      status.textContent = pubkey
-        ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
-        : 'Schlüssel importiert. Seite neu laden.';
-    } catch (e) {
-      status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      importKeyButton.disabled = false;
-    }
-  });
+      const confirmed = confirm('Das ersetzt den bestehenden Nostr-Schlüssel für dieses Profil. Fortfahren?');
+      if (!confirmed) return;
 
-  createKeyButton.addEventListener('click', async () => {
-    const confirmed = confirm('Neue Schlüssel erstellen? Das ersetzt die aktuelle Nostr-Identität für dieses Profil.');
-    if (!confirmed) return;
+      importKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_IMPORT_NSEC',
+          payload: { scope: activeScope, nsec, wpApi: activeWpApi }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '');
+        importNsecInput.value = '';
+        if (backupOutput) backupOutput.value = '';
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        showStatus(pubkey
+          ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
+          : 'Schlüssel importiert. Seite neu laden.');
+      } catch (e) {
+        showStatus(`Import fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        importKeyButton.disabled = false;
+      }
+    });
+  }
 
-    createKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_CREATE_NEW_KEY',
-        payload: { scope: activeScope, wpApi: activeWpApi }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '').trim();
+  // ========================================
+  // Event Listeners: Key Create
+  // ========================================
 
-      importNsecInput.value = '';
-      backupOutput.value = '';
+  if (createKeyButton) {
+    createKeyButton.addEventListener('click', async () => {
+      const confirmed = confirm('Neue Schlüssel erstellen? Das ersetzt die aktuelle Nostr-Identität für dieses Profil.');
+      if (!confirmed) return;
 
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
+      createKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_CREATE_NEW_KEY',
+          payload: { scope: activeScope, wpApi: activeWpApi }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '').trim();
+
+        if (importNsecInput) importNsecInput.value = '';
+        if (backupOutput) backupOutput.value = '';
+
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+
+        showStatus(pubkey
+          ? `Neue Schlüssel erstellt (${formatShortHex(pubkey)}).`
+          : 'Neue Schlüssel erstellt.');
+      } catch (e) {
+        showStatus(`Neue Schlüssel konnten nicht erstellt werden: ${e.message || e}`, true);
+      } finally {
+        createKeyButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Cloud Backup
+  // ========================================
+
+  if (cloudBackupEnableButton) {
+    cloudBackupEnableButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
+      }, true);
+      showStatus('Speichere Schlüsselkopie in WordPress...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_ENABLE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        showStatus('Schlüsselkopie in WordPress gespeichert.');
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Speichern der Schlüsselkopie fehlgeschlagen: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-      status.textContent = pubkey
-        ? `Neue Schlüssel erstellt (${formatShortHex(pubkey)}).`
-        : 'Neue Schlüssel erstellt.';
-    } catch (e) {
-      status.textContent = `Neue Schlüssel konnten nicht erstellt werden: ${e.message || e}`;
-    } finally {
-      createKeyButton.disabled = false;
-    }
-  });
+  if (cloudBackupRestoreButton) {
+    cloudBackupRestoreButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Wiederherstellen ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      const confirmed = confirm('Wiederherstellen aus WordPress ersetzt den lokalen Nostr-Schlüssel. Fortfahren?');
+      if (!confirmed) return;
 
-  cloudBackupEnableButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Speichere Schlüsselkopie in WordPress...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_ENABLE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      status.textContent = 'Schlüsselkopie in WordPress gespeichert.';
-      await refreshCloudBackupState(cloudBackupMeta, {
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Speichern der Schlüsselkopie fehlgeschlagen: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+      }, true);
+      showStatus('Stelle aus WordPress-Schlüsselkopie wieder her...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_RESTORE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '');
+        showStatus(pubkey
+          ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
+          : 'Wiederherstellung erfolgreich. Seite neu laden.');
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Wiederherstellung fehlgeschlagen: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-  cloudBackupRestoreButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Wiederherstellen ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    const confirmed = confirm('Wiederherstellen aus WordPress ersetzt den lokalen Nostr-Schlüssel. Fortfahren?');
-    if (!confirmed) return;
+  if (cloudBackupDeleteButton) {
+    cloudBackupDeleteButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Löschen der Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      const confirmed = confirm('Schlüsselkopie in WordPress wirklich löschen?');
+      if (!confirmed) return;
 
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Stelle aus WordPress-Schlüsselkopie wieder her...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_RESTORE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '');
-      status.textContent = pubkey
-        ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
-        : 'Wiederherstellung erfolgreich. Seite neu laden.';
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Wiederherstellung fehlgeschlagen: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+      }, true);
+      showStatus('Lösche Schlüsselkopie in WordPress...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_DELETE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        showStatus('Schlüsselkopie in WordPress gelöscht.');
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Schlüsselkopie konnte nicht gelöscht werden: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-  cloudBackupDeleteButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Löschen der Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    const confirmed = confirm('Schlüsselkopie in WordPress wirklich löschen?');
-    if (!confirmed) return;
-
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Lösche Schlüsselkopie in WordPress...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_DELETE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      status.textContent = 'Schlüsselkopie in WordPress gelöscht.';
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Schlüsselkopie konnte nicht gelöscht werden: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+  // ========================================
+  // Event Delegation: Copy Buttons
+  // ========================================
 
   document.addEventListener('click', async (event) => {
     const copyButton = event.target?.closest?.('[data-copy-value]');
@@ -450,19 +682,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const value = String(copyButton.getAttribute('data-copy-value') || '').trim();
     if (!value) {
-      status.textContent = 'Kein Wert zum Kopieren vorhanden.';
+      showStatus('Kein Wert zum Kopieren vorhanden.', true);
       return;
     }
 
     try {
       await navigator.clipboard.writeText(value);
-      status.textContent = 'In die Zwischenablage kopiert.';
+      showStatus('In die Zwischenablage kopiert.');
     } catch {
-      status.textContent = 'Kopieren fehlgeschlagen.';
+      showStatus('Kopieren fehlgeschlagen.', true);
     }
   });
 
 });
+
+// ========================================
+// Helper Functions
+// ========================================
 
 function escapeHtml(text) {
   const div = document.createElement('div');
@@ -1007,11 +1243,11 @@ async function refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCache
 
     setUnlockStateBadge(unlockCacheState, runtimeStatus);
     updateUnlockPolicySelect(unlockCachePolicySelect, runtimeStatus);
-    unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
+    if (unlockCacheHint) unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
   } catch {
     setUnlockStateBadge(unlockCacheState, null);
     updateUnlockPolicySelect(unlockCachePolicySelect, null);
-    unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
+    if (unlockCacheHint) unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
   }
 }
 
