@@ -14,8 +14,8 @@ import {
   randomizeTimestamp,
   createRumor, createSeal, createGiftWrap, createGiftWrappedDM,
   unwrapGiftWrap,
-  DM_CACHE_KEY, DM_CACHE_MAX_MESSAGES, DM_UNREAD_COUNT_KEY, DM_NOTIFICATIONS_KEY,
-  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache,
+  DM_CACHE_KEY, DM_CACHE_MAX_PER_CONVERSATION, DM_UNREAD_COUNT_KEY, DM_NOTIFICATIONS_KEY,
+  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache, getConversationList,
   incrementUnreadCount, clearUnreadCount, getUnreadCount,
   formatShortHex
 } from './lib/nip17-chat.js';
@@ -1211,6 +1211,7 @@ class RelayConnectionManager {
   constructor() {
     this.connections = new Map(); // relayUrl -> WebSocket
     this.subscriptions = new Map(); // subId -> { filters, onMessage, onEose }
+    this._failCount = new Map(); // relayUrl -> consecutive failure count
     this.reconnectInterval = 30000;
     this.keepAliveInterval = 25000; // < 30s für MV3 Service Worker
   }
@@ -1235,24 +1236,47 @@ class RelayConnectionManager {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(normalized);
       
+      // Connection Timeout: 10 Sekunden
+      const connectTimeout = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          console.warn(`[Relay] Connection timeout for ${normalized}`);
+          ws._manualClose = true;
+          ws.close();
+          reject(new Error(`Connection timeout for ${normalized}`));
+        }
+      }, 10000);
+      
       ws.onopen = () => {
+        clearTimeout(connectTimeout);
         console.log(`[Relay] Connected to ${normalized}`);
         this.connections.set(normalized, ws);
+        this._failCount.delete(normalized);
         // Re-subscribe to existing subscriptions
         this.resubscribeAll(normalized);
         resolve(ws);
       };
       
       ws.onclose = () => {
+        clearTimeout(connectTimeout);
         console.log(`[Relay] Disconnected from ${normalized}`);
         this.connections.delete(normalized);
-        // Auto-Reconnect nach Verzögerung
+        // Kein Auto-Reconnect wenn manuell geschlossen
+        if (ws._manualClose) return;
+        // Exponential Backoff bei wiederholten Fehlern
+        const fails = (this._failCount.get(normalized) || 0) + 1;
+        this._failCount.set(normalized, fails);
+        if (fails > 5) {
+          console.warn(`[Relay] Too many failures for ${normalized}, stopping reconnect`);
+          return;
+        }
+        const delay = Math.min(this.reconnectInterval * Math.pow(2, fails - 1), 300000);
         setTimeout(() => {
           this.connect(normalized).catch(() => {});
-        }, this.reconnectInterval);
+        }, delay);
       };
       
       ws.onerror = (error) => {
+        clearTimeout(connectTimeout);
         console.warn(`[Relay] Error on ${normalized}:`, error);
         if (ws.readyState === WebSocket.CONNECTING) {
           reject(new Error(`Failed to connect to ${normalized}`));
@@ -1378,6 +1402,7 @@ class RelayConnectionManager {
   disconnect(relayUrl) {
     const ws = this.connections.get(relayUrl);
     if (ws) {
+      ws._manualClose = true;
       ws.close();
       this.connections.delete(relayUrl);
     }
@@ -1521,7 +1546,7 @@ async function getContactProfile(pubkey) {
 // DM Relay Discovery (Multi-Relay, NIP-17 Kind 10050)
 // ============================================================
 
-const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
 
 /**
  * Ermittelt alle Inbox-Relays für DM-Operationen.
@@ -1656,7 +1681,7 @@ async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
         msg.receivedAt = Date.now();
         
         // In Cache speichern
-        const cachedMsg = await cacheDmMessage(msg, scope);
+        const cachedMsg = await cacheDmMessage(msg, scope, myPubkey);
         
         // Notify any active frontend listeners (popup/chat UI) about the new message
         try {
@@ -1680,8 +1705,11 @@ async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
           }
         }
       } catch (e) {
-        // Nicht für uns - silently skip
-        console.debug('[NIP-17] Could not unwrap gift wrap:', e.message);
+        // Erwarteter Fehler bei fremden Gift Wraps (andere Keys, Spam, ältere Events)
+        // Nur loggen wenn keine MAC-Fehler (die kommen häufig auf öffentlichen Relays)
+        if (!e.message?.includes('invalid MAC') && !e.message?.includes('Failed to decrypt')) {
+          console.debug('[NIP-17] Could not unwrap gift wrap:', e.message);
+        }
       }
     }
   );
@@ -1719,7 +1747,7 @@ async function pollForNewDms(scope, relayUrl, myPubkey, privateKey) {
         msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
         msg.receivedAt = Date.now();
         
-        await cacheDmMessage(msg, scope);
+        await cacheDmMessage(msg, scope, myPubkey);
         
         if (msg.direction === 'in') {
           await showDmNotification(msg);
@@ -2367,6 +2395,10 @@ async function handleMessage(request, sender) {
     try {
       const result = await configureProtectionAndStoreSecretKey(secretKey, await getPasskeyAuthOptions());
 
+      // Neuer Key = alte DM-Nachrichten gehören nicht mehr dazu
+      await clearDmCache();
+      console.log('[NIP-17] DM cache cleared after new key creation');
+
       // Register new pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
       if (wpApi && result.pubkey) {
@@ -2416,6 +2448,10 @@ async function handleMessage(request, sender) {
     }
     try {
       const result = await configureProtectionAndStoreSecretKey(importedSecret, await getPasskeyAuthOptions());
+
+      // Key-Wechsel: alte DM-Nachrichten gehören nicht mehr dazu
+      await clearDmCache();
+      console.log('[NIP-17] DM cache cleared after key import');
 
       // Register imported pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
@@ -2871,7 +2907,7 @@ async function handleMessage(request, sender) {
         direction: 'out',
         giftWrapId: wrapForRecipient.id,
         receivedAt: Date.now()
-      }, dmScope);
+      }, dmScope, senderPubkey);
 
       return {
         success: true,
@@ -2896,51 +2932,51 @@ async function handleMessage(request, sender) {
     const dmKeyInfo = await findDmKey();
     const scope = dmKeyInfo ? dmKeyInfo.scope : activeKeyScope;
 
-    // Zuerst aus Cache holen
-    const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
-    
-    // Immer versuchen, neue Nachrichten vom Relay zu holen (Sync-Verhalten für "lückenlosen" Chat),
-    // es sei denn, forceRefresh=false ist explizit gesetzt (was hier nicht der Standard ist).
-    // Wir nutzen den Zeitstempel der letzten bekannten Nachricht als 'since'-Filter.
-    let fetchSince = request.payload?.since;
-    if (!fetchSince && cachedMessages.length > 0) {
-      // Sicherheits-Puffer: 1 Stunde zurück, um eventuell verpasste Nachrichten oder Uhren-Drift abzudecken
-      // Da wir deduplizieren, ist Over-Fetching okay.
-      fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
-    }
-    
-    // Private Key für Entschlüsselung (scope-lokaler KeyManager)
+    // Kein Key → nur Cache zurückgeben (ohne ownerPubkey-Validierung)
     if (!dmKeyInfo) {
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
       return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' };
     }
 
+    // Key unlocking
+    const { km: dmKm, protectionMode } = dmKeyInfo;
+    let privateKey;
+
     try {
-      const { km: dmKm, protectionMode } = dmKeyInfo;
-      let privateKey;
-
-      try {
-        const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-        privateKey = ensureUint8(rawKey);
-      } catch (e) {
-        console.warn('[NIP-17] Key unlock exception:', e.message, 'protectionMode:', protectionMode, 'scope:', scope);
-        if (cachedMessages.length > 0) {
-           return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
-        }
-        throw e;
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+      const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      privateKey = ensureUint8(rawKey);
+    } catch (e) {
+      console.warn('[NIP-17] Key unlock exception:', e.message, 'protectionMode:', protectionMode, 'scope:', scope);
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+      if (cachedMessages.length > 0) {
+        return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
       }
+      throw e;
+    }
 
-      if (!privateKey || privateKey.length !== 32) {
-        console.error('[NIP-17] Key unlock failed. protectionMode:', protectionMode, 'scope:', scope,
-          'key:', privateKey ? `length=${privateKey.length}` : 'null');
-        if (cachedMessages.length > 0) {
-          return { messages: cachedMessages, source: 'cache_fallback', reason: 'key_unlock_failed' };
-        }
-        throw new Error('Failed to unlock key for DM decryption');
+    if (!privateKey || privateKey.length !== 32) {
+      console.error('[NIP-17] Key unlock failed. protectionMode:', protectionMode, 'scope:', scope,
+        'key:', privateKey ? `length=${privateKey.length}` : 'null');
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+      if (cachedMessages.length > 0) {
+        return { messages: cachedMessages, source: 'cache_fallback', reason: 'key_unlock_failed' };
       }
+      throw new Error('Failed to unlock key for DM decryption');
+    }
 
-      const myPubkey = getPublicKey(privateKey);
-      
+    const myPubkey = getPublicKey(privateKey);
+
+    // Cache mit ownerPubkey-Validierung lesen (Konversations-basiert)
+    const cachedMessages = await getCachedDmMessages(scope, contactPubkey, myPubkey);
+
+    // since-Filter: Letzten bekannten Zeitstempel als Basis
+    let fetchSince = since;
+    if (!fetchSince && cachedMessages.length > 0) {
+      fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
+    }
+
+    try {
       // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
       const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
 
@@ -2951,8 +2987,7 @@ async function handleMessage(request, sender) {
       }];
       if (fetchSince) filters[0].since = fetchSince;
 
-      // Timeout verkürzen für bessere UX (5s statt 15s), da wir eh Cache haben
-      // Parallel Fetch
+      // Parallel Fetch (5s Timeout, da Cache als Fallback existiert)
       const fetchPromises = inboxRelays.map(r => subscribeOnce(r, filters, 5000).catch(() => []));
       const results = await Promise.all(fetchPromises);
       const giftWraps = results.flat();
@@ -2966,55 +3001,44 @@ async function handleMessage(request, sender) {
       for (const gw of uniqueWraps.values()) {
         try {
           const msg = unwrapGiftWrap(privateKey, gw);
-          msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
+          msg.giftWrapId = msg.id;
           msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
           msg.receivedAt = Date.now();
-          
-          // Filter nach Kontakt falls angegeben
-          if (contactPubkey) {
-            if (msg.senderPubkey !== contactPubkey && msg.recipientPubkey !== contactPubkey) {
-              continue;
-            }
-          }
-          
           newMessages.push(msg);
         } catch(e) {
-          // Silently skip undecrytable wraps (nicht für uns)
+          // Silently skip (fremde Gift Wraps)
         }
       }
       
-      privateKey.fill(0); // Key cleanen
+      privateKey.fill(0);
 
-      // Merging: Deduplizierung basierend auf ID (GiftWrap ID)
-      const messageMap = new Map();
-      cachedMessages.forEach(m => messageMap.set(m.id, m));
-      newMessages.forEach(m => messageMap.set(m.id, m));
-      
-      const combinedMessages = Array.from(messageMap.values());
-
-      // Correctness Check: Direction neu berechnen um Cache-Fehler zu korrigieren
-      // (Falls der Cache alte/falsche Richtungen gespeichert hat)
-      for (const m of combinedMessages) {
-        if (m.senderPubkey) {
-           m.direction = m.senderPubkey === myPubkey ? 'out' : 'in';
-        }
+      // Alle neuen Nachrichten cachen (Konversations-Zuordnung passiert automatisch
+      // in cacheDmMessage über resolveConversationPartner)
+      if (newMessages.length > 0) {
+        await cacheDmMessages(newMessages, scope, myPubkey);
       }
 
-      // Sortieren nach created_at
-      combinedMessages.sort((a, b) => a.createdAt - b.createdAt);
+      // Finalen Konversations-Cache lesen (enthält jetzt alte + neue, dedupliziert)
+      const allMessages = await getCachedDmMessages(scope, contactPubkey, myPubkey);
 
-      // Cachen (nur wenn wir neue haben oder Cache leer war)
-      if (newMessages.length > 0 || cachedMessages.length === 0) {
-        await cacheDmMessages(combinedMessages, scope);
-      }
-
-      return { messages: combinedMessages, source: 'merged', relays: inboxRelays };
+      return { messages: allMessages, source: newMessages.length > 0 ? 'merged' : 'cache', relays: inboxRelays };
       
     } catch (error) {
        console.error('Failed to fetch/decrypt DMs:', error);
-       // Fallback auf Cache im Fehlerfall
+       privateKey.fill(0);
        return { messages: cachedMessages, source: 'cache_fallback', error: error.message }; 
     }
+  }
+
+  // NOSTR_GET_CONVERSATIONS - Konversationsliste aus dem Cache
+  if (request.type === 'NOSTR_GET_CONVERSATIONS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Conversation list is only available from extension UI');
+    }
+    const dmKeyInfo = await findDmKey();
+    const scope = dmKeyInfo ? dmKeyInfo.scope : activeKeyScope;
+    const conversations = await getConversationList(scope);
+    return { conversations };
   }
 
   // NOSTR_GET_DM_RELAYS - DM-Relays eines Pubkeys abfragen
