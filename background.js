@@ -726,6 +726,10 @@ async function subscribeOnce(relayUrl, filters, timeout = 8000) {
 const CONTACTS_CACHE_KEY = 'nostrContactsCacheV1';
 const CONTACTS_CACHE_TTL = 15 * 60 * 1000; // 15 Minuten
 
+// WP-Members Cache (separat, 3 Tage TTL)
+const WP_MEMBERS_CACHE_KEY = 'nostrWpMembersCacheV1';
+const WP_MEMBERS_CACHE_TTL = 3 * 24 * 60 * 60 * 1000; // 3 Tage
+
 /**
  * Ruft die Kontaktliste (Kind 3) eines Pubkeys ab.
  * @param {string} pubkey - Hex pubkey
@@ -880,6 +884,112 @@ async function fetchWpMembers(wpApi) {
   }
 }
 
+// ============================================================
+// WP-Members Cache Funktionen (3 Tage TTL)
+// ============================================================
+
+/**
+ * Generiert einen Cache-Key basierend auf der WP REST URL.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @returns {string} - Cache-Key
+ */
+function getWpMembersCacheKey(wpApi) {
+  const baseUrl = normalizeWpRestBaseUrl(wpApi?.restUrl);
+  if (!baseUrl) return null;
+  // Hash der URL für eindeutigen Key
+  return `${WP_MEMBERS_CACHE_KEY}_${baseUrl.replace(/[^a-zA-Z0-9]/g, '_')}`;
+}
+
+/**
+ * Holt WP-Members aus dem Cache.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @returns {Promise<Object|null>} - { members, fetchedAt, isStale } oder null
+ */
+async function getCachedWpMembers(wpApi) {
+  try {
+    const cacheKey = getWpMembersCacheKey(wpApi);
+    if (cacheKey) {
+      const result = await chrome.storage.local.get([cacheKey]);
+      const cache = result[cacheKey];
+
+      if (cache && Array.isArray(cache.members)) {
+        const fetchedAt = cache.fetchedAt || 0;
+        const isStale = Date.now() - fetchedAt > WP_MEMBERS_CACHE_TTL;
+        return {
+          members: cache.members,
+          fetchedAt,
+          isStale,
+          cacheKey
+        };
+      }
+    }
+
+    const all = await chrome.storage.local.get(null);
+    const cacheKeys = Object.keys(all).filter((key) => key.startsWith(`${WP_MEMBERS_CACHE_KEY}_`));
+    if (!cacheKeys.length) return null;
+
+    let freshest = null;
+    for (const key of cacheKeys) {
+      const entry = all[key];
+      if (!entry || !Array.isArray(entry.members)) continue;
+      const fetchedAt = Number(entry.fetchedAt) || 0;
+      if (!freshest || fetchedAt > freshest.fetchedAt) {
+        freshest = {
+          members: entry.members,
+          fetchedAt,
+          cacheKey: key
+        };
+      }
+    }
+
+    if (!freshest) return null;
+
+    return {
+      members: freshest.members,
+      fetchedAt: freshest.fetchedAt,
+      isStale: Date.now() - freshest.fetchedAt > WP_MEMBERS_CACHE_TTL,
+      cacheKey: freshest.cacheKey
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Speichert WP-Members im Cache.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @param {Array} members - Array von Member-Objekten
+ */
+async function setCachedWpMembers(wpApi, members) {
+  try {
+    const cacheKey = getWpMembersCacheKey(wpApi);
+    if (!cacheKey) return;
+    
+    await chrome.storage.local.set({
+      [cacheKey]: {
+        members,
+        fetchedAt: Date.now(),
+        count: members.length
+      }
+    });
+  } catch (error) {
+    console.warn('[Nostr] Failed to cache WP members:', error.message);
+  }
+}
+
+/**
+ * Löscht alle WP-Members Caches.
+ */
+async function clearWpMembersCache() {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const keysToRemove = Object.keys(all).filter(k => k.startsWith(WP_MEMBERS_CACHE_KEY));
+    if (keysToRemove.length > 0) {
+      await chrome.storage.local.remove(keysToRemove);
+    }
+  } catch { /* ignore */ }
+}
+
 /**
  * Führt Nostr-Kontakte und WP-Members zusammen.
  * @param {Array} nostrContacts - Kontakte aus Kind 3
@@ -941,11 +1051,13 @@ function mergeContacts(nostrContacts, profiles, wpMembers) {
     .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
 }
 
-async function getCachedContacts(scope, includeWpMembers = false) {
+async function getCachedContacts(pubkey, includeWpMembers = false) {
   try {
     const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
     const cache = result[CONTACTS_CACHE_KEY];
-    if (!cache || cache.scope !== scope) return null;
+    // Cache ist an pubkey gebunden, nicht an scope
+    // Damit sind Kontakte auf allen Websites verfügbar
+    if (!cache || cache.pubkey !== pubkey) return null;
     if (Boolean(cache.includeWpMembers) !== Boolean(includeWpMembers)) return null;
     if (Date.now() - cache.fetchedAt > CONTACTS_CACHE_TTL) return null;
     return cache.contacts;
@@ -954,11 +1066,11 @@ async function getCachedContacts(scope, includeWpMembers = false) {
   }
 }
 
-async function setCachedContacts(scope, contacts, includeWpMembers = false) {
+async function setCachedContacts(pubkey, contacts, includeWpMembers = false) {
   try {
     await chrome.storage.local.set({
       [CONTACTS_CACHE_KEY]: {
-        scope,
+        pubkey, // Cache an pubkey binden statt scope
         includeWpMembers: Boolean(includeWpMembers),
         contacts,
         fetchedAt: Date.now()
@@ -1887,7 +1999,10 @@ async function handleMessage(request, sender) {
     'NOSTR_SET_DM_NOTIFICATIONS',
     'NOSTR_GET_DM_NOTIFICATIONS',
     'NOSTR_CLEAR_DM_CACHE',
-    'NOSTR_POLL_DMS'
+    'NOSTR_POLL_DMS',
+    // WP Members Cache
+    'NOSTR_GET_WP_MEMBERS',
+    'NOSTR_REFRESH_WP_MEMBERS'
   ]);
 
   if (scopedTypes.has(requestType)) {
@@ -2481,16 +2596,26 @@ async function handleMessage(request, sender) {
       throw new Error('Contacts are only available from extension UI');
     }
 
-    const scope = normalizeKeyScope(request.payload?.scope);
-    const pubkey = await getKnownPublicKeyHex();
+    // Versuche zuerst den pubkey aus dem existierenden Cache zu holen
+    // Das funktioniert auch wenn der Key in einem anderen Scope gespeichert ist
+    const cacheResult = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
+    const existingCache = cacheResult[CONTACTS_CACHE_KEY];
+    let pubkey = existingCache?.pubkey || null;
+    
+    // Falls kein pubkey im Cache, aus Key Manager holen
+    if (!pubkey) {
+      pubkey = await getKnownPublicKeyHex();
+    }
+    
     if (!pubkey) {
       return { contacts: [], source: 'none', reason: 'no_key' };
     }
     const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
-    const includeWpMembers = Boolean(wpApi);
+    const cachedWpMembers = await getCachedWpMembers(wpApi);
+    const includeWpMembers = Boolean(wpApi) || Boolean(cachedWpMembers?.members?.length);
 
-    // Cache prüfen
-    const cached = await getCachedContacts(scope, includeWpMembers);
+    // Cache prüfen - an pubkey gebunden, nicht scope
+    const cached = await getCachedContacts(pubkey, includeWpMembers);
     if (cached) {
       return { contacts: cached, source: 'cache' };
     }
@@ -2504,17 +2629,35 @@ async function handleMessage(request, sender) {
     const pubkeys = nostrContacts.map(c => c.pubkey);
     const profiles = await fetchProfiles(pubkeys, relayUrl);
 
-    // WP Members falls wpApi vorhanden
+    // WP Members falls wpApi vorhanden - mit Cache nutzen
     let wpMembers = [];
+    let wpMembersStale = false;
+    if (cachedWpMembers) {
+      wpMembers = cachedWpMembers.members;
+      wpMembersStale = cachedWpMembers.isStale;
+    }
+      
     if (wpApi) {
-      wpMembers = await fetchWpMembers(wpApi);
+      // Wenn kein Cache oder stale, neu laden
+      if (!cachedWpMembers || cachedWpMembers.isStale) {
+        const freshWpMembers = await fetchWpMembers(wpApi);
+        if (freshWpMembers.length > 0) {
+          wpMembers = freshWpMembers;
+          await setCachedWpMembers(wpApi, freshWpMembers);
+          wpMembersStale = false;
+        }
+      }
     }
 
     // Merge
     const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
-    await setCachedContacts(scope, contacts, includeWpMembers);
+    await setCachedContacts(pubkey, contacts, includeWpMembers);
 
-    return { contacts, source: 'fresh' };
+    return { 
+      contacts, 
+      source: 'fresh',
+      wpMembersStale 
+    };
   }
 
   // NOSTR_REFRESH_CONTACTS - Kontaktliste aktualisieren (Force-Refresh)
@@ -2525,7 +2668,6 @@ async function handleMessage(request, sender) {
 
     await clearContactsCache();
 
-    const scope = normalizeKeyScope(request.payload?.scope);
     const pubkey = await getKnownPublicKeyHex();
     if (!pubkey) {
       return { contacts: [], source: 'none', reason: 'no_key' };
@@ -2543,11 +2685,15 @@ async function handleMessage(request, sender) {
 
     let wpMembers = [];
     if (wpApi) {
+      // WP Members neu laden (Force-Refresh)
       wpMembers = await fetchWpMembers(wpApi);
+      if (wpMembers.length > 0) {
+        await setCachedWpMembers(wpApi, wpMembers);
+      }
     }
 
     const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
-    await setCachedContacts(scope, contacts, includeWpMembers);
+    await setCachedContacts(pubkey, contacts, includeWpMembers);
 
     return { contacts, source: 'fresh' };
   }
@@ -2558,8 +2704,59 @@ async function handleMessage(request, sender) {
       throw new Error('WP members are only available from extension UI');
     }
 
-    const wpMembers = await fetchWpMembers(request.payload?.wpApi);
-    return { members: wpMembers };
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    if (!wpApi) {
+      return { members: [], source: 'none', reason: 'no_wp_api' };
+    }
+
+    // Cache prüfen
+    const cached = await getCachedWpMembers(wpApi);
+    
+    // Wenn Cache vorhanden und nicht stale, zurückgeben
+    if (cached && !cached.isStale) {
+      return { 
+        members: cached.members, 
+        source: 'cache',
+        fetchedAt: cached.fetchedAt
+      };
+    }
+
+    // Wenn Cache vorhanden aber stale, Info zurückgeben damit UI fragen kann
+    if (cached && cached.isStale) {
+      return {
+        members: cached.members,
+        source: 'cache_stale',
+        fetchedAt: cached.fetchedAt,
+        isStale: true,
+        staleSince: Date.now() - cached.fetchedAt
+      };
+    }
+
+    // Kein Cache: neu laden
+    const wpMembers = await fetchWpMembers(wpApi);
+    if (wpMembers.length > 0) {
+      await setCachedWpMembers(wpApi, wpMembers);
+    }
+    return { members: wpMembers, source: 'fresh' };
+  }
+
+  // NOSTR_REFRESH_WP_MEMBERS - WP Mitglieder neu laden (Force-Refresh)
+  if (request.type === 'NOSTR_REFRESH_WP_MEMBERS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('WP members refresh is only available from extension UI');
+    }
+
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    if (!wpApi) {
+      return { members: [], source: 'none', reason: 'no_wp_api' };
+    }
+
+    // Neu laden
+    const wpMembers = await fetchWpMembers(wpApi);
+    if (wpMembers.length > 0) {
+      await setCachedWpMembers(wpApi, wpMembers);
+    }
+    return { members: wpMembers, source: 'fresh' };
   }
 
   // ============================================================
