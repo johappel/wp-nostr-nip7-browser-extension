@@ -1,14 +1,3 @@
-// Helper to ensure key is always a valid Uint8Array in current context
-function ensureUint8(key) {
-  if (!key) return key;
-  if (key instanceof Uint8Array) return key;
-  // If it's an object/array-like (from storage serialization)
-  if (Array.isArray(key)) return new Uint8Array(key);
-  // Specifically handle Object.values for {0: x, 1: y} which is common in Chrome storage
-  if (typeof key === 'object') return new Uint8Array(Object.values(key));
-  return key;
-}
-
 // Background Service Worker
 // Importiert nostr-tools via Rollup Bundle
 
@@ -20,6 +9,16 @@ import {
   handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt,
   getNip44ConversationKey, nip44EncryptWithKey, nip44DecryptWithKey
 } from './lib/crypto-handlers.js';
+import {
+  ensureUint8,
+  randomizeTimestamp,
+  createRumor, createSeal, createGiftWrap, createGiftWrappedDM,
+  unwrapGiftWrap,
+  DM_CACHE_KEY, DM_CACHE_MAX_MESSAGES, DM_UNREAD_COUNT_KEY, DM_NOTIFICATIONS_KEY,
+  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache,
+  incrementUnreadCount, clearUnreadCount, getUnreadCount,
+  formatShortHex
+} from './lib/nip17-chat.js';
 
 const CURRENT_VERSION = '1.0.0';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
@@ -1154,210 +1153,7 @@ async function clearContactsCache() {
   } catch { /* ignore */ }
 }
 
-// ============================================================
-// NIP-17 Direktnachrichten (Gift-Wrapped DMs)
-// ============================================================
-
-const DM_CACHE_KEY = 'nostrDmCacheV1';
-const DM_CACHE_MAX_MESSAGES = 500;
-const DM_UNREAD_COUNT_KEY = 'dmUnreadCount';
-const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
-
-/**
- * Randomisiert einen Timestamp um ±5 Minuten für Gift Wrap/Seal.
- * @returns {number} - Unix Timestamp mit Jitter
- */
-function randomizeTimestamp() {
-  const now = Math.floor(Date.now() / 1000);
-  // ±5 Minuten Jitter (300 Sekunden) statt 2 Tage, um Relay-Limits nicht zu verletzen.
-  // Viele Relays weisen Events ab, die zu weit in der Vergangenheit/Zukunft liegen.
-  const jitter = Math.floor(Math.random() * 600) - 300; 
-  return now + jitter;
-}
-
-/**
- * Erstellt einen Rumor (Kind 14) - die eigentliche Nachricht.
- * NICHT signiert (Abstreitbarkeit).
- * @param {string} senderPubkey - Hex pubkey des Absenders
- * @param {string} recipientPubkey - Hex pubkey des Empfängers
- * @param {string} content - Klartext-Nachricht
- * @returns {Object} - Rumor Event (nicht signiert)
- */
-function createRumor(senderPubkey, recipientPubkey, content) {
-  return {
-    kind: 14,
-    created_at: Math.floor(Date.now() / 1000), // Echter Zeitstempel
-    tags: [['p', recipientPubkey]],
-    content: content,
-    pubkey: senderPubkey
-  };
-}
-
-/**
- * Erstellt einen Seal (Kind 13) - signiert mit Absender-Key.
- * @param {Uint8Array} senderPrivateKey - Secret Key des Absenders
- * @param {string} senderPubkey - Hex pubkey des Absenders
- * @param {string} recipientPubkey - Hex pubkey des Empfängers
- * @param {Object} rumor - Der Rumor (Kind 14)
- * @returns {Object} - Signiertes Seal Event (Kind 13)
- */
-function createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor) {
-  // Conversation Key für NIP-44 Encryption
-  const conversationKey = getNip44ConversationKey(senderPrivateKey, recipientPubkey);
-  
-  // Rumor als JSON verschlüsseln
-  const sealContent = nip44EncryptWithKey(JSON.stringify(rumor), conversationKey);
-  
-  // Seal Event erstellen und signieren
-  return finalizeEvent({
-    kind: 13,
-    created_at: randomizeTimestamp(), // Randomisierter Zeitstempel
-    tags: [],
-    content: sealContent
-  }, senderPrivateKey);
-}
-
-/**
- * Erstellt einen Gift Wrap (Kind 1059) - signiert mit Wegwerf-Key.
- * @param {Object} seal - Das signierte Seal Event (Kind 13)
- * @param {string} recipientPubkey - Hex pubkey des Empfängers
- * @returns {Object} - Signiertes Gift Wrap Event (Kind 1059)
- */
-function createGiftWrap(seal, recipientPubkey) {
-  // Neuen Wegwerf-Schlüssel generieren
-  const wrapKey = generateSecretKey();
-  
-  // Conversation Key für NIP-44 Encryption (Wegwerf-Key → Empfänger)
-  const conversationKey = getNip44ConversationKey(wrapKey, recipientPubkey);
-  
-  // Seal als JSON verschlüsseln
-  const wrapContent = nip44EncryptWithKey(JSON.stringify(seal), conversationKey);
-  
-  // Gift Wrap Event erstellen und signieren
-  const giftWrap = finalizeEvent({
-    kind: 1059,
-    created_at: randomizeTimestamp(), // Randomisierter Zeitstempel
-    tags: [['p', recipientPubkey]],
-    content: wrapContent
-  }, wrapKey);
-  
-  // Wegwerf-Schlüssel sicher löschen
-  wrapKey.fill(0);
-  
-  return giftWrap;
-}
-
-/**
- * Erstellt eine vollständige Gift-Wrapped DM.
- * @param {Uint8Array} senderPrivateKey - Secret Key des Absenders
- * @param {string} recipientPubkey - Hex pubkey des Empfängers
- * @param {string} content - Klartext-Nachricht
- * @returns {Object} - { wrapForRecipient, wrapForSelf, rumorId }
- */
-function createGiftWrappedDM(senderPrivateKey, recipientPubkey, content) {
-  const senderPubkey = getPublicKey(senderPrivateKey);
-  
-  // 1. Rumor erstellen (Kind 14, nicht signiert)
-  const rumor = createRumor(senderPubkey, recipientPubkey, content);
-  
-  // 2. Seal für Empfänger erstellen (Kind 13, signiert mit Absender-Key)
-  const sealForRecipient = createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor);
-  
-  // 3. Gift Wrap für Empfänger (Kind 1059, Wegwerf-Key)
-  const wrapForRecipient = createGiftWrap(sealForRecipient, recipientPubkey);
-  
-  // 4. Seal für Absender erstellen (Self-Copy)
-  // WICHTIG: Um es später lesen zu können, muss der Seal auch für uns selbst verschlüsselt sein!
-  // Wir nutzen hier senderPubkey als recipient, damit SharedSecret(Me, Me) genutzt wird.
-  const sealForSelf = createSeal(senderPrivateKey, senderPubkey, senderPubkey, rumor);
-
-  // 5. Gift Wrap für Absender (Selbst-Kopie)
-  const wrapForSelf = createGiftWrap(sealForSelf, senderPubkey);
-  
-  return {
-    wrapForRecipient,
-    wrapForSelf,
-    rumorId: rumor.created_at + ':' + senderPubkey.slice(0, 8)
-  };
-}
-
-/**
- * Entschlüsselt einen Gift Wrap und extrahiert die Nachricht.
- * @param {Uint8Array} recipientPrivateKey - Secret Key des Empfängers
- * @param {Object} giftWrapEvent - Das Gift Wrap Event (Kind 1059)
- * @returns {Object} - Entschlüsselte Nachricht
- */
-function unwrapGiftWrap(recipientPrivateKey, giftWrapEvent) {
-  // Safety check: ensure recipientPrivateKey is Uint8Array
-  if (!(recipientPrivateKey instanceof Uint8Array)) {
-    // Falls es ein Object/Array ist, versuchen wir es zu konvertieren
-    if (recipientPrivateKey && typeof recipientPrivateKey === 'object') {
-       // Wenn es ein Object mit nummerierten Keys ist (Serialize issue) oder Array
-       const vals = Array.isArray(recipientPrivateKey) ? recipientPrivateKey : Object.values(recipientPrivateKey);
-       recipientPrivateKey = new Uint8Array(vals);
-    }
-  }
-
-  // 1. Gift Wrap entschlüsseln → Seal
-
-  // Der pubkey im Gift Wrap ist der Wegwerf-Key (nicht der Absender!)
-  const wrapConversationKey = getNip44ConversationKey(recipientPrivateKey, giftWrapEvent.pubkey);
-  
-  let seal;
-  try {
-    const sealJson = nip44DecryptWithKey(giftWrapEvent.content, wrapConversationKey);
-    seal = JSON.parse(sealJson);
-  } catch (e) {
-    throw new Error('Failed to decrypt gift wrap: ' + e.message);
-  }
-  
-  // 2. Seal validieren (muss Kind 13 sein)
-  if (seal.kind !== 13) {
-    throw new Error('Invalid seal kind: expected 13, got ' + seal.kind);
-  }
-  
-  // 3. Seal entschlüsseln → Rumor
-  // Der pubkey im Seal ist der echte Absender!
-  const sealConversationKey = getNip44ConversationKey(recipientPrivateKey, seal.pubkey);
-  
-  let rumor;
-  try {
-    const rumorJson = nip44DecryptWithKey(seal.content, sealConversationKey);
-    rumor = JSON.parse(rumorJson);
-  } catch (e) {
-    throw new Error('Failed to decrypt seal: ' + e.message);
-  }
-  
-  // 4. Rumor validieren
-  if (rumor.kind !== 14) {
-    throw new Error('Invalid rumor kind: expected 14, got ' + rumor.kind);
-  }
-  
-  // 5. Pubkey-Consistency Check: Seal pubkey muss mit Rumor pubkey übereinstimmen
-  if (rumor.pubkey !== seal.pubkey) {
-    throw new Error('Pubkey mismatch: seal pubkey does not match rumor pubkey');
-  }
-  
-  // Empfänger aus p-Tag extrahieren
-  const recipientTag = rumor.tags?.find(t => t[0] === 'p');
-  const recipientPubkey = recipientTag?.[1] || '';
-  
-  // Eindeutige ID generieren (basierend auf Inhalt + Timestamp + Sender um Kollisionen zu vermeiden)
-  // Einfache Hash-Alternative für Strings:
-  const contentHash = Array.from(rumor.content).reduce((h, c) => Math.imul(31, h) + c.charCodeAt(0) | 0, 0).toString(16);
-
-  return {
-    id: giftWrapEvent.id, // ID des Gift Wraps als Referenz nutzen (eindeutig auf Relay)
-    innerId: rumor.id || (rumor.created_at + ':' + rumor.pubkey.slice(0, 8) + ':' + contentHash),
-    pubkey: rumor.pubkey,
-    content: rumor.content,
-    createdAt: rumor.created_at,
-    kind: rumor.kind,
-    tags: rumor.tags,
-    senderPubkey: rumor.pubkey,
-    recipientPubkey: recipientPubkey
-  };
-}
+// NIP-17 Protokoll-Funktionen → importiert aus ./lib/nip17-chat.js
 
 /**
  * Ruft DM-Relays eines Pubkeys ab (Kind 10050).
@@ -1650,90 +1446,10 @@ class RelayConnectionManager {
 // Singleton Instance
 const relayManager = new RelayConnectionManager();
 
-// ============================================================
-// DM Cache Funktionen
-// ============================================================
-
-/**
- * Speichert eine Nachricht im Cache.
- * @param {Object} msg - Die Nachricht
- * @param {string} scope - Der Key Scope
- */
-async function cacheDmMessage(msg, scope) {
-  try {
-    const result = await chrome.storage.local.get([DM_CACHE_KEY]);
-    const cache = result[DM_CACHE_KEY] || { scope, messages: [] };
-    
-    // Deduplizierung über giftWrapId
-    if (cache.messages.some(m => m.giftWrapId === msg.giftWrapId)) return;
-    
-    cache.messages.push({
-      ...msg,
-      receivedAt: msg.receivedAt || Date.now()
-    });
-    
-    // Nach createdAt sortieren
-    cache.messages.sort((a, b) => a.createdAt - b.createdAt);
-    
-    // Max-Größe begrenzen
-    if (cache.messages.length > DM_CACHE_MAX_MESSAGES) {
-      cache.messages = cache.messages.slice(-DM_CACHE_MAX_MESSAGES);
-    }
-    
-    cache.scope = scope;
-    cache.updatedAt = Date.now();
-    
-    await chrome.storage.local.set({ [DM_CACHE_KEY]: cache });
-  } catch (error) {
-    console.warn('[NIP-17] Failed to cache message:', error.message);
-  }
-}
-
-/**
- * Speichert mehrere Nachrichten im Cache.
- */
-async function cacheDmMessages(messages, scope) {
-  for (const msg of messages) {
-    await cacheDmMessage(msg, scope);
-  }
-}
-
-/**
- * Holt Nachrichten aus dem Cache.
- * @param {string} scope - Der Key Scope
- * @param {string} contactPubkey - Optional: Filter nach Kontakt
- * @returns {Promise<Array>} - Array von Nachrichten
- */
-async function getCachedDmMessages(scope, contactPubkey = null) {
-  try {
-    const result = await chrome.storage.local.get([DM_CACHE_KEY]);
-    const cache = result[DM_CACHE_KEY];
-    if (!cache || cache.scope !== scope) return [];
-    
-    let messages = cache.messages || [];
-    if (contactPubkey) {
-      messages = messages.filter(m =>
-        m.senderPubkey === contactPubkey || m.recipientPubkey === contactPubkey
-      );
-    }
-    
-    return messages;
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Löscht den DM Cache.
- */
-async function clearDmCache() {
-  try {
-    await chrome.storage.local.remove([DM_CACHE_KEY]);
-  } catch { /* ignore */ }
-}
+// DM Cache, Unread Counter, formatShortHex → importiert aus ./lib/nip17-chat.js
 
 // ============================================================
-// Notification System
+// Notification System (bleibt in background.js wegen getContactProfile)
 // ============================================================
 
 /**
@@ -1769,7 +1485,6 @@ async function showDmNotification(msg) {
  */
 async function getContactProfile(pubkey) {
   try {
-    // Versuche aus Contacts-Cache zu holen
     const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
     const cache = result[CONTACTS_CACHE_KEY];
     if (cache?.contacts) {
@@ -1785,60 +1500,6 @@ async function getContactProfile(pubkey) {
     return null;
   } catch {
     return null;
-  }
-}
-
-/**
- * Formatiert einen Pubkey kurz für Anzeige.
- * @param {string} pubkey - Hex pubkey
- * @returns {string} - Formatierter String
- */
-function formatShortHex(pubkey) {
-  if (!pubkey || pubkey.length < 16) return pubkey || '';
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
-}
-
-/**
- * Inkrementiert den Unread-Counter.
- */
-async function incrementUnreadCount() {
-  try {
-    const result = await chrome.storage.local.get([DM_UNREAD_COUNT_KEY]);
-    const count = (result[DM_UNREAD_COUNT_KEY] || 0) + 1;
-    await chrome.storage.local.set({ [DM_UNREAD_COUNT_KEY]: count });
-    
-    // Badge setzen
-    if (count > 0) {
-      chrome.action.setBadgeText({ text: count > 99 ? '99+' : String(count) });
-      chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' });
-    }
-  } catch (error) {
-    console.warn('[NIP-17] Failed to increment unread count:', error.message);
-  }
-}
-
-/**
- * Setzt den Unread-Counter zurück.
- */
-async function clearUnreadCount() {
-  try {
-    await chrome.storage.local.set({ [DM_UNREAD_COUNT_KEY]: 0 });
-    chrome.action.setBadgeText({ text: '' });
-  } catch (error) {
-    console.warn('[NIP-17] Failed to clear unread count:', error.message);
-  }
-}
-
-/**
- * Holt den aktuellen Unread-Counter.
- * @returns {Promise<number>}
- */
-async function getUnreadCount() {
-  try {
-    const result = await chrome.storage.local.get([DM_UNREAD_COUNT_KEY]);
-    return result[DM_UNREAD_COUNT_KEY] || 0;
-  } catch {
-    return 0;
   }
 }
 
@@ -3018,19 +2679,16 @@ async function handleMessage(request, sender) {
     }
 
     const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
-    
-    // Use scoped KeyManager instance to avoid race conditions with global keyManager state
-    const scopedKm = new KeyManager(chrome.storage.local, activeKeyScope);
 
-    // Private Key holen
-    const hasKey = await scopedKm.hasKey();
+    // Private Key holen (use global keyManager, already scoped by ensureKeyScope)
+    const hasKey = await keyManager.hasKey();
     if (!hasKey) {
       throw new Error('No local key found for this scope.');
     }
 
-    const protectionMode = await scopedKm.getProtectionMode();
+    const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKeyRaw = await scopedKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    const privateKeyRaw = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!privateKeyRaw) {
       throw new Error('Failed to unlock key');
     }
@@ -3111,8 +2769,6 @@ async function handleMessage(request, sender) {
 
     const { relayUrl, since, limit, contactPubkey } = request.payload || {};
     const scope = activeKeyScope;
-    // Use scoped KeyManager instance to avoid race conditions with global keyManager state
-    const scopedKm = new KeyManager(chrome.storage.local, scope);
 
     // Zuerst aus Cache holen
     const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
@@ -3126,25 +2782,21 @@ async function handleMessage(request, sender) {
       // Da wir deduplizieren, ist Over-Fetching okay.
       fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
     }
-scopedKm.hasKey();
+    
+    // Private Key für Entschlüsselung
+    // Use the global keyManager which was correctly scoped by ensureKeyScope() at the top
+    const hasKey = await keyManager.hasKey();
     if (!hasKey) {
-      return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' }; // Return cache if no key
+      return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' };
     }
 
     try {
-      const protectionMode = await scopedKm.getProtectionMode();
-      // Hier kein interaktiver Prompt wenn Cache da ist? 
-      // Doch, wir brauchen den Key zum Entschlüsseln neuer Nachrichten.
-      // Falls User abbricht, geben wir Cache zurück.
+      const protectionMode = await keyManager.getProtectionMode();
       let privateKey;
-      let rawKey; // Hoisted for debug access
-      let password; // Hoisted for debug access
 
       try {
-        password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        rawKey = await scopedKm
-        password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+        const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+        const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
         privateKey = ensureUint8(rawKey);
       } catch (e) {
         if (cachedMessages.length > 0) {
@@ -3152,27 +2804,13 @@ scopedKm.hasKey();
         }
         throw e;
       }
-      
-      // Safety check specifically for getPublicKey which might throw if key type is slightly off
-      if (!privateKey || !(privateKey instanceof Uint8Array)) {
-         console.error('[Nostr Key Debug] Failure details:', {
-             mode: protectionMode,
-             hasPassword: !!password,
-             rawKeyType: typeof rawKey,
-             rawKeyVal: rawKey ? 'PRESENT' : 'NULL', // Avoid dumping full key
-             ensureResult: privateKey
-         });
-         
-         // Try one last desperate recovery if rawKey exists but conversion failed
-         if (rawKey && typeof rawKey === 'object') {
-             try {
-                privateKey = new Uint8Array(Object.values(rawKey));
-             } catch(e) { console.error('Recovery failed', e); }
-         }
 
-         if (!privateKey || !(privateKey instanceof Uint8Array)) {
-             throw new Error(`Private key is null/undefined after unlock (Mode: ${protectionMode}, Raw: ${typeof rawKey})`);
-         }
+      if (!privateKey || privateKey.length !== 32) {
+        console.error('[NIP-17] Key unlock failed. hasKey=true but getKey returned:', privateKey ? `length=${privateKey.length}` : 'null');
+        if (cachedMessages.length > 0) {
+          return { messages: cachedMessages, source: 'cache_fallback', reason: 'key_unlock_failed' };
+        }
+        throw new Error('Failed to unlock key for DM decryption');
       }
 
       const myPubkey = getPublicKey(privateKey);
@@ -3187,13 +2825,16 @@ scopedKm.hasKey();
       
       inboxRelays = inboxRelays.map(normalizeRelayUrl).filter(Boolean);
 
+      // Fallback-Relays wenn damus.io down ist (520-Fehler)
+      const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+
       // 2. Falls nicht, versuchen wir unsere eigenen Inbox-Relays herauszufinden (NIP-17 Kind 10050)
       if (inboxRelays.length === 0) {
         try {
-           const discovered = await fetchDmRelays(myPubkey, 'wss://relay.damus.io');
-           inboxRelays = discovered.length > 0 ? discovered : ['wss://relay.damus.io', 'wss://nos.lol'];
+           const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS[0]);
+           inboxRelays = discovered.length > 0 ? discovered : DEFAULT_DM_RELAYS;
         } catch(e) {
-           inboxRelays = ['wss://relay.damus.io', 'wss://nos.lol'];
+           inboxRelays = DEFAULT_DM_RELAYS;
         }
       }
 
@@ -3307,26 +2948,32 @@ scopedKm.hasKey();
 
     const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-    if (!privateKey) {
+    const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!rawKey) {
       throw new Error('Failed to unlock key');
     }
+    const privateKey = ensureUint8(rawKey);
 
     try {
       const myPubkey = getPublicKey(privateKey);
       const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+      // WICHTIG: Kopie des Keys für die Subscription erstellen!
+      // Die Subscription läuft weiter und braucht den Key für jeden eingehenden Gift Wrap.
+      // Das Original wird im finally-Block sicher gelöscht.
+      const subscriptionKey = new Uint8Array(privateKey);
 
       // Subscription starten
       if (activeDmSubscriptionId) {
           relayManager.unsubscribe(activeDmSubscriptionId);
           activeDmSubscriptionId = null;
       }
-      const subId = await startDmSubscription(scope, normalizedRelay, myPubkey, privateKey);
+      const subId = await startDmSubscription(scope, normalizedRelay, myPubkey, subscriptionKey);
       activeDmSubscriptionId = subId;
 
       return { subscriptionId: subId, status: 'active', relay: normalizedRelay };
     } finally {
-      privateKey.fill(0);
+      privateKey.fill(0); // Original sicher löschen - Subscription hat eigene Kopie
     }
   }
 
@@ -3396,10 +3043,11 @@ scopedKm.hasKey();
 
     const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-    if (!privateKey) {
+    const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!rawKey) {
       return { success: false, reason: 'locked' };
     }
+    const privateKey = ensureUint8(rawKey);
 
     try {
       const myPubkey = getPublicKey(privateKey);

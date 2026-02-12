@@ -1897,6 +1897,16 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
   });
 }
 
+// CSP-compliant avatar error handling (replaces inline onerror)
+document.addEventListener('error', function(e) {
+  if (e.target.tagName === 'IMG' && e.target.dataset.fallback === 'avatar') {
+    const parent = e.target.parentElement;
+    if (parent) {
+      parent.innerHTML = '<span class="contact-avatar-placeholder">👤</span>';
+    }
+  }
+}, true); // 'true' = capture phase to catch img errors
+
 function renderContactItem(contact) {
   const pubkey = String(contact.pubkey || '');
   const displayName = String(contact.displayName || contact.name || '').trim() || formatShortHex(pubkey);
@@ -1907,7 +1917,7 @@ function renderContactItem(contact) {
   // We use the CSS from TASK-20 which expects specific structure
   
   const avatarHtml = avatarUrl
-    ? `<img src="${escapeHtml(avatarUrl)}" class="contact-avatar-img" alt="" onerror="this.onerror=null;this.parentElement.innerHTML='<span class=\\'contact-avatar-placeholder\\'>👤</span>'" />`
+    ? `<img src="${escapeHtml(avatarUrl)}" class="contact-avatar-img" alt="" data-fallback="avatar" />`
     : '<span class="contact-avatar-placeholder">👤</span>';
   
   // Placeholder for last message (TASK-20 optional: "preview")
