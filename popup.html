@@ -36,14 +36,28 @@
       <!-- View: Home -->
       <div class="view active" id="view-home">
         <div class="view-header">
-          <h2>Home</h2>
-          <button id="refresh-user" class="btn-secondary btn-small" type="button" title="Neu laden">↻</button>
+          <h2>Kontakte</h2>
+          <div class="view-header-actions">
+            <button id="refresh-contacts" class="btn-secondary btn-small" type="button" title="Kontakte neu laden">↻</button>
+          </div>
         </div>
-        <div class="home-content">
-          <p class="hint">Kontaktliste und Chat-Übersicht werden in TASK-20 implementiert.</p>
-          <div id="home-placeholder" class="wp-user-card">
-            <p class="empty">Willkommen bei WP Nostr Signer!</p>
-            <p class="hint">Klicke auf dein Profil oben, um deine Nostr-Identität zu verwalten.</p>
+        
+        <!-- Search/Filter -->
+        <div class="contact-search">
+          <input id="contact-search-input" type="text" placeholder="Kontakte durchsuchen..." />
+        </div>
+        
+        <!-- Source Filter -->
+        <div class="contact-filter">
+          <button class="filter-btn active" data-source="all">Alle</button>
+          <button class="filter-btn" data-source="nostr">Nostr</button>
+          <button class="filter-btn" data-source="wordpress">WordPress</button>
+        </div>
+        
+        <!-- Contact List -->
+        <div class="contact-list" id="contact-list">
+          <div class="contact-loading">
+            <p class="empty">Kontakte werden geladen...</p>
           </div>
         </div>
       </div>

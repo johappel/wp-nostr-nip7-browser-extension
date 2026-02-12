@@ -406,6 +406,7 @@ case 'NOSTR_SUBSCRIBE_DMS':
 
 ## Akzeptanzkriterien
 
+### NIP-17 Protokoll
 - [ ] DM senden: Kind 14 → Kind 13 → Kind 1059 korrekt verschachtelt
 - [ ] Selbst-Kopie: Gift Wrap wird auch für den Absender erstellt
 - [ ] DM empfangen: Gift Wrap → Seal → Rumor korrekt entschlüsselt
@@ -413,12 +414,28 @@ case 'NOSTR_SUBSCRIBE_DMS':
 - [ ] Zeitstempel-Randomisierung: Seal und Gift Wrap haben Jitter (±2 Tage)
 - [ ] Kind 10050 DM-Relay Discovery funktioniert
 - [ ] Fallback auf eigenes Relay wenn Empfänger kein Kind 10050 hat
+- [ ] NIP-44 v2 Encryption wird korrekt verwendet
+
+### Background Worker Relay-Architektur
+- [ ] RelayConnectionManager Klasse implementiert
+- [ ] Auto-Reconnect bei WebSocket-Verbindungsabbruch
+- [ ] Keep-Alive Alarm alle 24 Sekunden (unter MV3 30s Grenze)
+- [ ] Persistente Subscription für Kind 1059 Events
+- [ ] Nachrichten werden im Background entschlüsselt und gecacht
+- [ ] Desktop Notifications für neue DMs
+- [ ] Badge-Counter für ungelesene Nachrichten
+- [ ] Fallback-Polling alle 5 Minuten
+
+### Cache & Storage
 - [ ] Nachrichten-Cache in `chrome.storage.local` (max 500 Messages)
 - [ ] Deduplizierung über `giftWrapId`
+- [ ] Unread-Counter persistiert in Storage
+
+### Sicherheit
 - [ ] Private Key wird nur im Background Worker verarbeitet, nie im Popup
 - [ ] Unlock-Flow (Passkey/Passwort) wird vor jeder Key-Operation durchlaufen
-- [ ] NIP-44 v2 Encryption wird korrekt verwendet
 - [ ] WebSocket-Verbindungen nur `wss://`
+- [ ] Private Key nach Nutzung aus Variablen gelöscht
 
 ## Sicherheitshinweise
 
@@ -429,10 +446,361 @@ case 'NOSTR_SUBSCRIBE_DMS':
 - **Abstreitbarkeit**: Rumor wird NICHT signiert (nur Seal wird signiert)
 - **NIP-04 Kompatibilität**: Wird NICHT implementiert (deprecated)
 
+## Background-Worker Relay-Architektur
+
+### Warum persistente Relay-Verbindungen im Background?
+
+**Vorteile:**
+1. **Persistente Relay-Verbindungen** - WebSocket bleibt erhalten auch wenn Popup/Tab geschlossen wird
+2. **Echtzeit-Benachrichtigungen** - Neue Nachrichten können Desktop-Notifications triggern
+3. **Zentrale Nachrichtenverwaltung** - Alle Chat-Nachrichten an einem Ort (`chrome.storage.local`)
+4. **Badge-Counter** - Ungelesene Nachrichten anzeigen auch wenn Popup geschlossen
+
+**Herausforderung MV3 Service Worker:**
+- Service Worker werden nach ~30 Sekunden Inaktivität beendet
+- WebSocket-Verbindungen werden dabei getrennt
+- Lösung: Keep-Alive Strategie mit `chrome.alarms`
+
+### Relay Connection Manager
+
+```javascript
+// background.js - Relay Connection Manager
+
+class RelayConnectionManager {
+  constructor() {
+    this.connections = new Map(); // relayUrl -> WebSocket
+    this.subscriptions = new Map(); // subId -> { filter, onMessage }
+    this.reconnectInterval = 30000;
+    this.keepAliveInterval = 25000; // < 30s für MV3
+  }
+
+  async connect(relayUrl) {
+    const normalized = normalizeRelayUrl(relayUrl);
+    if (!normalized) throw new Error('Invalid relay URL');
+
+    if (this.connections.has(normalized)) {
+      const existing = this.connections.get(normalized);
+      if (existing.readyState === WebSocket.OPEN) {
+        return existing;
+      }
+    }
+
+    const ws = new WebSocket(normalized);
+    
+    ws.onopen = () => {
+      console.log(`[Relay] Connected to ${normalized}`);
+      // Re-subscribe to existing subscriptions
+      this.resubscribeAll(normalized);
+    };
+
+    ws.onclose = () => {
+      console.log(`[Relay] Disconnected from ${normalized}`);
+      this.connections.delete(normalized);
+      // Auto-Reconnect nach Verzögerung
+      setTimeout(() => this.connect(normalized), this.reconnectInterval);
+    };
+
+    ws.onerror = (error) => {
+      console.warn(`[Relay] Error on ${normalized}:`, error);
+    };
+
+    ws.onmessage = (event) => {
+      this.handleMessage(normalized, event.data);
+    };
+
+    this.connections.set(normalized, ws);
+    return ws;
+  }
+
+  handleMessage(relayUrl, data) {
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+
+    if (!Array.isArray(parsed) || parsed.length < 2) return;
+
+    // ["EVENT", subId, event]
+    if (parsed[0] === 'EVENT' && parsed[2]) {
+      const subId = parsed[1];
+      const event = parsed[2];
+      const sub = this.subscriptions.get(subId);
+      if (sub?.onMessage) {
+        sub.onMessage(event, relayUrl);
+      }
+    }
+
+    // ["EOSE", subId]
+    if (parsed[0] === 'EOSE') {
+      const sub = this.subscriptions.get(parsed[1]);
+      if (sub?.onEose) {
+        sub.onEose();
+      }
+    }
+  }
+
+  async subscribe(relayUrl, filters, onMessage, onEose = null) {
+    const ws = await this.connect(relayUrl);
+    const subId = 'dm_' + Math.random().toString(36).slice(2);
+    
+    this.subscriptions.set(subId, { filters, onMessage, onEose });
+    
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(['REQ', subId, ...filters]));
+    }
+    
+    return subId;
+  }
+
+  unsubscribe(subId) {
+    this.subscriptions.delete(subId);
+    // Send CLOSE to all connected relays
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(['CLOSE', subId]));
+      }
+    }
+  }
+
+  resubscribeAll(relayUrl) {
+    const ws = this.connections.get(relayUrl);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    for (const [subId, sub] of this.subscriptions) {
+      ws.send(JSON.stringify(['REQ', subId, ...sub.filters]));
+    }
+  }
+
+  checkConnections() {
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        this.connect(relayUrl);
+      }
+    }
+  }
+
+  disconnect(relayUrl) {
+    const ws = this.connections.get(relayUrl);
+    if (ws) {
+      ws.close();
+      this.connections.delete(relayUrl);
+    }
+  }
+
+  disconnectAll() {
+    for (const [relayUrl] of this.connections) {
+      this.disconnect(relayUrl);
+    }
+  }
+}
+
+// Singleton Instance
+const relayManager = new RelayConnectionManager();
+```
+
+### Keep-Alive Strategie für MV3
+
+```javascript
+// Service Worker am Leben halten mit Alarms
+// MV3 Service Worker werden nach ~30s Inaktivität beendet
+
+// Alarm alle 25 Sekunden (unter 30s Grenze)
+chrome.alarms.create('relayKeepalive', { periodInMinutes: 0.4 }); // ~24s
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'relayKeepalive') {
+    // Prüfe Relay-Verbindungen, reconnect falls nötig
+    relayManager.checkConnections();
+  }
+});
+
+// Zusätzlicher Alarm für DM-Polling (Fallback)
+chrome.alarms.create('dmPolling', { periodInMinutes: 5 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'dmPolling') {
+    // Poll for new DMs in background
+    pollForNewDMs().catch(console.error);
+  }
+});
+```
+
+### NIP-17 Gift Wrap Subscription
+
+```javascript
+// Background-Subscription für eingehende DMs
+async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
+  const filters = [{
+    kinds: [1059],  // Gift Wrap
+    '#p': [myPubkey],
+    limit: 100
+  }];
+
+  const subId = await relayManager.subscribe(
+    relayUrl,
+    filters,
+    async (event, relayUrl) => {
+      // Neue Gift Wrap Nachricht empfangen
+      try {
+        const msg = await unwrapGiftWrap(privateKey, event);
+        msg.direction = 'in';
+        msg.receivedAt = Date.now();
+        
+        // In Cache speichern
+        await cacheMessage(msg, scope);
+        
+        // Notification auslösen
+        await showDmNotification(msg);
+        
+        // Badge-Counter updaten
+        await incrementUnreadCount();
+        
+      } catch (e) {
+        // Nicht für uns - silently skip
+        console.debug('[DM] Could not unwrap gift wrap:', e.message);
+      }
+    }
+  );
+
+  return subId;
+}
+```
+
+### Notification System
+
+```javascript
+// Desktop Notifications für neue DMs
+async function showDmNotification(msg) {
+  // Prüfen ob Notifications erlaubt sind
+  const settings = await chrome.storage.local.get(['dmNotifications']);
+  if (settings.dmNotifications === false) return;
+
+  // Absender-Profil laden für Anzeigename
+  const profile = await getContactProfile(msg.senderPubkey);
+  const displayName = profile?.displayName || formatShortHex(msg.senderPubkey);
+
+  chrome.notifications.create({
+    type: 'basic',
+    iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+    title: `Neue Nachricht von ${displayName}`,
+    message: msg.content.slice(0, 100) + (msg.content.length > 100 ? '...' : ''),
+    priority: 2
+  });
+}
+
+// Badge-Counter für ungelesene Nachrichten
+async function incrementUnreadCount() {
+  const result = await chrome.storage.local.get(['dmUnreadCount']);
+  const count = (result.dmUnreadCount || 0) + 1;
+  await chrome.storage.local.set({ dmUnreadCount: count });
+  
+  // Badge setzen
+  if (count > 0) {
+    chrome.action.setBadgeText({ text: count > 99 ? '99+' : String(count) });
+    chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' });
+  }
+}
+
+async function clearUnreadCount() {
+  await chrome.storage.local.set({ dmUnreadCount: 0 });
+  chrome.action.setBadgeText({ text: '' });
+}
+```
+
+### Message Handler für Subscription
+
+```javascript
+// In handleMessage() ergänzen:
+
+case 'NOSTR_SUBSCRIBE_DMS': {
+  const { scope, relayUrl } = request.payload;
+  
+  // Private Key holen
+  const mode = await keyManager.getProtectionMode();
+  const password = await ensureUnlockForMode(mode);
+  const privateKey = await keyManager.getKey(mode === 'password' ? password : null);
+  const myPubkey = getPublicKey(privateKey);
+  
+  // Subscription starten
+  const subId = await startDmSubscription(scope, relayUrl, myPubkey, privateKey);
+  
+  // Private Key sicher löschen
+  privateKey.fill(0);
+  
+  return { subscriptionId: subId, status: 'active' };
+}
+
+case 'NOSTR_UNSUBSCRIBE_DMS': {
+  const { subscriptionId } = request.payload;
+  relayManager.unsubscribe(subscriptionId);
+  return { status: 'unsubscribed' };
+}
+
+case 'NOSTR_GET_UNREAD_COUNT': {
+  const result = await chrome.storage.local.get(['dmUnreadCount']);
+  return { count: result.dmUnreadCount || 0 };
+}
+
+case 'NOSTR_CLEAR_UNREAD': {
+  await clearUnreadCount();
+  return { success: true };
+}
+```
+
+### Architektur-Diagramm
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                    Background Service Worker                     │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │              Relay Connection Manager                        ││
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                   ││
+│  │  │ Relay 1  │  │ Relay 2  │  │ Relay N  │  (WebSockets)     ││
+│  │  │ wss://.. │  │ wss://.. │  │ wss://.. │                   ││
+│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘                   ││
+│  └───────┼─────────────┼─────────────┼─────────────────────────┘│
+│          │             │             │                           │
+│  ┌───────▼─────────────▼─────────────▼─────────────────────────┐│
+│  │              Gift Wrap Handler                               ││
+│  │  • Unwrap Kind 1059 → Seal → Rumor                          ││
+│  │  • Validate & Decrypt                                        ││
+│  │  • Store in chrome.storage.local                            ││
+│  └──────────────────────────┬──────────────────────────────────┘│
+│                             │                                    │
+│  ┌──────────────────────────▼──────────────────────────────────┐│
+│  │              Notification Manager                            ││
+│  │  • Desktop Notifications                                     ││
+│  │  • Badge Counter                                             ││
+│  │  • Sound (optional)                                          ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                             │                                    │
+│  ┌──────────────────────────▼──────────────────────────────────┐│
+│  │              Keep-Alive (chrome.alarms)                      ││
+│  │  • relayKeepalive: alle 24s                                  ││
+│  │  • dmPolling: alle 5min (Fallback)                           ││
+│  └──────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+          ▲                                    │
+          │ chrome.runtime.sendMessage         │ chrome.storage.local
+          │                                    ▼
+┌─────────────────┐                  ┌─────────────────┐
+│    Popup UI     │                  │  Message Cache  │
+│  (popup.js)     │◄─────────────────│  (DMs, Contacts)│
+└─────────────────┘                  └─────────────────┘
+```
+
+## Entschiedene Fragen
+
+- **Echtzeit-Subscription vs. Polling**: Beides implementieren
+  - Persistente WebSocket-Subscription im Background Worker mit Keep-Alive
+  - Fallback-Polling alle 5 Minuten falls Verbindung verloren
+  - Popup liest aus Cache, Background managed Connections
+
 ## Offene Fragen
 
-- Soll eine Echtzeit-Subscription (persistente WebSocket) im Service Worker laufen, oder reicht Polling?
-  - Empfehlung: Polling beim Öffnen des Popups + optionaler Background-Alarm (chrome.alarms) alle 5 Minuten
 - Maximale Nachrichtenlänge begrenzen? (Vorschlag: 10.000 Zeichen)
 - Sollen auch Gruppen-DMs unterstützt werden? (NIP-17 erlaubt mehrere p-Tags)
   - Empfehlung: Erst 1:1, Gruppen als spätere Erweiterung
+- Sound-Benachrichtigung optional implementieren?

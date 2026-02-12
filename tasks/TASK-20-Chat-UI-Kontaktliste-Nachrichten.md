@@ -454,13 +454,68 @@ function renderMessages(messages, contactPubkey) {
     
     return `
       <div class="message-bubble ${isOutgoing ? 'message-out' : 'message-in'}">
-        <div class="message-content">${escapeHtml(msg.content)}</div>
+        <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
         <div class="message-time">${timeStr}</div>
       </div>
     `;
   }).join('');
 }
 ```
+
+### Minimal-Markdown-Rendering
+
+Für Chat-Nachrichten wird ein sicheres, minimales Markdown unterstützt:
+
+**Unterstützte Formate:**
+- `**bold**` → **bold**
+- `*italic*` → *italic*
+- `` `code` `` → `code`
+- `- list item` → • list item
+- `[text](url)` → Link mit `rel="nofollow noopener noreferrer"`
+
+```javascript
+/**
+ * Minimaler Markdown-Renderer für Chat-Nachrichten.
+ * Unterstützt: bold, italic, code, list items, links.
+ * Alle Links erhalten nofollow/noopener/noreferrer.
+ * 
+ * @param {string} text - Roher Nachrichtentext
+ * @returns {string} - HTML-String (sicher gerendert)
+ */
+function renderMinimalMarkdown(text) {
+  // 1. Erst HTML escapen (Sicherheit)
+  let escaped = escapeHtml(text);
+  
+  // 2. Inline-Code: `code` → <code>code</code>
+  escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+  
+  // 3. Bold: **text** → <strong>text</strong>
+  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  
+  // 4. Italic: *text* → <em>text</em> (nicht innerhalb von code/strong)
+  escaped = escaped.replace(/(?<![<code>])\*([^*]+)\*(?![<])/g, '<em>$1</em>');
+  
+  // 5. Links: [text](url) → <a href="url" rel="nofollow noopener noreferrer" target="_blank">text</a>
+  escaped = escaped.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
+  );
+  
+  // 6. List items: - text → • text (am Zeilenanfang)
+  escaped = escaped.replace(/^- (.+)$/gm, '• $1');
+  
+  // 7. Zeilenumbrüche: \n → <br>
+  escaped = escaped.replace(/\n/g, '<br>');
+  
+  return escaped;
+}
+```
+
+**Sicherheitsmerkmale:**
+- HTML wird zuerst escaped (`<` → `&lt;`, etc.)
+- Links erhalten `rel="nofollow noopener noreferrer"` um Phishing/Tracking zu verhindern
+- Keine Unterstützung für Bilder (`![]()`), Script-Tags oder andere gefährliche Elemente
+- `target="_blank"` öffnet Links in neuem Tab
 
 ### Nachricht senden
 
@@ -538,22 +593,37 @@ function getUnreadCount(messages, contactPubkey, lastReadTimestamp) {
 
 ## Akzeptanzkriterien
 
+### Kontaktliste
 - [ ] Home-View zeigt Kontaktliste mit Avatar, Name, letzte Nachricht, Zeitstempel
 - [ ] Ungelesene Nachrichten werden als Badge-Zahl angezeigt
 - [ ] Suchfeld filtert Kontakte in Echtzeit (Debounce 200ms)
 - [ ] Klick auf Kontakt öffnet Konversations-Ansicht
+- [ ] Relative Zeitangaben (2m, 1h, 3h, 1d)
+- [ ] Nachrichten-Vorschau in Kontaktliste wird bei langen Texten abgeschnitten
+
+### Konversations-Ansicht
 - [ ] Konversation zeigt Chat-Bubbles (eingehend links, ausgehend rechts)
 - [ ] Eingabefeld + Senden-Button zum Verfassen von Nachrichten
 - [ ] Optimistic Update: Gesendete Nachricht erscheint sofort in der UI
 - [ ] Zurück-Button kehrt zur Kontaktliste zurück
 - [ ] Leerer Zustand: Sinnvolle Hinweise wenn keine Kontakte / keine Nachrichten
 - [ ] Auto-Scroll zum neuesten Nachricht bei Konversations-Öffnung
-- [ ] Relative Zeitangaben (2m, 1h, 3h, 1d)
-- [ ] Dark/Light Mode korrekt (CSS Custom Properties)
-- [ ] Nachrichten-Vorschau in Kontaktliste wird bei langen Texten abgeschnitten
 - [ ] Enter-Taste sendet Nachricht
 - [ ] Konversation scrollbar bei vielen Nachrichten
 - [ ] Fehlerbehandlung: Sende-Fehler wird angezeigt, UI bleibt bedienbar
+
+### Minimal-Markdown
+- [ ] **bold** wird korrekt gerendert (`**text**`)
+- [ ] *italic* wird korrekt gerendert (`*text*`)
+- [ ] `code` wird korrekt gerendert (`` `code` ``)
+- [ ] List items werden mit Bullet-Point gerendert (`- item`)
+- [ ] Links werden gerendert mit `rel="nofollow noopener noreferrer"`
+- [ ] Links öffnen in neuem Tab (`target="_blank"`)
+- [ ] HTML in Nachrichten wird escaped (kein XSS möglich)
+- [ ] Zeilenumbrüche werden als `<br>` gerendert
+
+### Styling
+- [ ] Dark/Light Mode korrekt (CSS Custom Properties)
 
 ## Performance-Hinweise
 

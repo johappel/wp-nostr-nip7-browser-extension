@@ -38,6 +38,12 @@ async function onViewActivated(viewId) {
   // Diese Funktion wird nach dem View-Wechsel aufgerufen
   // und aktualisiert den Zustand der jeweiligen View
   switch (viewId) {
+    case 'home':
+      // Kontakte laden, wenn noch nicht geladen
+      if (currentContacts.length === 0) {
+        await loadContacts(false);
+      }
+      break;
     case 'keys':
       // Protection Row und Cloud-Backup werden beim Laden aktualisiert
       break;
@@ -195,6 +201,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (viewId) switchView(viewId);
     });
   }
+  
+  // Initialize contact list events
+  initContactListEvents();
 
   // User Hero → Profil-Dialog
   if (userHero) {
@@ -798,6 +807,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       showStatus('Kopieren fehlgeschlagen.', true);
     }
   });
+
+  // ========================================
+  // Initial Contact Load (Home View is active by default)
+  // ========================================
+  
+  await loadContacts(false);
 
 });
 
@@ -1692,4 +1707,236 @@ async function saveDmRelay(url) {
   }
   await chrome.storage.local.set({ [DM_RELAY_KEY]: normalized || '' });
   return normalized;
+}
+
+// ========================================
+// Contact List Functions (TASK-18)
+// ========================================
+
+const CONTACTS_CACHE_KEY = 'nostrContactsCacheV1';
+const CONTACTS_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
+
+let currentContacts = [];
+let currentContactFilter = 'all';
+let contactSearchQuery = '';
+
+async function loadContacts(forceRefresh = false) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  // Show loading state
+  contactList.innerHTML = '<div class="contact-loading"><p class="empty">Kontakte werden geladen...</p></div>';
+  
+  try {
+    // Check cache first
+    if (!forceRefresh) {
+      const cached = await getCachedContacts();
+      if (cached && cached.length > 0) {
+        currentContacts = cached;
+        renderContacts(cached, currentContactFilter, contactSearchQuery);
+        return;
+      }
+    }
+    
+    // Fetch from background
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_GET_CONTACTS',
+      payload: { forceRefresh }
+    });
+    
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+    
+    currentContacts = response?.result?.contacts || [];
+    renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+    
+    // Show status
+    const count = currentContacts.length;
+    if (count > 0) {
+      showStatus(`${count} Kontakt${count !== 1 ? 'e' : ''} geladen.`);
+    }
+  } catch (error) {
+    renderContactError(error.message || error);
+    showStatus(`Fehler beim Laden der Kontakte: ${error.message || error}`, true);
+  }
+}
+
+async function getCachedContacts() {
+  try {
+    const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
+    const cache = result?.[CONTACTS_CACHE_KEY];
+    if (!cache || typeof cache !== 'object') return null;
+    
+    const now = Date.now();
+    if (typeof cache.timestamp === 'number' && (now - cache.timestamp) < CONTACTS_CACHE_TTL) {
+      return Array.isArray(cache.contacts) ? cache.contacts : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheContacts(contacts) {
+  try {
+    await chrome.storage.local.set({
+      [CONTACTS_CACHE_KEY]: {
+        contacts,
+        timestamp: Date.now()
+      }
+    });
+  } catch {
+    // Cache failure is non-critical
+  }
+}
+
+function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  // Filter by source
+  let filtered = contacts;
+  if (sourceFilter !== 'all') {
+    filtered = filtered.filter(c => {
+      const sources = c.sources || [];
+      if (sourceFilter === 'nostr') return sources.includes('nostr');
+      if (sourceFilter === 'wordpress') return sources.includes('wordpress');
+      return true;
+    });
+  }
+  
+  // Filter by search query
+  if (searchQuery && searchQuery.trim()) {
+    const query = searchQuery.toLowerCase().trim();
+    filtered = filtered.filter(c => {
+      const name = String(c.displayName || c.name || '').toLowerCase();
+      const nip05 = String(c.nip05 || '').toLowerCase();
+      const npub = String(c.npub || '').toLowerCase();
+      return name.includes(query) || nip05.includes(query) || npub.includes(query);
+    });
+  }
+  
+  // Sort by displayName
+  filtered.sort((a, b) => {
+    const nameA = String(a.displayName || a.name || '').toLowerCase();
+    const nameB = String(b.displayName || b.name || '').toLowerCase();
+    return nameA.localeCompare(nameB);
+  });
+  
+  if (filtered.length === 0) {
+    renderEmptyContacts(contacts.length === 0 
+      ? 'Keine Kontakte gefunden. Verbinde deine Nostr-Identität oder logge dich in WordPress ein.'
+      : 'Keine Kontakte entsprechen dem Filter.');
+    return;
+  }
+  
+  const html = filtered.map(contact => renderContactItem(contact)).join('');
+  contactList.innerHTML = html;
+  
+  // Add click handlers
+  contactList.querySelectorAll('.contact-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const pubkey = item.dataset.pubkey;
+      if (pubkey) {
+        // For TASK-20: Open chat with this contact
+        showStatus(`Chat mit ${item.dataset.name || 'Kontakt'} wird in TASK-20 implementiert.`);
+      }
+    });
+  });
+}
+
+function renderContactItem(contact) {
+  const pubkey = String(contact.pubkey || '');
+  const npub = String(contact.npub || '');
+  const displayName = String(contact.displayName || contact.name || '').trim() || formatShortHex(pubkey);
+  const nip05 = String(contact.nip05 || '').trim();
+  const avatarUrl = String(contact.picture || contact.avatarUrl || '').trim();
+  
+  // Determine source badge
+  const sources = contact.sources || [];
+  let sourceLabel = 'nostr';
+  let sourceClass = 'nostr';
+  if (sources.includes('nostr') && sources.includes('wordpress')) {
+    sourceLabel = 'merged';
+    sourceClass = 'merged';
+  } else if (sources.includes('wordpress')) {
+    sourceLabel = 'wp';
+    sourceClass = 'wordpress';
+  }
+  
+  const avatarHtml = avatarUrl
+    ? `<img src="${escapeHtml(avatarUrl)}" alt="Avatar" onerror="this.parentElement.innerHTML='<span class=\\'contact-avatar-placeholder\\'>👤</span>'" />`
+    : '<span class="contact-avatar-placeholder">👤</span>';
+  
+  return `
+    <div class="contact-item" data-pubkey="${escapeHtml(pubkey)}" data-name="${escapeHtml(displayName)}" tabindex="0" role="button">
+      <div class="contact-avatar">${avatarHtml}</div>
+      <div class="contact-info">
+        <div class="contact-name">${escapeHtml(displayName)}</div>
+        <div class="contact-nip05">${escapeHtml(nip05 || formatShortHex(pubkey))}</div>
+      </div>
+      <span class="contact-source ${sourceClass}">${sourceLabel}</span>
+    </div>
+  `;
+}
+
+function renderEmptyContacts(message) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  contactList.innerHTML = `
+    <div class="contact-empty">
+      <p class="empty">${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function renderContactError(error) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  contactList.innerHTML = `
+    <div class="contact-error">
+      <p class="empty">Fehler: ${escapeHtml(error)}</p>
+    </div>
+  `;
+}
+
+function initContactListEvents() {
+  // Refresh button
+  const refreshButton = document.getElementById('refresh-contacts');
+  if (refreshButton) {
+    refreshButton.addEventListener('click', async () => {
+      refreshButton.disabled = true;
+      try {
+        await loadContacts(true);
+      } finally {
+        refreshButton.disabled = false;
+      }
+    });
+  }
+  
+  // Search input
+  const searchInput = document.getElementById('contact-search-input');
+  if (searchInput) {
+    let searchTimeout = null;
+    searchInput.addEventListener('input', () => {
+      if (searchTimeout) clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        contactSearchQuery = searchInput.value;
+        renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+      }, 200);
+    });
+  }
+  
+  // Filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentContactFilter = btn.dataset.source || 'all';
+      renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+    });
+  });
 }
