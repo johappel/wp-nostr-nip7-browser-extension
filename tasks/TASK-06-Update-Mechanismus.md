@@ -1,5 +1,11 @@
 # TASK-06: Extension Update Mechanismus
 
+## Hinweis zum Iststand (2026-02)
+
+Dieses Dokument ist historisch. Der früher beschriebene Message-Command `NOSTR_CHECK_VERSION` wurde entfernt.
+
+Update-Management erfolgt aktuell über Release-Prozess (Store-Versionen, Changelog, Deployment-Checks), nicht mehr über einen dedizierten Runtime-Command.
+
 ## Ziel
 Benachrichtigung über neue Versionen und forced updates bei Sicherheitskritischen Änderungen.
 
@@ -10,35 +16,20 @@ Benachrichtigung über neue Versionen und forced updates bei Sicherheitskritisch
 
 ```javascript
 async function checkExtensionVersion() {
-  const minVersion = '1.0.0'; // Aus WordPress Option
-  
-  window.postMessage({ 
-    type: 'NOSTR_CHECK_VERSION',
-    minVersion: minVersion 
-  }, '*');
-  
-  window.addEventListener('message', (e) => {
-    if (e.data.type === 'NOSTR_VERSION_RESPONSE') {
-      if (e.data.version !== minVersion) {
-        showUpdatePrompt(e.data.version, minVersion);
-      }
-    }
-  });
+  // Historisch (entfernt): NOSTR_CHECK_VERSION
+  // Aktuell: Update-Hinweise erfolgen außerhalb des Runtime-Message-Protokolls
+  // über Store-Release/Deployment-Checks.
 }
 ```
 
 ## Extension Code (in background.js)
 
 ```javascript
-if (request.type === 'NOSTR_CHECK_VERSION') {
-  return {
-    version: CURRENT_VERSION,
-    updateRequired: !semverSatisfies(CURRENT_VERSION, request.payload?.minVersion)
-  };
-}
+// Historisch (entfernt):
+// if (request.type === 'NOSTR_CHECK_VERSION') { ... }
 ```
 
-## Akzeptanzkriterien
+## Akzeptanzkriterien (historisch)
 
-- [ ] WordPress kann minimale Extension-Version vorgeben
-- [ ] User wird bei veralteter Extension benachrichtigt
+- [ ] (historisch) WordPress kann minimale Extension-Version vorgeben
+- [ ] (historisch) User wird bei veralteter Extension benachrichtigt

@@ -1,5 +1,15 @@
 # TASK-20: Chat-UI – Kontaktliste, Nachrichten-Ansicht & Suchfunktion
 
+## Iststand (2026-02)
+
+Diese Task-Datei enthält Plan-/Designanteile. Für den aktuellen Background-Vertrag gelten im Chat-Kontext:
+
+- `NOSTR_GET_DMS` mit Payload: `{ relayUrl, contactPubkey, since?, limit? }`
+- `NOSTR_SEND_DM` mit Payload: `{ recipientPubkey, content, relayUrl }`
+- `NOSTR_SUBSCRIBE_DMS` mit Payload: `{ relayUrl }`
+
+`scope` wird für DM-Operationen nicht mehr benötigt (Key-Suche erfolgt scope-agnostisch im Background).
+
 ## Ziel
 
 Die Home-View der neuen App-Shell (TASK-16) wird zur vollständigen Chat-Oberfläche ausgebaut. Sie zeigt die Kontaktliste mit letzten Nachrichten, eine Suchfunktion und eine Konversations-Ansicht für 1:1 DMs.
@@ -420,7 +430,6 @@ async function loadConversationMessages(contactPubkey) {
     const response = await chrome.runtime.sendMessage({
       type: 'NOSTR_GET_DMS',
       payload: {
-        scope: activeScope,
         relayUrl: activeDmRelay,
         contactPubkey
       }
@@ -535,7 +544,6 @@ async function sendMessage() {
       payload: {
         recipientPubkey: activeConversationPubkey,
         content,
-        scope: activeScope,
         relayUrl: activeDmRelay
       }
     });

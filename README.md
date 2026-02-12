@@ -13,6 +13,16 @@ Diese Lösung verbindet die Welt von **WordPress** (als vertrauenswürdige Heima
 
 Weitere Details finden sich im Konzept und der API-Referenz.
 
+## Message-API Iststand (Background)
+
+Der interne Message-Vertrag zwischen Popup/Content und `background.js` wurde bereinigt.
+
+- Aktiv für Chat/DM: `NOSTR_SEND_DM`, `NOSTR_GET_DMS`, `NOSTR_SUBSCRIBE_DMS`
+- Aktiv für Kontakte: `NOSTR_GET_CONTACTS`, `NOSTR_REFRESH_CONTACTS`, `NOSTR_ADD_CONTACT`
+- Entfernt als obsolet: u. a. `NOSTR_GET_DM_RELAYS`, `NOSTR_UNSUBSCRIBE_DMS`, `NOSTR_GET_UNREAD_COUNT`, `NOSTR_CLEAR_UNREAD`, `NOSTR_CLEAR_DM_CACHE`, `NOSTR_POLL_DMS`, `NOSTR_GET_WP_MEMBERS`, `NOSTR_REFRESH_WP_MEMBERS`, `NOSTR_CHECK_VERSION`, `NOSTR_LOCK`
+
+Die Task-Dokumente `TASK-19` und `TASK-20` sind auf den aktuellen Iststand angepasst (historische Plan-Teile bleiben als Referenz erhalten).
+
 ## Roadmap (Task-Status)
 
 - [x] TASK-00: Projekt-Uebersicht

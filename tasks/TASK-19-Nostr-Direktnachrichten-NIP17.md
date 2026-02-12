@@ -1,5 +1,20 @@
 # TASK-19: Nostr-Direktnachrichten Backend (NIP-17 Gift-Wrapped DMs)
 
+## Iststand (2026-02)
+
+Diese Task-Datei enthält historische Plan-/Designanteile. Der tatsächlich aktive Message-Vertrag in `background.js` ist:
+
+- `NOSTR_SEND_DM`
+- `NOSTR_GET_DMS`
+- `NOSTR_SUBSCRIBE_DMS`
+
+Aus dieser Task entfernte/obsolet gewordene Handler:
+
+- `NOSTR_GET_DM_RELAYS`
+- `NOSTR_UNSUBSCRIBE_DMS`
+- `NOSTR_GET_UNREAD_COUNT`
+- `NOSTR_CLEAR_UNREAD`
+
 ## Ziel
 
 Implementierung des vollständigen NIP-17 Messaging-Backends im Background Service Worker. Ermöglicht das Senden und Empfangen von verschlüsselten Direktnachrichten über das Gift-Wrap-Protokoll (Kind 14 → Kind 13 → Kind 1059).
@@ -71,33 +86,24 @@ popup.js                 background.js              Nostr Relay
 { type: 'NOSTR_SEND_DM', payload: { 
   recipientPubkey: string,  // hex pubkey
   content: string,          // Klartext-Nachricht
-  scope: string,
   relayUrl: string          // Empfänger-Relay oder DM-Relay
 }}
 → { result: { success: true, eventId: string } }
 
 // DMs abrufen (aus Cache oder Relay)
 { type: 'NOSTR_GET_DMS', payload: {
-  scope: string,
   relayUrl: string,
+  contactPubkey: string,    // optional: Konversation filtern
   since: number,            // Unix-Timestamp (optional)
   limit: number             // Max Nachrichten (default: 100)
 }}
-→ { result: { messages: [...], source: 'cache'|'fresh' } }
-
-// DM-Relays eines Pubkeys abfragen (Kind 10050)
-{ type: 'NOSTR_GET_DM_RELAYS', payload: {
-  pubkey: string,           // hex pubkey
-  relayUrl: string          // Lookup-Relay
-}}
-→ { result: { relays: [string] } }
+→ { result: { messages: [...], source: 'cache'|'merged'|'cache_only' } }
 
 // Subscription starten (Hintergrund-Listener)
 { type: 'NOSTR_SUBSCRIBE_DMS', payload: {
-  scope: string,
   relayUrl: string
 }}
-→ { result: { subscriptionId: string } }
+→ { result: { subscriptionIds: [string], status: 'active', relays: [string] } }
 ```
 
 ### Nachricht-Datenstruktur
@@ -396,9 +402,6 @@ case 'NOSTR_SEND_DM':
 
 case 'NOSTR_GET_DMS':
   return handleGetDMs(request);
-
-case 'NOSTR_GET_DM_RELAYS':
-  return handleGetDmRelays(request);
 
 case 'NOSTR_SUBSCRIBE_DMS':
   return handleSubscribeDMs(request);
@@ -732,21 +735,10 @@ case 'NOSTR_SUBSCRIBE_DMS': {
   return { subscriptionId: subId, status: 'active' };
 }
 
-case 'NOSTR_UNSUBSCRIBE_DMS': {
-  const { subscriptionId } = request.payload;
-  relayManager.unsubscribe(subscriptionId);
-  return { status: 'unsubscribed' };
-}
-
-case 'NOSTR_GET_UNREAD_COUNT': {
-  const result = await chrome.storage.local.get(['dmUnreadCount']);
-  return { count: result.dmUnreadCount || 0 };
-}
-
-case 'NOSTR_CLEAR_UNREAD': {
-  await clearUnreadCount();
-  return { success: true };
-}
+// Hinweis: Diese Commands wurden im Cleanup entfernt:
+// - NOSTR_UNSUBSCRIBE_DMS
+// - NOSTR_GET_UNREAD_COUNT
+// - NOSTR_CLEAR_UNREAD
 ```
 
 ### Architektur-Diagramm

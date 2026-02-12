@@ -1,29 +1,24 @@
 // Background Service Worker
 // Importiert nostr-tools via Rollup Bundle
 
-import { generateSecretKey, getPublicKey, finalizeEvent, nip19 } from 'nostr-tools';
+import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { KeyManager } from './lib/key-manager.js';
-import { checkDomainAccess, DOMAIN_STATUS, allowDomain, blockDomain, verifyWhitelistSignature } from './lib/domain-access.js';
-import { semverSatisfies } from './lib/semver.js';
+import { checkDomainAccess, DOMAIN_STATUS, allowDomain, verifyWhitelistSignature } from './lib/domain-access.js';
 import { 
   handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt,
-  getNip44ConversationKey, nip44EncryptWithKey, nip44DecryptWithKey
 } from './lib/crypto-handlers.js';
 import {
   ensureUint8,
-  randomizeTimestamp,
-  createRumor, createSeal, createGiftWrap, createGiftWrappedDM,
+  createGiftWrappedDM,
   unwrapGiftWrap,
-  DM_CACHE_KEY, DM_CACHE_MAX_PER_CONVERSATION, DM_UNREAD_COUNT_KEY, DM_NOTIFICATIONS_KEY,
-  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache, getConversationList,
-  incrementUnreadCount, clearUnreadCount, getUnreadCount,
+  DM_NOTIFICATIONS_KEY,
+  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache,
+  incrementUnreadCount,
   formatShortHex
 } from './lib/nip17-chat.js';
 
 const CURRENT_VERSION = '1.0.0';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
-const LEGACY_PRIMARY_DOMAIN_KEY = 'primaryDomain';
-const LEGACY_DOMAIN_SECRET_KEY = 'domainSecret';
 const UNLOCK_CACHE_POLICY_KEY = 'unlockCachePolicy';
 const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
 const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
@@ -46,7 +41,6 @@ let activeDmSubscriptionIds = [];
 let activeScopeRestored = false;
 const DIALOG_TIMEOUT_MS = 25000;
 const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
-let domainSyncMigrationDone = false;
 
 /**
  * Restore the last active key scope from storage on service worker cold start.
@@ -1027,19 +1021,6 @@ async function setCachedWpMembers(wpApi, members) {
 }
 
 /**
- * Löscht alle WP-Members Caches.
- */
-async function clearWpMembersCache() {
-  try {
-    const all = await chrome.storage.local.get(null);
-    const keysToRemove = Object.keys(all).filter(k => k.startsWith(WP_MEMBERS_CACHE_KEY));
-    if (keysToRemove.length > 0) {
-      await chrome.storage.local.remove(keysToRemove);
-    }
-  } catch { /* ignore */ }
-}
-
-/**
  * Führt Nostr-Kontakte und WP-Members zusammen.
  * @param {Array} nostrContacts - Kontakte aus Kind 3
  * @param {Map} profiles - Profile aus Kind 0
@@ -1098,53 +1079,6 @@ function mergeContacts(nostrContacts, profiles, wpMembers) {
   // Nach displayName sortieren
   return Array.from(merged.values())
     .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
-}
-
-async function fetchDmMessagesFromRelays(privateKey, since, limit, contactPubkey) {
-  const myPubkey = getPublicKey(privateKey);
-  
-  // 1. Inbox Relays herausfinden (wo empfange ich?)
-  // Für NIP-17 empfange ich auf meinen eigenen Inbox-Relays (Kind 10050)
-  // oder Standard-Relays.
-  // Wir fragen 10050 ab, oder nehmen Default.
-  
-  // Optimization: Wenn contactPubkey bekannt ist, müssen wir eigentlich auch dessen
-  // OUTBOX relays checken? Nein, GiftWraps werden an MEINE Inbox geschickt.
-  // Der Absender publiziert auf MEINEN Read-Relays.
-  
-  const myInboxRelays = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS);
-  const relaysToQuery = myInboxRelays.length > 0 ? myInboxRelays : [...DEFAULT_DM_RELAYS];
-  
-  // Deduplicate Relays
-  const uniqueRelays = [...new Set(relaysToQuery.map(normalizeRelayUrl).filter(Boolean))];
-  
-  console.log('[NIP-17] Fetching DMs from:', uniqueRelays);
-  
-  const filters = [{
-    kinds: [1059],
-    '#p': [myPubkey], // GiftWraps addressed to me
-    limit: limit || 50
-  }];
-  
-  if (since) filters[0].since = since;
-
-  // Parallel Fetch von allen Relays
-  const fetchPromises = uniqueRelays.map(relayUrl => 
-    subscribeOnce(relayUrl, filters, 5000)
-      .catch(err => {
-        console.warn(`[NIP-17] Fetch failed from ${relayUrl}:`, err);
-        return [];
-      })
-  );
-  
-  const results = await Promise.all(fetchPromises);
-  const allEvents = results.flat();
-  
-  // Deduplizieren (gleiche Event ID auf mehreren Relays)
-  const uniqueEvents = new Map();
-  allEvents.forEach(e => uniqueEvents.set(e.id, e));
-  
-  return Array.from(uniqueEvents.values());
 }
 
 async function clearContactsCache() {
@@ -1393,27 +1327,6 @@ class RelayConnectionManager {
       if (ws.readyState !== WebSocket.OPEN) {
         this.connect(relayUrl).catch(() => {});
       }
-    }
-  }
-  
-  /**
-   * Trennt eine Relay-Verbindung.
-   */
-  disconnect(relayUrl) {
-    const ws = this.connections.get(relayUrl);
-    if (ws) {
-      ws._manualClose = true;
-      ws.close();
-      this.connections.delete(relayUrl);
-    }
-  }
-  
-  /**
-   * Trennt alle Verbindungen.
-   */
-  disconnectAll() {
-    for (const [relayUrl] of this.connections) {
-      this.disconnect(relayUrl);
     }
   }
   
@@ -1921,7 +1834,6 @@ async function handleMessage(request, sender) {
   const isInternalExtensionRequest = sender?.id === chrome.runtime.id && !sender?.tab?.url;
   const requestType = String(request?.type || '');
   const scopedTypes = new Set([
-    'NOSTR_LOCK',
     'NOSTR_SET_UNLOCK_CACHE_POLICY',
     'NOSTR_CHANGE_PROTECTION',
     'NOSTR_GET_STATUS',
@@ -1939,9 +1851,6 @@ async function handleMessage(request, sender) {
     'NOSTR_NIP04_DECRYPT',
     'NOSTR_NIP44_ENCRYPT',
     'NOSTR_NIP44_DECRYPT',
-    // WP Members Cache
-    'NOSTR_GET_WP_MEMBERS',
-    'NOSTR_REFRESH_WP_MEMBERS',
     'NOSTR_ADD_CONTACT'
     // NIP-17 Direktnachrichten: NICHT in scopedTypes!
     // DM-Handler nutzen findDmKey() das alle Scopes eigenständig durchsucht.
@@ -1967,20 +1876,6 @@ async function handleMessage(request, sender) {
   // PING erfordert keine Domain-Validierung (f????r Extension-Detection)
   if (request.type === 'NOSTR_PING') {
     return { pong: true, version: CURRENT_VERSION };
-  }
-
-  // NOSTR_CHECK_VERSION erfordert keine Domain-Validierung
-  if (request.type === 'NOSTR_CHECK_VERSION') {
-    return {
-      version: CURRENT_VERSION,
-      updateRequired: !semverSatisfies(CURRENT_VERSION, request.payload?.minVersion)
-    };
-  }
-
-  // NOSTR_LOCK - Passwort-Cache l????schen
-  if (request.type === 'NOSTR_LOCK') {
-    await clearUnlockCaches();
-    return { locked: true };
   }
 
   if (request.type === 'NOSTR_SET_UNLOCK_CACHE_POLICY') {
@@ -2136,55 +2031,6 @@ async function handleMessage(request, sender) {
       lastActiveScope,
       activeScope: activeKeyScope
     };
-  }
-
-  if (request.type === 'NOSTR_DELETE_SCOPE_KEY') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Scope key deletion is only available from extension UI');
-    }
-    const targetScope = normalizeKeyScope(request.payload?.scope);
-    const targetKm = new KeyManager(chrome.storage.local, targetScope === KEY_SCOPE_DEFAULT ? '' : targetScope);
-
-    if (!await targetKm.hasKey()) {
-      return { deleted: false, reason: 'No key found in scope: ' + targetScope };
-    }
-
-    // Remove all key-related storage entries for the target scope
-    const keysToRemove = targetKm.keyNames([
-      KeyManager.STORAGE_KEY,
-      KeyManager.SALT_KEY,
-      KeyManager.IV_KEY,
-      KeyManager.PLAIN_KEY,
-      KeyManager.PUBKEY_KEY,
-      KeyManager.PASSKEY_ID_KEY,
-      KeyManager.MODE_KEY,
-      KeyManager.CREATED_KEY,
-      KeyManager.LEGACY_MIGRATED_KEY
-    ]);
-    await chrome.storage.local.remove(keysToRemove);
-
-    // If the deleted scope was the active one, reset caches
-    if (targetScope === activeKeyScope) {
-      await clearUnlockCaches();
-    }
-
-    return { deleted: true, scope: targetScope };
-  }
-
-  if (request.type === 'NOSTR_LIST_ALL_SCOPE_KEYS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Scope key listing is only available from extension UI');
-    }
-    const scopes = await listStoredKeyScopes();
-    const scopeDetails = [];
-    for (const scope of scopes) {
-      const km = new KeyManager(chrome.storage.local, scope === KEY_SCOPE_DEFAULT ? '' : scope);
-      const hasKey = await km.hasKey();
-      const pubkey = await km.getStoredPublicKey();
-      const mode = hasKey ? await km.getProtectionMode() : null;
-      scopeDetails.push({ scope, hasKey, pubkey, protectionMode: mode });
-    }
-    return { scopes: scopeDetails, activeScope: activeKeyScope };
   }
 
   if (request.type === 'NOSTR_BACKUP_STATUS') {
@@ -2750,67 +2596,6 @@ async function handleMessage(request, sender) {
     }
   }
 
-  // NOSTR_GET_WP_MEMBERS - WordPress Mitglieder mit Nostr-Profil
-  if (request.type === 'NOSTR_GET_WP_MEMBERS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('WP members are only available from extension UI');
-    }
-
-    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
-    if (!wpApi) {
-      return { members: [], source: 'none', reason: 'no_wp_api' };
-    }
-
-    // Cache prüfen
-    const cached = await getCachedWpMembers(wpApi);
-    
-    // Wenn Cache vorhanden und nicht stale, zurückgeben
-    if (cached && !cached.isStale) {
-      return { 
-        members: cached.members, 
-        source: 'cache',
-        fetchedAt: cached.fetchedAt
-      };
-    }
-
-    // Wenn Cache vorhanden aber stale, Info zurückgeben damit UI fragen kann
-    if (cached && cached.isStale) {
-      return {
-        members: cached.members,
-        source: 'cache_stale',
-        fetchedAt: cached.fetchedAt,
-        isStale: true,
-        staleSince: Date.now() - cached.fetchedAt
-      };
-    }
-
-    // Kein Cache: neu laden
-    const wpMembers = await fetchWpMembers(wpApi);
-    if (wpMembers.length > 0) {
-      await setCachedWpMembers(wpApi, wpMembers);
-    }
-    return { members: wpMembers, source: 'fresh' };
-  }
-
-  // NOSTR_REFRESH_WP_MEMBERS - WP Mitglieder neu laden (Force-Refresh)
-  if (request.type === 'NOSTR_REFRESH_WP_MEMBERS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('WP members refresh is only available from extension UI');
-    }
-
-    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
-    if (!wpApi) {
-      return { members: [], source: 'none', reason: 'no_wp_api' };
-    }
-
-    // Neu laden
-    const wpMembers = await fetchWpMembers(wpApi);
-    if (wpMembers.length > 0) {
-      await setCachedWpMembers(wpApi, wpMembers);
-    }
-    return { members: wpMembers, source: 'fresh' };
-  }
-
   // ============================================================
   // NIP-17 Direktnachrichten Message Handler
   // ============================================================
@@ -2866,7 +2651,7 @@ async function handleMessage(request, sender) {
       // Gift Wraps erstellen
       // Force Uint8Array conversion for crypto ops
       const secureKey = ensureUint8(privateKey);
-      const { wrapForRecipient, wrapForSelf, innerId, rumorId } = createGiftWrappedDM(
+      const { wrapForRecipient, wrapForSelf, innerId } = createGiftWrappedDM(
         secureKey, normalizedRecipient, content
       );
 
@@ -3033,36 +2818,6 @@ async function handleMessage(request, sender) {
     }
   }
 
-  // NOSTR_GET_CONVERSATIONS - Konversationsliste aus dem Cache
-  if (request.type === 'NOSTR_GET_CONVERSATIONS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Conversation list is only available from extension UI');
-    }
-    const dmKeyInfo = await findDmKey();
-    const scope = dmKeyInfo ? dmKeyInfo.scope : activeKeyScope;
-    const conversations = await getConversationList(scope);
-    return { conversations };
-  }
-
-  // NOSTR_GET_DM_RELAYS - DM-Relays eines Pubkeys abfragen
-  if (request.type === 'NOSTR_GET_DM_RELAYS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('DM relay lookup is only available from extension UI');
-    }
-
-    const { pubkey, relayUrl } = request.payload || {};
-    const normalizedPubkey = normalizePubkeyHex(pubkey);
-    if (!normalizedPubkey) {
-      throw new Error('Invalid pubkey');
-    }
-
-    const normalizedRelay = normalizeRelayUrl(relayUrl);
-    const lookupRelays = normalizedRelay ? [normalizedRelay, ...DEFAULT_DM_RELAYS] : DEFAULT_DM_RELAYS;
-    const relays = await fetchDmRelays(normalizedPubkey, lookupRelays);
-
-    return { relays };
-  }
-
   // NOSTR_SUBSCRIBE_DMS - Subscription für eingehende DMs starten
   if (request.type === 'NOSTR_SUBSCRIBE_DMS') {
     if (!isInternalExtensionRequest) {
@@ -3121,102 +2876,6 @@ async function handleMessage(request, sender) {
     }
   }
 
-  // NOSTR_UNSUBSCRIBE_DMS - Subscription beenden
-  if (request.type === 'NOSTR_UNSUBSCRIBE_DMS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('DM unsubscription is only available from extension UI');
-    }
-
-    const { subscriptionId } = request.payload || {};
-    if (subscriptionId) {
-      relayManager.unsubscribe(subscriptionId);
-      activeDmSubscriptionIds = activeDmSubscriptionIds.filter(id => id !== subscriptionId);
-    } else {
-      // Alle DM-Subscriptions beenden
-      for (const subId of activeDmSubscriptionIds) {
-        relayManager.unsubscribe(subId);
-      }
-      activeDmSubscriptionIds = [];
-    }
-
-    return { status: 'unsubscribed' };
-  }
-
-  // NOSTR_GET_UNREAD_COUNT - Unread-Counter abfragen
-  if (request.type === 'NOSTR_GET_UNREAD_COUNT') {
-    const count = await getUnreadCount();
-    return { count };
-  }
-
-  // NOSTR_CLEAR_UNREAD - Unread-Counter zurücksetzen
-  if (request.type === 'NOSTR_CLEAR_UNREAD') {
-    await clearUnreadCount();
-    return { success: true };
-  }
-
-  // NOSTR_SET_DM_NOTIFICATIONS - Notifications ein/ausschalten
-  if (request.type === 'NOSTR_SET_DM_NOTIFICATIONS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('DM notification settings are only available from extension UI');
-    }
-
-    const { enabled } = request.payload || {};
-    await chrome.storage.local.set({ [DM_NOTIFICATIONS_KEY]: Boolean(enabled) });
-    return { success: true, enabled: Boolean(enabled) };
-  }
-
-  // NOSTR_GET_DM_NOTIFICATIONS - Notification-Status abfragen
-  if (request.type === 'NOSTR_GET_DM_NOTIFICATIONS') {
-    const result = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
-    return { enabled: result[DM_NOTIFICATIONS_KEY] !== false };
-  }
-
-  // NOSTR_CLEAR_DM_CACHE - DM Cache löschen
-  if (request.type === 'NOSTR_CLEAR_DM_CACHE') {
-    await clearDmCache();
-    return { success: true };
-  }
-
-  // NOSTR_POLL_DMS - Manuelles Polling für neue DMs
-  if (request.type === 'NOSTR_POLL_DMS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('DM polling is only available from extension UI');
-    }
-
-    const { relayUrl } = request.payload || {};
-
-    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
-    const dmKeyInfo = await findDmKey();
-    if (!dmKeyInfo) {
-      return { success: false, reason: 'no_key' };
-    }
-    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
-
-    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-    if (!rawKey) {
-      return { success: false, reason: 'locked' };
-    }
-    const privateKey = ensureUint8(rawKey);
-
-    try {
-      const myPubkey = getPublicKey(privateKey);
-
-      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
-      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
-
-      // Parallel auf allen Inbox-Relays pollen
-      await Promise.all(inboxRelays.map(relay =>
-        pollForNewDms(dmScope, relay, myPubkey, privateKey)
-          .catch(e => console.warn('[NIP-17] Poll failed on', relay, e.message))
-      ));
-
-      return { success: true, relays: inboxRelays };
-    } finally {
-      privateKey.fill(0);
-    }
-  }
-
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen
   if (request.type === 'NOSTR_SET_DOMAIN_CONFIG') {
     const { primaryDomain, domainSecret, authBroker } = request.payload || {};
@@ -3236,66 +2895,7 @@ async function handleMessage(request, sender) {
     return { success: true, configCount: result.configCount, primaryHost: result.primaryHost };
   }
 
-  if (request.type === 'NOSTR_UPSERT_DOMAIN_SYNC_CONFIG') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Manual domain config is only allowed from extension UI');
-    }
-    const { primaryDomain, domainSecret, authBroker } = request.payload || {};
-    if (!primaryDomain || !domainSecret) {
-      throw new Error('Primary domain and secret are required');
-    }
-    await upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker);
-    await updateDomainWhitelist();
-    return await getDomainSyncState();
-  }
-
   if (request.type === 'NOSTR_GET_DOMAIN_SYNC_STATE') {
-    return await getDomainSyncState();
-  }
-
-  if (request.type === 'NOSTR_SYNC_DOMAINS_NOW') {
-    await updateDomainWhitelist();
-    return await getDomainSyncState();
-  }
-
-  if (request.type === 'NOSTR_REMOVE_DOMAIN_SYNC_CONFIG') {
-    const normalizedHost = normalizeDomainEntry(request.payload?.host);
-    if (!normalizedHost) {
-      throw new Error('Invalid domain sync host');
-    }
-
-    const domainSyncConfigs = await getDomainSyncConfigs();
-    const removedConfig = domainSyncConfigs[normalizedHost];
-    if (!removedConfig) {
-      return await getDomainSyncState();
-    }
-
-    delete domainSyncConfigs[normalizedHost];
-
-    const { allowedDomains = [] } = await chrome.storage.local.get(['allowedDomains']);
-    const keepDomains = new Set(Object.keys(domainSyncConfigs));
-    for (const config of Object.values(domainSyncConfigs)) {
-      for (const syncedDomain of normalizeDomainList(config.syncedDomains || [])) {
-        keepDomains.add(syncedDomain);
-      }
-    }
-
-    const removeDomains = new Set([normalizedHost]);
-    for (const syncedDomain of normalizeDomainList(removedConfig.syncedDomains || [])) {
-      if (!keepDomains.has(syncedDomain)) {
-        removeDomains.add(syncedDomain);
-      }
-    }
-
-    const prunedAllowedDomains = normalizeDomainList(allowedDomains)
-      .filter((domainEntry) => !removeDomains.has(domainEntry));
-
-    await chrome.storage.local.set({
-      [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs,
-      allowedDomains: prunedAllowedDomains
-    });
-
-    await updateDomainWhitelist();
     return await getDomainSyncState();
   }
 
@@ -3809,28 +3409,6 @@ function normalizeDomainSyncConfigs(configs) {
   return normalized;
 }
 
-function createDomainSyncConfig(primaryDomain, domainSecret, authBroker = null) {
-  const normalizedPrimaryDomain = getPrimaryDomainBaseUrl(primaryDomain);
-  const primaryHost = extractHostFromPrimaryDomain(normalizedPrimaryDomain);
-  const normalizedSecret = String(domainSecret || '').trim();
-  if (!normalizedPrimaryDomain || !primaryHost || !normalizedSecret) return null;
-  const normalizedBroker = sanitizePasskeyAuthBroker(authBroker);
-
-  return {
-    primaryHost,
-    config: {
-      primaryDomain: normalizedPrimaryDomain,
-      domainSecret: normalizedSecret,
-      updatedAt: Date.now(),
-      lastSyncAt: null,
-      lastSyncBaseUrl: null,
-      lastSyncError: null,
-      syncedDomains: [],
-      authBroker: normalizedBroker
-    }
-  };
-}
-
 async function getDomainSyncState() {
   const configs = await getDomainSyncConfigs();
   const { allowedDomains = [], lastDomainUpdate = null } = await chrome.storage.local.get([
@@ -3859,30 +3437,8 @@ async function getDomainSyncState() {
 }
 
 async function getDomainSyncConfigs() {
-  const storage = await chrome.storage.local.get([
-    DOMAIN_SYNC_CONFIGS_KEY,
-    LEGACY_PRIMARY_DOMAIN_KEY,
-    LEGACY_DOMAIN_SECRET_KEY
-  ]);
-
-  let configs = normalizeDomainSyncConfigs(storage[DOMAIN_SYNC_CONFIGS_KEY]);
-
-  if (!domainSyncMigrationDone) {
-    const migrated = createDomainSyncConfig(
-      storage[LEGACY_PRIMARY_DOMAIN_KEY],
-      storage[LEGACY_DOMAIN_SECRET_KEY],
-      null
-    );
-
-    if (migrated && !configs[migrated.primaryHost]) {
-      configs[migrated.primaryHost] = migrated.config;
-      await chrome.storage.local.set({ [DOMAIN_SYNC_CONFIGS_KEY]: configs });
-    }
-
-    domainSyncMigrationDone = true;
-  }
-
-  return configs;
+  const storage = await chrome.storage.local.get([DOMAIN_SYNC_CONFIGS_KEY]);
+  return normalizeDomainSyncConfigs(storage[DOMAIN_SYNC_CONFIGS_KEY]);
 }
 
 async function isConfiguredPrimaryDomain(domain) {
@@ -3915,10 +3471,7 @@ async function upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker = 
   };
 
   await chrome.storage.local.set({
-    [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs,
-    // Legacy keys fuer Rueckwaertskompatibilitaet beibehalten
-    [LEGACY_PRIMARY_DOMAIN_KEY]: normalizedPrimaryDomain,
-    [LEGACY_DOMAIN_SECRET_KEY]: normalizedSecret
+    [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs
   });
 
   return {
