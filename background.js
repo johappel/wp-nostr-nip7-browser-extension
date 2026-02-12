@@ -1,3 +1,14 @@
+// Helper to ensure key is always a valid Uint8Array in current context
+function ensureUint8(key) {
+  if (!key) return key;
+  if (key instanceof Uint8Array) return key;
+  // If it's an object/array-like (from storage serialization)
+  if (Array.isArray(key)) return new Uint8Array(key);
+  // Specifically handle Object.values for {0: x, 1: y} which is common in Chrome storage
+  if (typeof key === 'object') return new Uint8Array(Object.values(key));
+  return key;
+}
+
 // Background Service Worker
 // Importiert nostr-tools via Rollup Bundle
 
@@ -32,6 +43,7 @@ let cachedPasswordExpiresAt = null;
 let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
 let activeKeyScope = KEY_SCOPE_DEFAULT;
+let activeDmSubscriptionId = null;
 let activeScopeRestored = false;
 const DIALOG_TIMEOUT_MS = 25000;
 const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
@@ -1152,13 +1164,14 @@ const DM_UNREAD_COUNT_KEY = 'dmUnreadCount';
 const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
 
 /**
- * Randomisiert einen Timestamp um ±2 Tage für Gift Wrap/Seal.
+ * Randomisiert einen Timestamp um ±5 Minuten für Gift Wrap/Seal.
  * @returns {number} - Unix Timestamp mit Jitter
  */
 function randomizeTimestamp() {
   const now = Math.floor(Date.now() / 1000);
-  // ±2 Tage Jitter (2 * 24 * 60 * 60 = 172800 Sekunden)
-  const jitter = Math.floor(Math.random() * 2 * 172800) - 172800;
+  // ±5 Minuten Jitter (300 Sekunden) statt 2 Tage, um Relay-Limits nicht zu verletzen.
+  // Viele Relays weisen Events ab, die zu weit in der Vergangenheit/Zukunft liegen.
+  const jitter = Math.floor(Math.random() * 600) - 300; 
   return now + jitter;
 }
 
@@ -1247,19 +1260,24 @@ function createGiftWrappedDM(senderPrivateKey, recipientPubkey, content) {
   // 1. Rumor erstellen (Kind 14, nicht signiert)
   const rumor = createRumor(senderPubkey, recipientPubkey, content);
   
-  // 2. Seal erstellen (Kind 13, signiert mit Absender-Key)
-  const seal = createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor);
+  // 2. Seal für Empfänger erstellen (Kind 13, signiert mit Absender-Key)
+  const sealForRecipient = createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor);
   
   // 3. Gift Wrap für Empfänger (Kind 1059, Wegwerf-Key)
-  const wrapForRecipient = createGiftWrap(seal, recipientPubkey);
+  const wrapForRecipient = createGiftWrap(sealForRecipient, recipientPubkey);
   
-  // 4. Gift Wrap für Absender (Selbst-Kopie)
-  const wrapForSelf = createGiftWrap(seal, senderPubkey);
+  // 4. Seal für Absender erstellen (Self-Copy)
+  // WICHTIG: Um es später lesen zu können, muss der Seal auch für uns selbst verschlüsselt sein!
+  // Wir nutzen hier senderPubkey als recipient, damit SharedSecret(Me, Me) genutzt wird.
+  const sealForSelf = createSeal(senderPrivateKey, senderPubkey, senderPubkey, rumor);
+
+  // 5. Gift Wrap für Absender (Selbst-Kopie)
+  const wrapForSelf = createGiftWrap(sealForSelf, senderPubkey);
   
   return {
     wrapForRecipient,
     wrapForSelf,
-    rumorId: rumor.created_at + ':' + senderPubkey.slice(0, 8) // Pseudo-ID für nicht signierten Rumor
+    rumorId: rumor.created_at + ':' + senderPubkey.slice(0, 8)
   };
 }
 
@@ -1270,7 +1288,18 @@ function createGiftWrappedDM(senderPrivateKey, recipientPubkey, content) {
  * @returns {Object} - Entschlüsselte Nachricht
  */
 function unwrapGiftWrap(recipientPrivateKey, giftWrapEvent) {
+  // Safety check: ensure recipientPrivateKey is Uint8Array
+  if (!(recipientPrivateKey instanceof Uint8Array)) {
+    // Falls es ein Object/Array ist, versuchen wir es zu konvertieren
+    if (recipientPrivateKey && typeof recipientPrivateKey === 'object') {
+       // Wenn es ein Object mit nummerierten Keys ist (Serialize issue) oder Array
+       const vals = Array.isArray(recipientPrivateKey) ? recipientPrivateKey : Object.values(recipientPrivateKey);
+       recipientPrivateKey = new Uint8Array(vals);
+    }
+  }
+
   // 1. Gift Wrap entschlüsseln → Seal
+
   // Der pubkey im Gift Wrap ist der Wegwerf-Key (nicht der Absender!)
   const wrapConversationKey = getNip44ConversationKey(recipientPrivateKey, giftWrapEvent.pubkey);
   
@@ -1565,25 +1594,54 @@ class RelayConnectionManager {
     
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        ws.removeEventListener('message', handleResponse);
+        console.warn(`[Relay] Timeout waiting for OK from ${relayUrl} for event ${event.id}`);
         reject(new Error('Publish timeout'));
       }, timeout);
       
-      const handleOk = (data) => {
+      const handleResponse = (msgEvent) => {
         try {
+          const data = msgEvent.data;
           const parsed = JSON.parse(data);
-          if (Array.isArray(parsed) && parsed[0] === 'OK' && parsed[1] === event.id) {
+          
+          // Debug Logging für alle Antworten während des Publish-Vorgangs
+          // console.log(`[Relay Debug] Response from ${relayUrl}:`, data);
+
+          if (!Array.isArray(parsed)) return;
+
+          // OK Check
+          if (parsed[0] === 'OK' && parsed[1] === event.id) {
             clearTimeout(timer);
-            ws.removeEventListener('message', handleOk);
+            ws.removeEventListener('message', handleResponse);
             if (parsed[2] === true) {
+              console.log(`[Relay] OK from ${relayUrl} for event ${event.id}`);
               resolve(true);
             } else {
+              console.warn(`[Relay] REJECTED by ${relayUrl}:`, parsed[3]);
               reject(new Error(parsed[3] || 'Relay rejected event'));
             }
           }
-        } catch {}
+          
+          // NOTICE Check (Fehlermeldungen vom Relay)
+          if (parsed[0] === 'NOTICE') {
+            console.warn(`[Relay] NOTICE from ${relayUrl} during publish:`, parsed[1]);
+          }
+           
+          // CLOSED Check (NIP-01)
+          if (parsed[0] === 'CLOSED' && parsed[1] === event.id) {
+             clearTimeout(timer);
+             ws.removeEventListener('message', handleResponse);
+             reject(new Error(`Subscription/Event CLOSED: ${parsed[2]}`));
+          }
+
+        } catch (e) {
+            console.error('[Relay] Error parsing response:', e);
+        }
       };
       
-      ws.addEventListener('message', handleOk);
+      ws.addEventListener('message', handleResponse);
+      
+      console.log(`[Relay] Publishing event ${event.id} (kind: ${event.kind}) to ${relayUrl}...`);
       ws.send(JSON.stringify(['EVENT', event]));
     });
   }
@@ -1814,12 +1872,28 @@ async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
         msg.receivedAt = Date.now();
         
         // In Cache speichern
-        await cacheDmMessage(msg, scope);
+        const cachedMsg = await cacheDmMessage(msg, scope);
+        
+        // Notify any active frontend listeners (popup/chat UI) about the new message
+        try {
+          chrome.runtime.sendMessage({
+            type: 'NOSTR_NEW_DM',
+            payload: cachedMsg
+          }).catch(() => {
+             // Suppress error if no receiver is listening (popup closed)
+          });
+        } catch (err) {
+           console.warn('[Nostr] Failed to broadcast new DM to UI:', err);
+        }
         
         // Notification auslösen (nur für eingehende Nachrichten)
         if (msg.direction === 'in') {
-          await showDmNotification(msg);
-          await incrementUnreadCount();
+          try {
+             await showDmNotification(msg);
+             await incrementUnreadCount();
+          } catch (notifErr) {
+             console.warn('[NIP-17] Failed to show notification:', notifErr.message);
+          }
         }
       } catch (e) {
         // Nicht für uns - silently skip
@@ -2953,10 +3027,11 @@ async function handleMessage(request, sender) {
 
     const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-    if (!privateKey) {
+    const privateKeyRaw = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKeyRaw) {
       throw new Error('Failed to unlock key');
     }
+    const privateKey = ensureUint8(privateKeyRaw);
 
     try {
       const senderPubkey = getPublicKey(privateKey);
@@ -2969,26 +3044,38 @@ async function handleMessage(request, sender) {
       }
 
       // Gift Wraps erstellen
-      const { wrapForRecipient, wrapForSelf } = createGiftWrappedDM(
-        privateKey, normalizedRecipient, content
+      // Force Uint8Array conversion for crypto ops
+      const secureKey = ensureUint8(privateKey);
+      const { wrapForRecipient, wrapForSelf, rumorId } = createGiftWrappedDM(
+        secureKey, normalizedRecipient, content
       );
 
-      // An Empfänger-Relays publishen
-      const publishErrors = [];
-      for (const relay of targetRelays) {
+      console.log('[NIP-17] Sending DM via relays:', targetRelays);
+
+      // Parallel an Empfänger-Relays publishen
+      const publishPromises = targetRelays.map(async (relay) => {
         try {
           await relayManager.publishEvent(relay, wrapForRecipient, 10000);
+          console.log('[NIP-17] Published to recipient relay:', relay);
+          return { relay, success: true };
         } catch (e) {
-          publishErrors.push({ relay, error: e.message });
+          console.warn('[NIP-17] Failed to publish to recipient relay:', relay, e.message);
+          return { relay, success: false, error: e.message };
         }
-      }
+      });
 
-      // Selbst-Kopie ans eigene Relay
-      try {
-        await relayManager.publishEvent(normalizedRelay, wrapForSelf, 10000);
-      } catch (e) {
-        console.warn('[NIP-17] Failed to publish self-copy:', e.message);
-      }
+      // Selbst-Kopie im Hintergrund (Fire & Forget), damit die UI nicht blockiert!
+      // Wenn das Relay kein OK sendet (Timeout), ist das für den User egal, solange die Nachricht raus ist.
+      // Timeout auf 15s erhöht, um Warnungen zu reduzieren.
+      relayManager.publishEvent(normalizedRelay, wrapForSelf, 15000)
+        .catch(e => console.warn('[NIP-17] Failed to publish self-copy (background):', e.message));
+
+      // Nur auf Empfänger-Bestätigungen warten (kritisch)
+      const recipientResults = await Promise.all(publishPromises);
+      
+      const publishErrors = recipientResults
+        .filter(r => !r.success)
+        .map(r => ({ relay: r.relay, error: r.error }));
 
       // Lokal cachen
       await cacheDmMessage({
@@ -3049,7 +3136,8 @@ async function handleMessage(request, sender) {
       let privateKey;
       try {
         const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+        const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+        privateKey = ensureUint8(rawKey);
       } catch (e) {
         if (cachedMessages.length > 0) {
            return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
@@ -3057,7 +3145,28 @@ async function handleMessage(request, sender) {
         throw e;
       }
       
-      
+      // Safety check specifically for getPublicKey which might throw if key type is slightly off
+      if (!privateKey || !(privateKey instanceof Uint8Array)) {
+         console.error('[Nostr Key Debug] Failure details:', {
+             mode: protectionMode,
+             hasPassword: !!password,
+             rawKeyType: typeof rawKey,
+             rawKeyVal: rawKey,
+             ensureResult: privateKey
+         });
+         
+         // Try one last desperate recovery if rawKey exists but conversion failed
+         if (rawKey && typeof rawKey === 'object') {
+             try {
+                privateKey = new Uint8Array(Object.values(rawKey));
+             } catch(e) { console.error('Recovery failed', e); }
+         }
+
+         if (!privateKey || !(privateKey instanceof Uint8Array)) {
+             throw new Error(`Private key is null/undefined after unlock (Mode: ${protectionMode}, Raw: ${typeof rawKey})`);
+         }
+      }
+
       const myPubkey = getPublicKey(privateKey);
       
       // Multi-Relay Logik:
@@ -3130,6 +3239,14 @@ async function handleMessage(request, sender) {
       
       const combinedMessages = Array.from(messageMap.values());
 
+      // Correctness Check: Direction neu berechnen um Cache-Fehler zu korrigieren
+      // (Falls der Cache alte/falsche Richtungen gespeichert hat)
+      for (const m of combinedMessages) {
+        if (m.senderPubkey) {
+           m.direction = m.senderPubkey === myPubkey ? 'out' : 'in';
+        }
+      }
+
       // Sortieren nach created_at
       combinedMessages.sort((a, b) => a.createdAt - b.createdAt);
 
@@ -3192,7 +3309,12 @@ async function handleMessage(request, sender) {
       const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
 
       // Subscription starten
+      if (activeDmSubscriptionId) {
+          relayManager.unsubscribe(activeDmSubscriptionId);
+          activeDmSubscriptionId = null;
+      }
       const subId = await startDmSubscription(scope, normalizedRelay, myPubkey, privateKey);
+      activeDmSubscriptionId = subId;
 
       return { subscriptionId: subId, status: 'active', relay: normalizedRelay };
     } finally {

@@ -276,20 +276,35 @@ export class KeyManager {
 
     if (mode === KeyManager.MODE_PASSKEY) {
       if (!result[KeyManager.PLAIN_KEY]) return null;
-      return new Uint8Array(result[KeyManager.PLAIN_KEY]);
+      // Robust conversion: Handle Array, Uint8Array or Object {0:x, 1:y}
+      const raw = result[KeyManager.PLAIN_KEY];
+      if (raw instanceof Uint8Array) return raw;
+      if (Array.isArray(raw)) return new Uint8Array(raw);
+      return new Uint8Array(Object.values(raw));
     }
 
     if (mode === KeyManager.MODE_NONE) {
       if (!result[KeyManager.PLAIN_KEY]) return null;
-      return new Uint8Array(result[KeyManager.PLAIN_KEY]);
+      const raw = result[KeyManager.PLAIN_KEY];
+      if (raw instanceof Uint8Array) return raw;
+      if (Array.isArray(raw)) return new Uint8Array(raw);
+      return new Uint8Array(Object.values(raw));
     }
 
     if (!password) throw new Error('Password required');
     if (!result[KeyManager.STORAGE_KEY]) return null;
 
-    const ciphertext = new Uint8Array(result[KeyManager.STORAGE_KEY]);
-    const salt = new Uint8Array(result[KeyManager.SALT_KEY]);
-    const iv = new Uint8Array(result[KeyManager.IV_KEY]);
+    // Helper for robust Uint8Array conversion
+    const toUint8 = (val) => {
+        if (!val) return new Uint8Array(0);
+        if (val instanceof Uint8Array) return val;
+        if (Array.isArray(val)) return new Uint8Array(val);
+        return new Uint8Array(Object.values(val));
+    };
+
+    const ciphertext = toUint8(result[KeyManager.STORAGE_KEY]);
+    const salt = toUint8(result[KeyManager.SALT_KEY]);
+    const iv = toUint8(result[KeyManager.IV_KEY]);
 
     const enc = new TextEncoder();
     const baseKey = await crypto.subtle.importKey(

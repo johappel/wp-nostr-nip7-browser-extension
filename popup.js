@@ -40,6 +40,18 @@ function switchView(viewId) {
 async function onViewActivated(viewId) {
   // Diese Funktion wird nach dem View-Wechsel aufgerufen
   // und aktualisiert den Zustand der jeweiligen View
+  
+  // Ensure we are subscribed to DMs when viewing relevant pages
+  if (['home', 'conversation', 'chat'].includes(viewId)) {
+     try {
+       const dmRelayResult = await chrome.storage.local.get(['dmRelayUrl']);
+       chrome.runtime.sendMessage({ 
+         type: 'NOSTR_SUBSCRIBE_DMS',
+         payload: { relayUrl: dmRelayResult.dmRelayUrl }
+       }).catch(() => {}); // catch harmless errors
+     } catch(e) {}
+  }
+
   switch (viewId) {
     case 'home':
       // Kontakte laden, wenn noch nicht geladen
@@ -2098,6 +2110,53 @@ function renderMinimalMarkdown(text) {
   escaped = escaped.replace(/^- (.+)$/gm, '• $1');
   escaped = escaped.replace(/\n/g, '<br>');
   return escaped;
+}
+
+// Live Update Listener for new messages
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'NOSTR_NEW_DM') {
+    const newMessage = message.payload;
+    if (!newMessage) return;
+
+    // 1. If chat is open for this contact, append message
+    if (activeConversationPubkey && 
+        (newMessage.senderPubkey === activeConversationPubkey || newMessage.recipientPubkey === activeConversationPubkey)) {
+      appendNewMessage(newMessage);
+    }
+    
+    // 2. Refresh contact list snippet if visible (Home view)
+    const homeView = document.getElementById('view-home');
+    if (homeView && homeView.classList.contains('active')) {
+       // Refresh list without full reload to update snippets/unread counts
+       loadContacts(false); 
+    }
+  }
+});
+
+function appendNewMessage(msg) {
+  const messageList = document.getElementById('message-list');
+  if (!messageList) return;
+  
+  // Remove "empty" placeholder if present
+  const empty = messageList.querySelector('.empty');
+  if (empty) empty.remove();
+  
+  const isOutgoing = msg.direction === 'out'; 
+  const timeStr = formatMessageTime(msg.createdAt);
+  
+  const div = document.createElement('div');
+  div.className = `message-bubble ${isOutgoing ? 'message-out' : 'message-in'} message-new`;
+  div.innerHTML = `
+    <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
+    <div class="message-time">${timeStr}</div>
+  `;
+  
+  messageList.appendChild(div);
+  
+  // Scroll to bottom
+  setTimeout(() => {
+    messageList.scrollTop = messageList.scrollHeight;
+  }, 50);
 }
 
 // Conversation Management
