@@ -476,14 +476,15 @@ class NostrWPIntegration {
     container.id = 'nostr-register-container';
     container.innerHTML = `
       <div class="nostr-register-prompt">
+        <p>Verknüpfe dein WordPress-Account mit Nostr</p>
         <button id="nostr-register-btn" class="nostr-btn nostr-btn-primary">
-          Mit Nostr verknuepfen
+          Mit Nostr verknüpfen
         </button>
-        <p>Verknuepfe dein WordPress-Account mit Nostr</p>
         <p class="nostr-register-hint">
-          Du bekommst einen einmaligen Nostr-Key, der mit deinem Account verknuepft wird.
-          Du kannst ihn zusätzlich mit einem Passwort oder einem Passkey in deinem Browser verschllüsseln, damit keine anderen Nutzer deines Computers darauf zugreifen koennen.
+          Du bekommst einen einmaligen Nostr-Key, der mit deinem Account verknüpft wird.
+          Du kannst ihn zusätzlich mit einem Passwort oder einem Passkey in deinem Browser verschlüsseln, damit keine anderen Nutzer deines Computers darauf zugreifen koennen.
         </p>
+        
               
       </div>
     `;
@@ -1043,9 +1044,9 @@ class NostrWPIntegration {
     warning.className = 'nostr-warning';
     warning.innerHTML = `
       <p>Dein Nostr-Schluessel stimmt nicht mit dem registrierten Schluessel ueberein.</p>
-      <p>Registriert: <code>${expectedShort}</code></p>
-      <p>Aktueller Browser: <code>${actualShort}</code></p>
-      <p>Empfohlen: denselben privaten Schluessel aus dem Browser mit dem registrierten Pubkey uebernehmen (Cloud-Restore oder nsec-Import).</p>
+      <p>In Wordpress: <code>${expectedShort}</code></p>
+      <p>In unserer Browser Erweiterung: <code>${actualShort}</code></p>
+      <p>Empfohlen: denselben privaten Schluessel aus dem Browser mit dem registrierten Pubkey uebernehmen (wenn der Schlüssel gesichert wurde).</p>
       <div class="nostr-modal-actions">
         <button type="button" class="nostr-btn nostr-btn-primary" id="nostr-adopt-browser-key">
           Lokalen Key bewusst uebernehmen
