@@ -42,7 +42,7 @@ let cachedPasswordExpiresAt = null;
 let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
 let activeKeyScope = KEY_SCOPE_DEFAULT;
-let activeDmSubscriptionId = null;
+let activeDmSubscriptionIds = [];
 let activeScopeRestored = false;
 const DIALOG_TIMEOUT_MS = 25000;
 const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
@@ -1504,6 +1504,114 @@ async function getContactProfile(pubkey) {
 }
 
 // ============================================================
+// DM Relay Discovery (Multi-Relay, NIP-17 Kind 10050)
+// ============================================================
+
+const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+
+/**
+ * Ermittelt alle Inbox-Relays für DM-Operationen.
+ * Priorisierung:
+ *   1. Explizit vom Client übergebene Relays (kommagetrennt oder Array)
+ *   2. Gespeichertes DM-Relay aus Settings (dmRelayUrl)
+ *   3. Kind 10050 (NIP-17 Inbox Relays) des eigenen Pubkeys
+ *   4. Fallback-Relays (damus, nos.lol, nostr.band)
+ * 
+ * WICHTIG: Diese Relays haben NICHTS mit dem Profil-Relay zu tun!
+ * Profil → Kind 0 via configures relay in Settings
+ * DMs    → Kind 1059 via NIP-17 Inbox Relays (Kind 10050)
+ * 
+ * @param {string|string[]|null} clientRelayUrl - Vom Client übergebene Relay-URL(s)
+ * @param {string|null} myPubkey - Eigener Pubkey für Kind 10050 Lookup (optional)
+ * @returns {Promise<string[]>} - Array von normalisierten Relay-URLs
+ */
+async function resolveDmInboxRelays(clientRelayUrl = null, myPubkey = null) {
+  let relays = [];
+
+  // 1. Explizit vom Client
+  if (clientRelayUrl) {
+    const raw = Array.isArray(clientRelayUrl) ? clientRelayUrl : String(clientRelayUrl).split(',');
+    relays = raw.map(r => normalizeRelayUrl(r.trim())).filter(Boolean);
+  }
+
+  // 2. Gespeichertes DM-Relay aus Settings
+  if (relays.length === 0) {
+    try {
+      const stored = await chrome.storage.local.get(['dmRelayUrl']);
+      if (stored.dmRelayUrl) {
+        const raw = String(stored.dmRelayUrl).split(',');
+        relays = raw.map(r => normalizeRelayUrl(r.trim())).filter(Boolean);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 3. Kind 10050 (NIP-17 Inbox Relays)
+  if (relays.length === 0 && myPubkey) {
+    try {
+      const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS[0]);
+      if (discovered.length > 0) {
+        relays = discovered;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 4. Fallback
+  if (relays.length === 0) {
+    relays = [...DEFAULT_DM_RELAYS];
+  }
+
+  // Deduplizieren
+  return [...new Set(relays)];
+}
+
+// ============================================================
+// DM Key Helper (Race-Condition-sicher, Scope-agnostisch)
+// ============================================================
+
+/**
+ * Findet einen nutzbaren Key für DM-Operationen, unabhängig vom aktuellen Scope.
+ * Erstellt einen scope-lokalen KeyManager, der immun gegen konkurrierende Scope-Wechsel ist.
+ * Prüft zuerst den aktuellen Scope, dann alle verfügbaren Scopes.
+ * 
+ * WARUM: chrome.runtime.onMessage verarbeitet Nachrichten konkurrierend.
+ * Wenn GET_STATUS und GET_DMS gleichzeitig ankommen, kann ensureKeyScope()
+ * den globalen keyManager.namespace zwischen den async-Aufrufen wechseln.
+ * Ein scope-lokaler KeyManager verhindert dieses Problem.
+ * 
+ * @returns {Promise<{km: KeyManager, scope: string, protectionMode: string}|null>}
+ */
+async function findDmKey() {
+  const check = async (scope) => {
+    const ns = scope === KEY_SCOPE_DEFAULT ? '' : scope;
+    const km = new KeyManager(chrome.storage.local, ns);
+    const has = await km.hasKey();
+    if (!has) return null;
+    const mode = await km.getProtectionMode();
+    if (mode === null) return null;
+    return { km, scope, protectionMode: mode };
+  };
+
+  // 1. Aktuellen Scope prüfen (scope-lokaler Snapshot)
+  const currentScope = activeKeyScope;
+  const current = await check(currentScope);
+  if (current) return current;
+
+  // 2. Alle Scopes durchsuchen
+  const scopes = await listStoredKeyScopes();
+  for (const scope of scopes) {
+    if (scope === currentScope) continue;
+    const found = await check(scope);
+    if (found) {
+      console.log('[NIP-17] Key gefunden in alternativem Scope:', scope, 'mode:', found.protectionMode);
+      return found;
+    }
+  }
+
+  console.warn('[NIP-17] Kein nutzbarer Key in irgendeinem Scope gefunden. Scopes geprüft:', [currentScope, ...scopes.filter(s => s !== currentScope)]);
+  return null;
+}
+
+// ============================================================
 // DM Subscription Handler
 // ============================================================
 
@@ -1529,6 +1637,7 @@ async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
       // Neue Gift Wrap Nachricht empfangen
       try {
         const msg = unwrapGiftWrap(privateKey, event);
+        msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
         msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
         msg.receivedAt = Date.now();
         
@@ -1592,6 +1701,7 @@ async function pollForNewDms(scope, relayUrl, myPubkey, privateKey) {
     for (const event of events) {
       try {
         const msg = unwrapGiftWrap(privateKey, event);
+        msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
         msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
         msg.receivedAt = Date.now();
         
@@ -2678,17 +2788,15 @@ async function handleMessage(request, sender) {
       throw new Error('Message too long (max 10000 characters)');
     }
 
-    const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
-
-    // Private Key holen (use global keyManager, already scoped by ensureKeyScope)
-    const hasKey = await keyManager.hasKey();
-    if (!hasKey) {
-      throw new Error('No local key found for this scope.');
+    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    if (!dmKeyInfo) {
+      throw new Error('No local key found for DM operations.');
     }
+    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
 
-    const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKeyRaw = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    const privateKeyRaw = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!privateKeyRaw) {
       throw new Error('Failed to unlock key');
     }
@@ -2697,11 +2805,15 @@ async function handleMessage(request, sender) {
     try {
       const senderPubkey = getPublicKey(privateKey);
 
-      // DM-Relays des Empfängers herausfinden
-      let targetRelays = await fetchDmRelays(normalizedRecipient, normalizedRelay);
+      // Eigene Inbox-Relays ermitteln (für Self-Copy und als Lookup-Relay)
+      const myInboxRelays = await resolveDmInboxRelays(relayUrl, senderPubkey);
+      const lookupRelay = myInboxRelays[0] || 'wss://relay.damus.io';
+
+      // DM-Relays des Empfängers herausfinden (Kind 10050)
+      let targetRelays = await fetchDmRelays(normalizedRecipient, lookupRelay);
       if (!targetRelays.length) {
-        // Fallback: eigenes Relay
-        targetRelays = [normalizedRelay];
+        // Fallback: eigene Inbox-Relays
+        targetRelays = [...myInboxRelays];
       }
 
       // Gift Wraps erstellen
@@ -2725,11 +2837,12 @@ async function handleMessage(request, sender) {
         }
       });
 
-      // Selbst-Kopie im Hintergrund (Fire & Forget), damit die UI nicht blockiert!
-      // Wenn das Relay kein OK sendet (Timeout), ist das für den User egal, solange die Nachricht raus ist.
-      // Timeout auf 15s erhöht, um Warnungen zu reduzieren.
-      relayManager.publishEvent(normalizedRelay, wrapForSelf, 15000)
-        .catch(e => console.warn('[NIP-17] Failed to publish self-copy (background):', e.message));
+      // Selbst-Kopie im Hintergrund auf alle eigenen Inbox-Relays (Fire & Forget)
+      // Damit wir die Nachricht auch auf allen unseren Relays wiederfinden.
+      for (const selfRelay of myInboxRelays) {
+        relayManager.publishEvent(selfRelay, wrapForSelf, 15000)
+          .catch(e => console.warn('[NIP-17] Failed to publish self-copy to', selfRelay, ':', e.message));
+      }
 
       // Nur auf Empfänger-Bestätigungen warten (kritisch)
       const recipientResults = await Promise.all(publishPromises);
@@ -2748,7 +2861,7 @@ async function handleMessage(request, sender) {
         direction: 'out',
         giftWrapId: wrapForRecipient.id,
         receivedAt: Date.now()
-      }, activeKeyScope);
+      }, dmScope);
 
       return {
         success: true,
@@ -2768,7 +2881,10 @@ async function handleMessage(request, sender) {
     }
 
     const { relayUrl, since, limit, contactPubkey } = request.payload || {};
-    const scope = activeKeyScope;
+
+    // Scope-unabhängig Key suchen (Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    const scope = dmKeyInfo ? dmKeyInfo.scope : activeKeyScope;
 
     // Zuerst aus Cache holen
     const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
@@ -2783,22 +2899,21 @@ async function handleMessage(request, sender) {
       fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
     }
     
-    // Private Key für Entschlüsselung
-    // Use the global keyManager which was correctly scoped by ensureKeyScope() at the top
-    const hasKey = await keyManager.hasKey();
-    if (!hasKey) {
+    // Private Key für Entschlüsselung (scope-lokaler KeyManager)
+    if (!dmKeyInfo) {
       return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' };
     }
 
     try {
-      const protectionMode = await keyManager.getProtectionMode();
+      const { km: dmKm, protectionMode } = dmKeyInfo;
       let privateKey;
 
       try {
         const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+        const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
         privateKey = ensureUint8(rawKey);
       } catch (e) {
+        console.warn('[NIP-17] Key unlock exception:', e.message, 'protectionMode:', protectionMode, 'scope:', scope);
         if (cachedMessages.length > 0) {
            return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
         }
@@ -2806,7 +2921,8 @@ async function handleMessage(request, sender) {
       }
 
       if (!privateKey || privateKey.length !== 32) {
-        console.error('[NIP-17] Key unlock failed. hasKey=true but getKey returned:', privateKey ? `length=${privateKey.length}` : 'null');
+        console.error('[NIP-17] Key unlock failed. protectionMode:', protectionMode, 'scope:', scope,
+          'key:', privateKey ? `length=${privateKey.length}` : 'null');
         if (cachedMessages.length > 0) {
           return { messages: cachedMessages, source: 'cache_fallback', reason: 'key_unlock_failed' };
         }
@@ -2815,31 +2931,8 @@ async function handleMessage(request, sender) {
 
       const myPubkey = getPublicKey(privateKey);
       
-      // Multi-Relay Logik:
-      // 1. Zuerst schauen ob wir ein Relay vom Client mitbekommen haben (force)
-      let inboxRelays = [];
-      
-      if (relayUrl) {
-         inboxRelays = Array.isArray(relayUrl) ? relayUrl : [relayUrl];
-      }
-      
-      inboxRelays = inboxRelays.map(normalizeRelayUrl).filter(Boolean);
-
-      // Fallback-Relays wenn damus.io down ist (520-Fehler)
-      const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
-
-      // 2. Falls nicht, versuchen wir unsere eigenen Inbox-Relays herauszufinden (NIP-17 Kind 10050)
-      if (inboxRelays.length === 0) {
-        try {
-           const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS[0]);
-           inboxRelays = discovered.length > 0 ? discovered : DEFAULT_DM_RELAYS;
-        } catch(e) {
-           inboxRelays = DEFAULT_DM_RELAYS;
-        }
-      }
-
-      // Deduplizieren
-      inboxRelays = [...new Set(inboxRelays)];
+      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
+      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
 
       const filters = [{
         kinds: [1059],
@@ -2863,6 +2956,7 @@ async function handleMessage(request, sender) {
       for (const gw of uniqueWraps.values()) {
         try {
           const msg = unwrapGiftWrap(privateKey, gw);
+          msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
           msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
           msg.receivedAt = Date.now();
           
@@ -2938,17 +3032,16 @@ async function handleMessage(request, sender) {
     }
 
     const { relayUrl } = request.payload || {};
-    const scope = activeKeyScope;
 
-    // Private Key holen
-    const hasKey = await keyManager.hasKey();
-    if (!hasKey) {
-      throw new Error('No local key found for this scope.');
+    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    if (!dmKeyInfo) {
+      throw new Error('No local key found for DM operations.');
     }
+    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
 
-    const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!rawKey) {
       throw new Error('Failed to unlock key');
     }
@@ -2956,22 +3049,35 @@ async function handleMessage(request, sender) {
 
     try {
       const myPubkey = getPublicKey(privateKey);
-      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
+      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
 
       // WICHTIG: Kopie des Keys für die Subscription erstellen!
       // Die Subscription läuft weiter und braucht den Key für jeden eingehenden Gift Wrap.
       // Das Original wird im finally-Block sicher gelöscht.
       const subscriptionKey = new Uint8Array(privateKey);
 
-      // Subscription starten
-      if (activeDmSubscriptionId) {
-          relayManager.unsubscribe(activeDmSubscriptionId);
-          activeDmSubscriptionId = null;
+      // Alte Subscriptions beenden
+      for (const oldSubId of activeDmSubscriptionIds) {
+        relayManager.unsubscribe(oldSubId);
       }
-      const subId = await startDmSubscription(scope, normalizedRelay, myPubkey, subscriptionKey);
-      activeDmSubscriptionId = subId;
+      activeDmSubscriptionIds = [];
 
-      return { subscriptionId: subId, status: 'active', relay: normalizedRelay };
+      // Auf allen Inbox-Relays subscriben
+      const newSubIds = [];
+      for (const relay of inboxRelays) {
+        try {
+          const subId = await startDmSubscription(dmScope, relay, myPubkey, subscriptionKey);
+          newSubIds.push(subId);
+          console.log('[NIP-17] Subscription gestartet auf:', relay, 'subId:', subId);
+        } catch (e) {
+          console.warn('[NIP-17] Subscription fehlgeschlagen auf:', relay, e.message);
+        }
+      }
+      activeDmSubscriptionIds = newSubIds;
+
+      return { subscriptionIds: newSubIds, status: 'active', relays: inboxRelays };
     } finally {
       privateKey.fill(0); // Original sicher löschen - Subscription hat eigene Kopie
     }
@@ -2986,6 +3092,13 @@ async function handleMessage(request, sender) {
     const { subscriptionId } = request.payload || {};
     if (subscriptionId) {
       relayManager.unsubscribe(subscriptionId);
+      activeDmSubscriptionIds = activeDmSubscriptionIds.filter(id => id !== subscriptionId);
+    } else {
+      // Alle DM-Subscriptions beenden
+      for (const subId of activeDmSubscriptionIds) {
+        relayManager.unsubscribe(subId);
+      }
+      activeDmSubscriptionIds = [];
     }
 
     return { status: 'unsubscribed' };
@@ -3033,17 +3146,16 @@ async function handleMessage(request, sender) {
     }
 
     const { relayUrl } = request.payload || {};
-    const scope = activeKeyScope;
 
-    // Private Key holen
-    const hasKey = await keyManager.hasKey();
-    if (!hasKey) {
+    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    if (!dmKeyInfo) {
       return { success: false, reason: 'no_key' };
     }
+    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
 
-    const protectionMode = await keyManager.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!rawKey) {
       return { success: false, reason: 'locked' };
     }
@@ -3051,11 +3163,17 @@ async function handleMessage(request, sender) {
 
     try {
       const myPubkey = getPublicKey(privateKey);
-      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
 
-      await pollForNewDms(scope, normalizedRelay, myPubkey, privateKey);
+      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
+      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
 
-      return { success: true };
+      // Parallel auf allen Inbox-Relays pollen
+      await Promise.all(inboxRelays.map(relay =>
+        pollForNewDms(dmScope, relay, myPubkey, privateKey)
+          .catch(e => console.warn('[NIP-17] Poll failed on', relay, e.message))
+      ));
+
+      return { success: true, relays: inboxRelays };
     } finally {
       privateKey.fill(0);
     }
