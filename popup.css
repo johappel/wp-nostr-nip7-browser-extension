@@ -1239,9 +1239,12 @@ code {
 /* --- Conversation View --- */
 
 #view-conversation {
-  display: flex;
   flex-direction: column;
   height: 100%;
+}
+
+#view-conversation.active {
+  display: flex;
 }
 
 .conversation-header {
@@ -1344,17 +1347,23 @@ code {
   flex-shrink: 0;
 }
 
-.message-input-bar input {
+.message-input-bar textarea {
   flex: 1;
-  border-radius: 999px;
+  border-radius: 14px;
   padding: 8px 14px;
   font-size: 13px;
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text);
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  line-height: 1.4;
+  font-family: inherit;
+  overflow-y: auto;
 }
 
-.message-input-bar input:focus {
+.message-input-bar textarea:focus {
   outline: none;
   border-color: var(--accent);
   background: var(--surface);

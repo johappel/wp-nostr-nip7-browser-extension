@@ -17,6 +17,15 @@ wemn ich eine Schlüsselkopie in Wordpress speichern will, öffnet sich der Pass
 
 Es ist sicher zu stellen, dass Passkeys zum Anlegen, Importieren, Exportieren, Speichern, Wiederherstellen und Löschen von Nostr Keys sowie das wechseln der Schutzart an den aktuell in Wordpress eingeloggten User gebunden sind.
 
-Die Anfrage an den Passkey-Dialog sollte zumindest in chrome den Scope `wp-nostr-u2-<username>@<domain>-rnd` verwenden. Firefox hat glaube einen Fallback.
+Die Anfrage an den Passkey-Dialog sollte zumindest in chrome den Scope `wp-nostr-u2-<username>@<domain>-<rnd>` verwenden. Firefox hat etwas Probleme mit dem Passkey, schau dass du den Code nicht so änderst, dass es dort noch schlechter funktioniert.
 
 
+ich habe eben gerade einen neien nutzer angelegt. Im wurde angeboten "Mit Nostr Verknüpfen". Nach dem Klick gab es eine Fehlermeldung:
+
+Fehler: Dieser Pubkey ist bereits einem anderen Account zugeordnet.
+Verwendeter Signer-Pubkey: f28516909a45...96d1703d
+Bitte den richtigen Schluessel fuer diesen WP-User in der Extension waehlen oder importieren.
+
+Das sollte auf keinen Fall Passieren bei einem neuen user, wie kann das Passieren.
+
+Zugehörige Tasks: 10,11,12

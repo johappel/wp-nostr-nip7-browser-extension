@@ -16,6 +16,12 @@ const UNLOCK_CACHE_POLICY_LABELS = {
 
 let contactsRequestScope = 'global';
 let contactsRequestWpApi = null;
+let currentUserPubkey = null;
+
+function autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
 
 // ========================================
 // View-Router
@@ -231,11 +237,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   if (messageInput) {
     messageInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+      } else if (e.key === 'Enter' && e.ctrlKey) {
+        // Ctrl+Enter: Neue Zeile einfügen
+        const start = messageInput.selectionStart;
+        const end = messageInput.selectionEnd;
+        messageInput.value = messageInput.value.substring(0, start) + '\n' + messageInput.value.substring(end);
+        messageInput.selectionStart = messageInput.selectionEnd = start + 1;
+        autoResizeTextarea(messageInput);
       }
     });
+    // Auto-resize bei Eingabe
+    messageInput.addEventListener('input', () => autoResizeTextarea(messageInput));
   }
 
   // User Hero → Profil-Dialog
@@ -294,6 +309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const initialSigner = await refreshSignerIdentity(protectionRow, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
+  currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
   setContactRequestContext(activeScope, activeWpApi);
   
   // UI aktualisieren
@@ -374,6 +390,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
         setContactRequestContext(activeScope, activeWpApi);
         
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -448,6 +465,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
         setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         renderInstanceCard(instanceCard, activeViewer);
@@ -639,6 +657,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
         setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
@@ -678,10 +697,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
         setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
         updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
         await refreshCloudBackupState(cloudBackupMeta, {
           enableButton: cloudBackupEnableButton,
@@ -767,6 +788,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
         setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
@@ -1835,8 +1857,13 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
   const contactList = document.getElementById('contact-list');
   if (!contactList) return;
   
-  // Filter by source
+  // Eigenen User aus der Kontaktliste ausblenden
   let filtered = contacts;
+  if (currentUserPubkey) {
+    filtered = filtered.filter(c => c.pubkey !== currentUserPubkey);
+  }
+
+  // Filter by source
   if (sourceFilter !== 'all') {
     filtered = filtered.filter(c => {
       const sources = getContactSources(c);
@@ -2117,6 +2144,11 @@ function renderMinimalMarkdown(text) {
     /\[([^\]]+)\]\(([^)]+)\)/g,
     '<a href="$2" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
   );
+  // Autolink: Bare URLs in Links umwandeln (nur wenn nicht schon in einem <a>-Tag)
+  escaped = escaped.replace(
+    /(?<!href=")(?<!<a[^>]*>)(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
+  );
   escaped = escaped.replace(/^- (.+)$/gm, '• $1');
   escaped = escaped.replace(/\n/g, '<br>');
   return escaped;
@@ -2349,6 +2381,7 @@ async function sendMessage() {
     }
     
     input.value = '';
+    autoResizeTextarea(input);
 
   } catch (error) {
     showStatus(`Senden fehlgeschlagen: ${error.message}`, true);
