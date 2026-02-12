@@ -208,6 +208,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize contact list events
   initContactListEvents();
 
+  // Chat View Events (TASK-20)
+  const conversationBack = document.getElementById('conversation-back');
+  const sendMessageBtn = document.getElementById('send-message');
+  const messageInput = document.getElementById('message-input');
+
+  if (conversationBack) conversationBack.addEventListener('click', closeConversation);
+  
+  if (sendMessageBtn) sendMessageBtn.addEventListener('click', sendMessage);
+  
+  if (messageInput) {
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  }
+
   // User Hero → Profil-Dialog
   if (userHero) {
     userHero.addEventListener('click', () => {
@@ -1835,22 +1853,33 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
   });
   
   if (filtered.length === 0) {
-    renderEmptyContacts(contacts.length === 0 
-      ? 'Keine Kontakte gefunden. Verbinde deine Nostr-Identität oder logge dich in WordPress ein.'
-      : 'Keine Kontakte entsprechen dem Filter.');
+    if (contacts.length === 0) {
+      renderEmptyContacts('Keine Kontakte gefunden. Verbinde deine Nostr-Identität oder logge dich in WordPress ein.');
+    } else {
+      renderEmptyContacts('Keine Kontakte entsprechen dem Filter.');
+    }
     return;
   }
   
   const html = filtered.map(contact => renderContactItem(contact)).join('');
   contactList.innerHTML = html;
   
-  // Add click handlers
+  // Add click handlers -> Open Conversation
   contactList.querySelectorAll('.contact-item').forEach(item => {
-    item.addEventListener('click', () => {
+    item.addEventListener('click', (e) => {
+      // Prevent clicking if selecting text or something? No, standard click.
       const pubkey = item.dataset.pubkey;
       if (pubkey) {
-        // For TASK-20: Open chat with this contact
-        showStatus(`Chat mit ${item.dataset.name || 'Kontakt'} wird in TASK-20 implementiert.`);
+        openConversation(pubkey);
+      }
+    });
+
+    // Handle Enter key for accessibility
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        const pubkey = item.dataset.pubkey;
+        if (pubkey) openConversation(pubkey);
       }
     });
   });
@@ -1862,30 +1891,26 @@ function renderContactItem(contact) {
   const nip05 = String(contact.nip05 || '').trim();
   const avatarUrl = String(contact.picture || contact.avatarUrl || '').trim();
   
-  // Determine source badge
-  const sources = getContactSources(contact);
-  let sourceLabel = 'nostr';
-  let sourceClass = 'nostr';
-  if (sources.includes('nostr') && sources.includes('wordpress')) {
-    sourceLabel = 'merged';
-    sourceClass = 'merged';
-  } else if (sources.includes('wordpress')) {
-    sourceLabel = 'wp';
-    sourceClass = 'wordpress';
-  }
+  // Determine source badge not needed for chat view usually, but good for info
+  // We use the CSS from TASK-20 which expects specific structure
   
   const avatarHtml = avatarUrl
-    ? `<img src="${escapeHtml(avatarUrl)}" alt="Avatar" onerror="this.parentElement.innerHTML='<span class=\\'contact-avatar-placeholder\\'>👤</span>'" />`
+    ? `<img src="${escapeHtml(avatarUrl)}" class="contact-avatar-img" alt="" onerror="this.onerror=null;this.parentElement.innerHTML='<span class=\\'contact-avatar-placeholder\\'>👤</span>'" />`
     : '<span class="contact-avatar-placeholder">👤</span>';
   
+  // Placeholder for last message (TASK-20 optional: "preview")
+  const previewText = nip05 || formatShortHex(pubkey);
+
   return `
-    <div class="contact-item" data-pubkey="${escapeHtml(pubkey)}" data-name="${escapeHtml(displayName)}" tabindex="0" role="button">
+    <div class="contact-item" data-pubkey="${escapeHtml(pubkey)}" tabindex="0" role="button">
       <div class="contact-avatar">${avatarHtml}</div>
       <div class="contact-info">
         <div class="contact-name">${escapeHtml(displayName)}</div>
-        <div class="contact-nip05">${escapeHtml(nip05 || formatShortHex(pubkey))}</div>
+        <div class="contact-preview">${escapeHtml(previewText)}</div>
       </div>
-      <span class="contact-source ${sourceClass}">${sourceLabel}</span>
+      <div class="contact-meta">
+         <!-- Time / Unread badge placeholders -->
+      </div>
     </div>
   `;
 }
@@ -2034,4 +2059,208 @@ function initContactListEvents() {
       renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
     });
   });
+}
+
+// ========================================
+// TASK-20: Chat Logic & Helpers
+// ========================================
+
+let activeConversationPubkey = null;
+
+function formatRelativeTime(unixTimestamp) {
+  if (!unixTimestamp) return '';
+  const diff = Math.floor(Date.now() / 1000) - unixTimestamp;
+  if (diff < 60) return 'jetzt';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return new Date(unixTimestamp * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+}
+
+function formatMessageTime(unixTimestamp) {
+  if (!unixTimestamp) return '';
+  return new Date(unixTimestamp * 1000).toLocaleTimeString('de-DE', { 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  });
+}
+
+function renderMinimalMarkdown(text) {
+  if (!text) return '';
+  let escaped = escapeHtml(text);
+  escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  escaped = escaped.replace(/(?<![<code>])\*([^*]+)\*(?![<])/g, '<em>$1</em>');
+  escaped = escaped.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
+  );
+  escaped = escaped.replace(/^- (.+)$/gm, '• $1');
+  escaped = escaped.replace(/\n/g, '<br>');
+  return escaped;
+}
+
+// Conversation Management
+function openConversation(contactPubkey) {
+  console.log('Opening conversation with', contactPubkey);
+  const contact = currentContacts.find(c => c.pubkey === contactPubkey) || { pubkey: contactPubkey };
+  
+  // Header Update
+  const nameEl = document.getElementById('conversation-name');
+  const avatarEl = document.getElementById('conversation-avatar');
+  
+  if (nameEl) nameEl.textContent = contact.displayName || contact.name || formatShortHex(contactPubkey);
+  if (avatarEl) {
+    avatarEl.src = contact.picture || contact.avatarUrl || '';
+    avatarEl.onerror = function() {
+       this.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg==';
+    };
+  }
+  
+  activeConversationPubkey = contactPubkey;
+  
+  // Switch View
+  switchView('conversation');
+  
+  // Load Messages
+  loadConversationMessages(contactPubkey);
+}
+
+function closeConversation() {
+  activeConversationPubkey = null;
+  switchView('home');
+}
+
+async function loadConversationMessages(contactPubkey) {
+  const messageList = document.getElementById('message-list');
+  if (!messageList) return;
+  
+  messageList.innerHTML = '<p class="empty">Nachrichten werden geladen...</p>';
+  
+  try {
+    const dmRelayInput = document.getElementById('dm-relay-url');
+    const relayUrl = dmRelayInput?.value || null; // Use entered relay or default logic
+    
+    // We request DMs with this specific contact
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_GET_DMS',
+      payload: {
+        scope: contactsRequestScope,
+        relayUrl: relayUrl, 
+        contactPubkey: contactPubkey,
+        limit: 50
+      }
+    });
+    
+    // Error Handling
+    if (response?.error) {
+       console.error('DM Fetch Error:', response.error);
+       messageList.innerHTML = `<p class="empty error">Fehler: ${escapeHtml(response.error.message || response.error)}</p>`;
+       return;
+    }
+    
+    const messages = response?.result?.messages || [];
+    renderMessages(messages, contactPubkey);
+    
+    // Scroll to bottom
+    setTimeout(() => {
+      messageList.scrollTop = messageList.scrollHeight;
+    }, 50);
+
+  } catch (error) {
+    console.error('Message Load Failed:', error);
+    messageList.innerHTML = `<p class="empty error">Fehler beim Laden: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderMessages(messages, contactPubkey) {
+  const messageList = document.getElementById('message-list');
+  if (!messageList) return;
+  
+  if (!messages || messages.length === 0) {
+    messageList.innerHTML = '<p class="empty">Noch keine Nachrichten. Schreibe die erste!</p>';
+    return;
+  }
+  
+  // Sortier-Sicherheit (Chronologisch aufsteigend für Chat-View)
+  messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  
+  const html = messages.map(msg => {
+    // Determine direction
+    // If we sent it, direction is 'out'. If contact sent it, 'in'.
+    const isOutgoing = msg.direction === 'out'; 
+    const timeStr = formatMessageTime(msg.createdAt);
+    
+    return `
+      <div class="message-bubble ${isOutgoing ? 'message-out' : 'message-in'}">
+        <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
+        <div class="message-time">${timeStr}</div>
+      </div>
+    `;
+  }).join('');
+  
+  messageList.innerHTML = html;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('message-input');
+  const sendButton = document.getElementById('send-message');
+  
+  if (!input || !activeConversationPubkey) return;
+  
+  const content = input.value.trim();
+  if (!content) return;
+  
+  if (sendButton) sendButton.disabled = true;
+  input.disabled = true;
+  
+  try {
+    const dmRelayInput = document.getElementById('dm-relay-url');
+    const relayUrl = dmRelayInput?.value || null;
+    
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_SEND_DM',
+      payload: {
+        recipientPubkey: activeConversationPubkey,
+        content: content,
+        scope: contactsRequestScope,
+        relayUrl: relayUrl
+      }
+    });
+
+    if (response?.error) {
+       throw new Error(response.error);
+    }
+    
+    // Success: Optimistic Append
+    const messageList = document.getElementById('message-list');
+    if (messageList) {
+       const hasEmpty = messageList.querySelector('.empty');
+       if (hasEmpty) hasEmpty.remove();
+       
+       const tempMsg = {
+         direction: 'out',
+         content: content,
+         createdAt: Math.floor(Date.now() / 1000)
+       };
+       
+       const div = document.createElement('div');
+       div.className = 'message-bubble message-out';
+       div.innerHTML = `
+        <div class="message-content">${renderMinimalMarkdown(tempMsg.content)}</div>
+        <div class="message-time">${formatMessageTime(tempMsg.createdAt)}</div>
+       `;
+       messageList.appendChild(div);
+       messageList.scrollTop = messageList.scrollHeight;
+    }
+    
+    input.value = '';
+
+  } catch (error) {
+    showStatus(`Senden fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    if (sendButton) sendButton.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
 }

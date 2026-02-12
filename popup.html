@@ -70,6 +70,24 @@
         </div>
       </div>
 
+      <!-- View: Conversation -->
+      <div class="view" id="view-conversation">
+        <div class="conversation-header">
+          <button class="btn-back" id="conversation-back" title="Zurück">←</button>
+          <img class="conversation-avatar" id="conversation-avatar" src="" alt="" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg=='" />
+          <span class="conversation-name" id="conversation-name"></span>
+        </div>
+        
+        <div class="message-list" id="message-list">
+          <!-- Wird dynamisch befüllt -->
+        </div>
+        
+        <div class="message-input-bar">
+          <input type="text" id="message-input" placeholder="Nachricht..." />
+          <button class="btn-primary btn-send" id="send-message">Senden</button>
+        </div>
+      </div>
+
       <!-- View: Keys -->
       <div class="view" id="view-keys">
         <div class="view-header">
