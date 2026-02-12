@@ -5,7 +5,10 @@ import { generateSecretKey, getPublicKey, finalizeEvent, nip19 } from 'nostr-too
 import { KeyManager } from './lib/key-manager.js';
 import { checkDomainAccess, DOMAIN_STATUS, allowDomain, blockDomain, verifyWhitelistSignature } from './lib/domain-access.js';
 import { semverSatisfies } from './lib/semver.js';
-import { handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt } from './lib/crypto-handlers.js';
+import { 
+  handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt,
+  getNip44ConversationKey, nip44EncryptWithKey, nip44DecryptWithKey
+} from './lib/crypto-handlers.js';
 
 const CURRENT_VERSION = '1.0.0';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
@@ -972,6 +975,735 @@ async function clearContactsCache() {
   } catch { /* ignore */ }
 }
 
+// ============================================================
+// NIP-17 Direktnachrichten (Gift-Wrapped DMs)
+// ============================================================
+
+const DM_CACHE_KEY = 'nostrDmCacheV1';
+const DM_CACHE_MAX_MESSAGES = 500;
+const DM_UNREAD_COUNT_KEY = 'dmUnreadCount';
+const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
+
+/**
+ * Randomisiert einen Timestamp um ±2 Tage für Gift Wrap/Seal.
+ * @returns {number} - Unix Timestamp mit Jitter
+ */
+function randomizeTimestamp() {
+  const now = Math.floor(Date.now() / 1000);
+  // ±2 Tage Jitter (2 * 24 * 60 * 60 = 172800 Sekunden)
+  const jitter = Math.floor(Math.random() * 2 * 172800) - 172800;
+  return now + jitter;
+}
+
+/**
+ * Erstellt einen Rumor (Kind 14) - die eigentliche Nachricht.
+ * NICHT signiert (Abstreitbarkeit).
+ * @param {string} senderPubkey - Hex pubkey des Absenders
+ * @param {string} recipientPubkey - Hex pubkey des Empfängers
+ * @param {string} content - Klartext-Nachricht
+ * @returns {Object} - Rumor Event (nicht signiert)
+ */
+function createRumor(senderPubkey, recipientPubkey, content) {
+  return {
+    kind: 14,
+    created_at: Math.floor(Date.now() / 1000), // Echter Zeitstempel
+    tags: [['p', recipientPubkey]],
+    content: content,
+    pubkey: senderPubkey
+  };
+}
+
+/**
+ * Erstellt einen Seal (Kind 13) - signiert mit Absender-Key.
+ * @param {Uint8Array} senderPrivateKey - Secret Key des Absenders
+ * @param {string} senderPubkey - Hex pubkey des Absenders
+ * @param {string} recipientPubkey - Hex pubkey des Empfängers
+ * @param {Object} rumor - Der Rumor (Kind 14)
+ * @returns {Object} - Signiertes Seal Event (Kind 13)
+ */
+function createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor) {
+  // Conversation Key für NIP-44 Encryption
+  const conversationKey = getNip44ConversationKey(senderPrivateKey, recipientPubkey);
+  
+  // Rumor als JSON verschlüsseln
+  const sealContent = nip44EncryptWithKey(JSON.stringify(rumor), conversationKey);
+  
+  // Seal Event erstellen und signieren
+  return finalizeEvent({
+    kind: 13,
+    created_at: randomizeTimestamp(), // Randomisierter Zeitstempel
+    tags: [],
+    content: sealContent
+  }, senderPrivateKey);
+}
+
+/**
+ * Erstellt einen Gift Wrap (Kind 1059) - signiert mit Wegwerf-Key.
+ * @param {Object} seal - Das signierte Seal Event (Kind 13)
+ * @param {string} recipientPubkey - Hex pubkey des Empfängers
+ * @returns {Object} - Signiertes Gift Wrap Event (Kind 1059)
+ */
+function createGiftWrap(seal, recipientPubkey) {
+  // Neuen Wegwerf-Schlüssel generieren
+  const wrapKey = generateSecretKey();
+  
+  // Conversation Key für NIP-44 Encryption (Wegwerf-Key → Empfänger)
+  const conversationKey = getNip44ConversationKey(wrapKey, recipientPubkey);
+  
+  // Seal als JSON verschlüsseln
+  const wrapContent = nip44EncryptWithKey(JSON.stringify(seal), conversationKey);
+  
+  // Gift Wrap Event erstellen und signieren
+  const giftWrap = finalizeEvent({
+    kind: 1059,
+    created_at: randomizeTimestamp(), // Randomisierter Zeitstempel
+    tags: [['p', recipientPubkey]],
+    content: wrapContent
+  }, wrapKey);
+  
+  // Wegwerf-Schlüssel sicher löschen
+  wrapKey.fill(0);
+  
+  return giftWrap;
+}
+
+/**
+ * Erstellt eine vollständige Gift-Wrapped DM.
+ * @param {Uint8Array} senderPrivateKey - Secret Key des Absenders
+ * @param {string} recipientPubkey - Hex pubkey des Empfängers
+ * @param {string} content - Klartext-Nachricht
+ * @returns {Object} - { wrapForRecipient, wrapForSelf, rumorId }
+ */
+function createGiftWrappedDM(senderPrivateKey, recipientPubkey, content) {
+  const senderPubkey = getPublicKey(senderPrivateKey);
+  
+  // 1. Rumor erstellen (Kind 14, nicht signiert)
+  const rumor = createRumor(senderPubkey, recipientPubkey, content);
+  
+  // 2. Seal erstellen (Kind 13, signiert mit Absender-Key)
+  const seal = createSeal(senderPrivateKey, senderPubkey, recipientPubkey, rumor);
+  
+  // 3. Gift Wrap für Empfänger (Kind 1059, Wegwerf-Key)
+  const wrapForRecipient = createGiftWrap(seal, recipientPubkey);
+  
+  // 4. Gift Wrap für Absender (Selbst-Kopie)
+  const wrapForSelf = createGiftWrap(seal, senderPubkey);
+  
+  return {
+    wrapForRecipient,
+    wrapForSelf,
+    rumorId: rumor.created_at + ':' + senderPubkey.slice(0, 8) // Pseudo-ID für nicht signierten Rumor
+  };
+}
+
+/**
+ * Entschlüsselt einen Gift Wrap und extrahiert die Nachricht.
+ * @param {Uint8Array} recipientPrivateKey - Secret Key des Empfängers
+ * @param {Object} giftWrapEvent - Das Gift Wrap Event (Kind 1059)
+ * @returns {Object} - Entschlüsselte Nachricht
+ */
+function unwrapGiftWrap(recipientPrivateKey, giftWrapEvent) {
+  // 1. Gift Wrap entschlüsseln → Seal
+  // Der pubkey im Gift Wrap ist der Wegwerf-Key (nicht der Absender!)
+  const wrapConversationKey = getNip44ConversationKey(recipientPrivateKey, giftWrapEvent.pubkey);
+  
+  let seal;
+  try {
+    const sealJson = nip44DecryptWithKey(giftWrapEvent.content, wrapConversationKey);
+    seal = JSON.parse(sealJson);
+  } catch (e) {
+    throw new Error('Failed to decrypt gift wrap: ' + e.message);
+  }
+  
+  // 2. Seal validieren (muss Kind 13 sein)
+  if (seal.kind !== 13) {
+    throw new Error('Invalid seal kind: expected 13, got ' + seal.kind);
+  }
+  
+  // 3. Seal entschlüsseln → Rumor
+  // Der pubkey im Seal ist der echte Absender!
+  const sealConversationKey = getNip44ConversationKey(recipientPrivateKey, seal.pubkey);
+  
+  let rumor;
+  try {
+    const rumorJson = nip44DecryptWithKey(seal.content, sealConversationKey);
+    rumor = JSON.parse(rumorJson);
+  } catch (e) {
+    throw new Error('Failed to decrypt seal: ' + e.message);
+  }
+  
+  // 4. Rumor validieren
+  if (rumor.kind !== 14) {
+    throw new Error('Invalid rumor kind: expected 14, got ' + rumor.kind);
+  }
+  
+  // 5. Pubkey-Consistency Check: Seal pubkey muss mit Rumor pubkey übereinstimmen
+  if (rumor.pubkey !== seal.pubkey) {
+    throw new Error('Pubkey mismatch: seal pubkey does not match rumor pubkey');
+  }
+  
+  // Empfänger aus p-Tag extrahieren
+  const recipientTag = rumor.tags?.find(t => t[0] === 'p');
+  const recipientPubkey = recipientTag?.[1] || '';
+  
+  return {
+    id: rumor.created_at + ':' + rumor.pubkey.slice(0, 8), // Pseudo-ID
+    senderPubkey: rumor.pubkey,
+    recipientPubkey: recipientPubkey,
+    content: rumor.content,
+    createdAt: rumor.created_at,
+    giftWrapId: giftWrapEvent.id
+  };
+}
+
+/**
+ * Ruft DM-Relays eines Pubkeys ab (Kind 10050).
+ * @param {string} pubkey - Hex pubkey
+ * @param {string} lookupRelay - Relay URL für Lookup
+ * @returns {Promise<Array<string>>} - Array von Relay URLs
+ */
+async function fetchDmRelays(pubkey, lookupRelay) {
+  const normalizedPubkey = normalizePubkeyHex(pubkey);
+  if (!normalizedPubkey) return [];
+  
+  const normalizedRelay = normalizeRelayUrl(lookupRelay);
+  if (!normalizedRelay) return [];
+  
+  try {
+    const events = await subscribeOnce(normalizedRelay, [
+      { kinds: [10050], authors: [normalizedPubkey], limit: 1 }
+    ]);
+    
+    if (!events.length) return [];
+    
+    // Neuestes Event
+    const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
+    
+    // relay-Tags extrahieren
+    return latest.tags
+      .filter(t => t[0] === 'relay' && t[1])
+      .map(t => normalizeRelayUrl(t[1]))
+      .filter(Boolean);
+  } catch (error) {
+    console.warn('[NIP-17] Failed to fetch DM relays:', error.message);
+    return [];
+  }
+}
+
+// ============================================================
+// Relay Connection Manager für persistente Verbindungen
+// ============================================================
+
+class RelayConnectionManager {
+  constructor() {
+    this.connections = new Map(); // relayUrl -> WebSocket
+    this.subscriptions = new Map(); // subId -> { filters, onMessage, onEose }
+    this.reconnectInterval = 30000;
+    this.keepAliveInterval = 25000; // < 30s für MV3 Service Worker
+  }
+  
+  /**
+   * Stellt eine Verbindung zu einem Relay her.
+   * @param {string} relayUrl - WebSocket Relay URL
+   * @returns {Promise<WebSocket>} - Die WebSocket-Verbindung
+   */
+  async connect(relayUrl) {
+    const normalized = normalizeRelayUrl(relayUrl);
+    if (!normalized) throw new Error('Invalid relay URL');
+    
+    // Bestehende Verbindung prüfen
+    if (this.connections.has(normalized)) {
+      const existing = this.connections.get(normalized);
+      if (existing.readyState === WebSocket.OPEN) {
+        return existing;
+      }
+    }
+    
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(normalized);
+      
+      ws.onopen = () => {
+        console.log(`[Relay] Connected to ${normalized}`);
+        this.connections.set(normalized, ws);
+        // Re-subscribe to existing subscriptions
+        this.resubscribeAll(normalized);
+        resolve(ws);
+      };
+      
+      ws.onclose = () => {
+        console.log(`[Relay] Disconnected from ${normalized}`);
+        this.connections.delete(normalized);
+        // Auto-Reconnect nach Verzögerung
+        setTimeout(() => {
+          this.connect(normalized).catch(() => {});
+        }, this.reconnectInterval);
+      };
+      
+      ws.onerror = (error) => {
+        console.warn(`[Relay] Error on ${normalized}:`, error);
+        if (ws.readyState === WebSocket.CONNECTING) {
+          reject(new Error(`Failed to connect to ${normalized}`));
+        }
+      };
+      
+      ws.onmessage = (event) => {
+        this.handleMessage(normalized, event.data);
+      };
+    });
+  }
+  
+  /**
+   * Verarbeitet eingehende Nachrichten vom Relay.
+   */
+  handleMessage(relayUrl, data) {
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    
+    if (!Array.isArray(parsed) || parsed.length < 2) return;
+    
+    // ["EVENT", subId, event]
+    if (parsed[0] === 'EVENT' && parsed[2]) {
+      const subId = parsed[1];
+      const event = parsed[2];
+      const sub = this.subscriptions.get(subId);
+      if (sub?.onMessage) {
+        try {
+          sub.onMessage(event, relayUrl);
+        } catch (e) {
+          console.warn('[Relay] Error in message handler:', e);
+        }
+      }
+    }
+    
+    // ["EOSE", subId]
+    if (parsed[0] === 'EOSE') {
+      const sub = this.subscriptions.get(parsed[1]);
+      if (sub?.onEose) {
+        try {
+          sub.onEose();
+        } catch (e) {
+          console.warn('[Relay] Error in EOSE handler:', e);
+        }
+      }
+    }
+    
+    // ["OK", eventId, accepted, message]
+    if (parsed[0] === 'OK') {
+      // Wird von publishEvent verwendet
+    }
+    
+    // ["NOTICE", message]
+    if (parsed[0] === 'NOTICE') {
+      console.warn(`[Relay] NOTICE from ${relayUrl}:`, parsed[1]);
+    }
+  }
+  
+  /**
+   * Abonniert Events von einem Relay.
+   * @param {string} relayUrl - Relay URL
+   * @param {Array} filters - Nostr Filter-Array
+   * @param {Function} onMessage - Callback für eingehende Events
+   * @param {Function} onEose - Callback für EOSE (optional)
+   * @returns {Promise<string>} - Subscription ID
+   */
+  async subscribe(relayUrl, filters, onMessage, onEose = null) {
+    const ws = await this.connect(relayUrl);
+    const subId = 'dm_' + Math.random().toString(36).slice(2);
+    
+    this.subscriptions.set(subId, { filters, onMessage, onEose });
+    
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(['REQ', subId, ...filters]));
+    }
+    
+    return subId;
+  }
+  
+  /**
+   * Beendet eine Subscription.
+   */
+  unsubscribe(subId) {
+    this.subscriptions.delete(subId);
+    // Send CLOSE to all connected relays
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(['CLOSE', subId]));
+      }
+    }
+  }
+  
+  /**
+   * Re-subscribed alle aktiven Subscriptions nach Reconnect.
+   */
+  resubscribeAll(relayUrl) {
+    const ws = this.connections.get(relayUrl);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    
+    for (const [subId, sub] of this.subscriptions) {
+      ws.send(JSON.stringify(['REQ', subId, ...sub.filters]));
+    }
+  }
+  
+  /**
+   * Prüft alle Verbindungen und reconnectet falls nötig.
+   */
+  checkConnections() {
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        this.connect(relayUrl).catch(() => {});
+      }
+    }
+  }
+  
+  /**
+   * Trennt eine Relay-Verbindung.
+   */
+  disconnect(relayUrl) {
+    const ws = this.connections.get(relayUrl);
+    if (ws) {
+      ws.close();
+      this.connections.delete(relayUrl);
+    }
+  }
+  
+  /**
+   * Trennt alle Verbindungen.
+   */
+  disconnectAll() {
+    for (const [relayUrl] of this.connections) {
+      this.disconnect(relayUrl);
+    }
+  }
+  
+  /**
+   * Publiziert ein Event an ein Relay.
+   * @param {string} relayUrl - Relay URL
+   * @param {Object} event - Das zu publizierende Event
+   * @param {number} timeout - Timeout in ms
+   * @returns {Promise<boolean>} - true wenn akzeptiert
+   */
+  async publishEvent(relayUrl, event, timeout = 10000) {
+    const ws = await this.connect(relayUrl);
+    
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('Publish timeout'));
+      }, timeout);
+      
+      const handleOk = (data) => {
+        try {
+          const parsed = JSON.parse(data);
+          if (Array.isArray(parsed) && parsed[0] === 'OK' && parsed[1] === event.id) {
+            clearTimeout(timer);
+            ws.removeEventListener('message', handleOk);
+            if (parsed[2] === true) {
+              resolve(true);
+            } else {
+              reject(new Error(parsed[3] || 'Relay rejected event'));
+            }
+          }
+        } catch {}
+      };
+      
+      ws.addEventListener('message', handleOk);
+      ws.send(JSON.stringify(['EVENT', event]));
+    });
+  }
+}
+
+// Singleton Instance
+const relayManager = new RelayConnectionManager();
+
+// ============================================================
+// DM Cache Funktionen
+// ============================================================
+
+/**
+ * Speichert eine Nachricht im Cache.
+ * @param {Object} msg - Die Nachricht
+ * @param {string} scope - Der Key Scope
+ */
+async function cacheDmMessage(msg, scope) {
+  try {
+    const result = await chrome.storage.local.get([DM_CACHE_KEY]);
+    const cache = result[DM_CACHE_KEY] || { scope, messages: [] };
+    
+    // Deduplizierung über giftWrapId
+    if (cache.messages.some(m => m.giftWrapId === msg.giftWrapId)) return;
+    
+    cache.messages.push({
+      ...msg,
+      receivedAt: msg.receivedAt || Date.now()
+    });
+    
+    // Nach createdAt sortieren
+    cache.messages.sort((a, b) => a.createdAt - b.createdAt);
+    
+    // Max-Größe begrenzen
+    if (cache.messages.length > DM_CACHE_MAX_MESSAGES) {
+      cache.messages = cache.messages.slice(-DM_CACHE_MAX_MESSAGES);
+    }
+    
+    cache.scope = scope;
+    cache.updatedAt = Date.now();
+    
+    await chrome.storage.local.set({ [DM_CACHE_KEY]: cache });
+  } catch (error) {
+    console.warn('[NIP-17] Failed to cache message:', error.message);
+  }
+}
+
+/**
+ * Speichert mehrere Nachrichten im Cache.
+ */
+async function cacheDmMessages(messages, scope) {
+  for (const msg of messages) {
+    await cacheDmMessage(msg, scope);
+  }
+}
+
+/**
+ * Holt Nachrichten aus dem Cache.
+ * @param {string} scope - Der Key Scope
+ * @param {string} contactPubkey - Optional: Filter nach Kontakt
+ * @returns {Promise<Array>} - Array von Nachrichten
+ */
+async function getCachedDmMessages(scope, contactPubkey = null) {
+  try {
+    const result = await chrome.storage.local.get([DM_CACHE_KEY]);
+    const cache = result[DM_CACHE_KEY];
+    if (!cache || cache.scope !== scope) return [];
+    
+    let messages = cache.messages || [];
+    if (contactPubkey) {
+      messages = messages.filter(m =>
+        m.senderPubkey === contactPubkey || m.recipientPubkey === contactPubkey
+      );
+    }
+    
+    return messages;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Löscht den DM Cache.
+ */
+async function clearDmCache() {
+  try {
+    await chrome.storage.local.remove([DM_CACHE_KEY]);
+  } catch { /* ignore */ }
+}
+
+// ============================================================
+// Notification System
+// ============================================================
+
+/**
+ * Zeigt eine Desktop-Notification für eine neue DM.
+ * @param {Object} msg - Die Nachricht
+ */
+async function showDmNotification(msg) {
+  try {
+    // Prüfen ob Notifications erlaubt sind
+    const settings = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
+    if (settings[DM_NOTIFICATIONS_KEY] === false) return;
+    
+    // Absender-Profil laden für Anzeigename
+    const profile = await getContactProfile(msg.senderPubkey);
+    const displayName = profile?.displayName || formatShortHex(msg.senderPubkey);
+    
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+      title: `Neue Nachricht von ${displayName}`,
+      message: msg.content.slice(0, 100) + (msg.content.length > 100 ? '...' : ''),
+      priority: 2
+    });
+  } catch (error) {
+    console.warn('[NIP-17] Failed to show notification:', error.message);
+  }
+}
+
+/**
+ * Holt das Profil eines Kontakts aus dem Cache oder von Relays.
+ * @param {string} pubkey - Hex pubkey
+ * @returns {Promise<Object|null>} - Profil oder null
+ */
+async function getContactProfile(pubkey) {
+  try {
+    // Versuche aus Contacts-Cache zu holen
+    const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
+    const cache = result[CONTACTS_CACHE_KEY];
+    if (cache?.contacts) {
+      const contact = cache.contacts.find(c => c.pubkey === pubkey);
+      if (contact) {
+        return {
+          displayName: contact.displayName || contact.name,
+          picture: contact.picture,
+          nip05: contact.nip05
+        };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Formatiert einen Pubkey kurz für Anzeige.
+ * @param {string} pubkey - Hex pubkey
+ * @returns {string} - Formatierter String
+ */
+function formatShortHex(pubkey) {
+  if (!pubkey || pubkey.length < 16) return pubkey || '';
+  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
+}
+
+/**
+ * Inkrementiert den Unread-Counter.
+ */
+async function incrementUnreadCount() {
+  try {
+    const result = await chrome.storage.local.get([DM_UNREAD_COUNT_KEY]);
+    const count = (result[DM_UNREAD_COUNT_KEY] || 0) + 1;
+    await chrome.storage.local.set({ [DM_UNREAD_COUNT_KEY]: count });
+    
+    // Badge setzen
+    if (count > 0) {
+      chrome.action.setBadgeText({ text: count > 99 ? '99+' : String(count) });
+      chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' });
+    }
+  } catch (error) {
+    console.warn('[NIP-17] Failed to increment unread count:', error.message);
+  }
+}
+
+/**
+ * Setzt den Unread-Counter zurück.
+ */
+async function clearUnreadCount() {
+  try {
+    await chrome.storage.local.set({ [DM_UNREAD_COUNT_KEY]: 0 });
+    chrome.action.setBadgeText({ text: '' });
+  } catch (error) {
+    console.warn('[NIP-17] Failed to clear unread count:', error.message);
+  }
+}
+
+/**
+ * Holt den aktuellen Unread-Counter.
+ * @returns {Promise<number>}
+ */
+async function getUnreadCount() {
+  try {
+    const result = await chrome.storage.local.get([DM_UNREAD_COUNT_KEY]);
+    return result[DM_UNREAD_COUNT_KEY] || 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ============================================================
+// DM Subscription Handler
+// ============================================================
+
+/**
+ * Startet eine Subscription für eingehende DMs.
+ * @param {string} scope - Der Key Scope
+ * @param {string} relayUrl - Relay URL
+ * @param {string} myPubkey - Eigener Pubkey
+ * @param {Uint8Array} privateKey - Private Key für Entschlüsselung
+ * @returns {Promise<string>} - Subscription ID
+ */
+async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
+  const filters = [{
+    kinds: [1059], // Gift Wrap
+    '#p': [myPubkey],
+    limit: 100
+  }];
+  
+  const subId = await relayManager.subscribe(
+    relayUrl,
+    filters,
+    async (event, relayUrl) => {
+      // Neue Gift Wrap Nachricht empfangen
+      try {
+        const msg = unwrapGiftWrap(privateKey, event);
+        msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+        msg.receivedAt = Date.now();
+        
+        // In Cache speichern
+        await cacheDmMessage(msg, scope);
+        
+        // Notification auslösen (nur für eingehende Nachrichten)
+        if (msg.direction === 'in') {
+          await showDmNotification(msg);
+          await incrementUnreadCount();
+        }
+      } catch (e) {
+        // Nicht für uns - silently skip
+        console.debug('[NIP-17] Could not unwrap gift wrap:', e.message);
+      }
+    }
+  );
+  
+  return subId;
+}
+
+/**
+ * Pollt nach neuen DMs (Fallback).
+ * @param {string} scope - Der Key Scope
+ * @param {string} relayUrl - Relay URL
+ * @param {string} myPubkey - Eigener Pubkey
+ * @param {Uint8Array} privateKey - Private Key
+ */
+async function pollForNewDms(scope, relayUrl, myPubkey, privateKey) {
+  try {
+    // Letzten Check aus Storage holen
+    const lastCheckKey = 'dmLastPoll_' + scope;
+    const result = await chrome.storage.local.get([lastCheckKey]);
+    const since = result[lastCheckKey] || Math.floor(Date.now() / 1000) - 3600; // Default: 1h
+    
+    const filters = [{
+      kinds: [1059],
+      '#p': [myPubkey],
+      since: since,
+      limit: 50
+    }];
+    
+    const events = await subscribeOnce(relayUrl, filters, 10000);
+    
+    for (const event of events) {
+      try {
+        const msg = unwrapGiftWrap(privateKey, event);
+        msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+        msg.receivedAt = Date.now();
+        
+        await cacheDmMessage(msg, scope);
+        
+        if (msg.direction === 'in') {
+          await showDmNotification(msg);
+          await incrementUnreadCount();
+        }
+      } catch {
+        // Nicht für uns
+      }
+    }
+    
+    // Letzten Check aktualisieren
+    await chrome.storage.local.set({ [lastCheckKey]: Math.floor(Date.now() / 1000) });
+  } catch (error) {
+    console.warn('[NIP-17] Poll failed:', error.message);
+  }
+}
+
 async function getStoredPasskeyCredentialIdForActiveScope() {
   const credentialStorageKey = keyManager.keyName(KeyManager.PASSKEY_ID_KEY);
   const storage = await chrome.storage.local.get([credentialStorageKey]);
@@ -1143,7 +1875,19 @@ async function handleMessage(request, sender) {
     'NOSTR_NIP04_ENCRYPT',
     'NOSTR_NIP04_DECRYPT',
     'NOSTR_NIP44_ENCRYPT',
-    'NOSTR_NIP44_DECRYPT'
+    'NOSTR_NIP44_DECRYPT',
+    // NIP-17 Direktnachrichten
+    'NOSTR_SEND_DM',
+    'NOSTR_GET_DMS',
+    'NOSTR_GET_DM_RELAYS',
+    'NOSTR_SUBSCRIBE_DMS',
+    'NOSTR_UNSUBSCRIBE_DMS',
+    'NOSTR_GET_UNREAD_COUNT',
+    'NOSTR_CLEAR_UNREAD',
+    'NOSTR_SET_DM_NOTIFICATIONS',
+    'NOSTR_GET_DM_NOTIFICATIONS',
+    'NOSTR_CLEAR_DM_CACHE',
+    'NOSTR_POLL_DMS'
   ]);
 
   if (scopedTypes.has(requestType)) {
@@ -1816,6 +2560,309 @@ async function handleMessage(request, sender) {
 
     const wpMembers = await fetchWpMembers(request.payload?.wpApi);
     return { members: wpMembers };
+  }
+
+  // ============================================================
+  // NIP-17 Direktnachrichten Message Handler
+  // ============================================================
+
+  // NOSTR_SEND_DM - Direktnachricht senden
+  if (request.type === 'NOSTR_SEND_DM') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM sending is only available from extension UI');
+    }
+
+    const { recipientPubkey, content, relayUrl } = request.payload || {};
+    const normalizedRecipient = normalizePubkeyHex(recipientPubkey);
+    if (!normalizedRecipient) {
+      throw new Error('Invalid recipient pubkey');
+    }
+    if (!content || typeof content !== 'string') {
+      throw new Error('Message content is required');
+    }
+    if (content.length > 10000) {
+      throw new Error('Message too long (max 10000 characters)');
+    }
+
+    const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+    // Private Key holen
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKey) {
+      throw new Error('Failed to unlock key');
+    }
+
+    try {
+      const senderPubkey = getPublicKey(privateKey);
+
+      // DM-Relays des Empfängers herausfinden
+      let targetRelays = await fetchDmRelays(normalizedRecipient, normalizedRelay);
+      if (!targetRelays.length) {
+        // Fallback: eigenes Relay
+        targetRelays = [normalizedRelay];
+      }
+
+      // Gift Wraps erstellen
+      const { wrapForRecipient, wrapForSelf } = createGiftWrappedDM(
+        privateKey, normalizedRecipient, content
+      );
+
+      // An Empfänger-Relays publishen
+      const publishErrors = [];
+      for (const relay of targetRelays) {
+        try {
+          await relayManager.publishEvent(relay, wrapForRecipient, 10000);
+        } catch (e) {
+          publishErrors.push({ relay, error: e.message });
+        }
+      }
+
+      // Selbst-Kopie ans eigene Relay
+      try {
+        await relayManager.publishEvent(normalizedRelay, wrapForSelf, 10000);
+      } catch (e) {
+        console.warn('[NIP-17] Failed to publish self-copy:', e.message);
+      }
+
+      // Lokal cachen
+      await cacheDmMessage({
+        id: wrapForRecipient.id,
+        senderPubkey,
+        recipientPubkey: normalizedRecipient,
+        content,
+        createdAt: Math.floor(Date.now() / 1000),
+        direction: 'out',
+        giftWrapId: wrapForRecipient.id,
+        receivedAt: Date.now()
+      }, activeKeyScope);
+
+      return {
+        success: true,
+        eventId: wrapForRecipient.id,
+        publishedTo: targetRelays,
+        errors: publishErrors.length > 0 ? publishErrors : undefined
+      };
+    } finally {
+      privateKey.fill(0);
+    }
+  }
+
+  // NOSTR_GET_DMS - Direktnachrichten abrufen
+  if (request.type === 'NOSTR_GET_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DMs are only available from extension UI');
+    }
+
+    const { relayUrl, since, limit, contactPubkey } = request.payload || {};
+    const scope = activeKeyScope;
+
+    // Zuerst aus Cache holen
+    const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+    if (cachedMessages.length > 0 && !request.payload?.forceRefresh) {
+      return { messages: cachedMessages, source: 'cache' };
+    }
+
+    // Private Key für Entschlüsselung
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      return { messages: [], source: 'none', reason: 'no_key' };
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKey) {
+      return { messages: [], source: 'none', reason: 'locked' };
+    }
+
+    try {
+      const myPubkey = getPublicKey(privateKey);
+      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+      // Gift Wraps vom Relay holen
+      const filters = [{
+        kinds: [1059],
+        '#p': [myPubkey],
+        limit: limit || 100
+      }];
+      if (since) filters[0].since = since;
+
+      const giftWraps = await subscribeOnce(normalizedRelay, filters, 15000);
+
+      // Entschlüsseln und validieren
+      const messages = [];
+      for (const gw of giftWraps) {
+        try {
+          const msg = unwrapGiftWrap(privateKey, gw);
+          msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+          msg.receivedAt = Date.now();
+          
+          // Filter nach Kontakt falls angegeben
+          if (contactPubkey) {
+            if (msg.senderPubkey !== contactPubkey && msg.recipientPubkey !== contactPubkey) {
+              continue;
+            }
+          }
+          
+          messages.push(msg);
+        } catch {
+          // Silently skip undecrytable wraps (nicht für uns)
+        }
+      }
+
+      // Sortieren nach created_at
+      messages.sort((a, b) => a.createdAt - b.createdAt);
+
+      // Cachen
+      await cacheDmMessages(messages, scope);
+
+      return { messages, source: 'fresh' };
+    } finally {
+      privateKey.fill(0);
+    }
+  }
+
+  // NOSTR_GET_DM_RELAYS - DM-Relays eines Pubkeys abfragen
+  if (request.type === 'NOSTR_GET_DM_RELAYS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM relay lookup is only available from extension UI');
+    }
+
+    const { pubkey, relayUrl } = request.payload || {};
+    const normalizedPubkey = normalizePubkeyHex(pubkey);
+    if (!normalizedPubkey) {
+      throw new Error('Invalid pubkey');
+    }
+
+    const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+    const relays = await fetchDmRelays(normalizedPubkey, normalizedRelay);
+
+    return { relays };
+  }
+
+  // NOSTR_SUBSCRIBE_DMS - Subscription für eingehende DMs starten
+  if (request.type === 'NOSTR_SUBSCRIBE_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM subscription is only available from extension UI');
+    }
+
+    const { relayUrl } = request.payload || {};
+    const scope = activeKeyScope;
+
+    // Private Key holen
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKey) {
+      throw new Error('Failed to unlock key');
+    }
+
+    try {
+      const myPubkey = getPublicKey(privateKey);
+      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+      // Subscription starten
+      const subId = await startDmSubscription(scope, normalizedRelay, myPubkey, privateKey);
+
+      return { subscriptionId: subId, status: 'active', relay: normalizedRelay };
+    } finally {
+      privateKey.fill(0);
+    }
+  }
+
+  // NOSTR_UNSUBSCRIBE_DMS - Subscription beenden
+  if (request.type === 'NOSTR_UNSUBSCRIBE_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM unsubscription is only available from extension UI');
+    }
+
+    const { subscriptionId } = request.payload || {};
+    if (subscriptionId) {
+      relayManager.unsubscribe(subscriptionId);
+    }
+
+    return { status: 'unsubscribed' };
+  }
+
+  // NOSTR_GET_UNREAD_COUNT - Unread-Counter abfragen
+  if (request.type === 'NOSTR_GET_UNREAD_COUNT') {
+    const count = await getUnreadCount();
+    return { count };
+  }
+
+  // NOSTR_CLEAR_UNREAD - Unread-Counter zurücksetzen
+  if (request.type === 'NOSTR_CLEAR_UNREAD') {
+    await clearUnreadCount();
+    return { success: true };
+  }
+
+  // NOSTR_SET_DM_NOTIFICATIONS - Notifications ein/ausschalten
+  if (request.type === 'NOSTR_SET_DM_NOTIFICATIONS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM notification settings are only available from extension UI');
+    }
+
+    const { enabled } = request.payload || {};
+    await chrome.storage.local.set({ [DM_NOTIFICATIONS_KEY]: Boolean(enabled) });
+    return { success: true, enabled: Boolean(enabled) };
+  }
+
+  // NOSTR_GET_DM_NOTIFICATIONS - Notification-Status abfragen
+  if (request.type === 'NOSTR_GET_DM_NOTIFICATIONS') {
+    const result = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
+    return { enabled: result[DM_NOTIFICATIONS_KEY] !== false };
+  }
+
+  // NOSTR_CLEAR_DM_CACHE - DM Cache löschen
+  if (request.type === 'NOSTR_CLEAR_DM_CACHE') {
+    await clearDmCache();
+    return { success: true };
+  }
+
+  // NOSTR_POLL_DMS - Manuelles Polling für neue DMs
+  if (request.type === 'NOSTR_POLL_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM polling is only available from extension UI');
+    }
+
+    const { relayUrl } = request.payload || {};
+    const scope = activeKeyScope;
+
+    // Private Key holen
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      return { success: false, reason: 'no_key' };
+    }
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKey) {
+      return { success: false, reason: 'locked' };
+    }
+
+    try {
+      const myPubkey = getPublicKey(privateKey);
+      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+
+      await pollForNewDms(scope, normalizedRelay, myPubkey, privateKey);
+
+      return { success: true };
+    } finally {
+      privateKey.fill(0);
+    }
   }
 
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen
@@ -2606,6 +3653,70 @@ async function updateDomainWhitelist() {
 // Alarm: Periodisches Domain-Sync
 // ============================================================
 chrome.alarms.create('domainSync', { periodInMinutes: 5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'domainSync') updateDomainWhitelist();
+
+// ============================================================
+// Alarm: Keep-Alive für Relay-Verbindungen (MV3 Service Worker)
+// ============================================================
+// MV3 Service Worker werden nach ~30s Inaktivität beendet
+// Alarm alle 25 Sekunden (unter 30s Grenze)
+chrome.alarms.create('relayKeepalive', { periodInMinutes: 0.42 }); // ~25s
+
+// Alarm für DM-Polling (Fallback)
+chrome.alarms.create('dmPolling', { periodInMinutes: 5 });
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'domainSync') {
+    updateDomainWhitelist();
+  }
+  
+  if (alarm.name === 'relayKeepalive') {
+    // Prüfe Relay-Verbindungen, reconnect falls nötig
+    relayManager.checkConnections();
+  }
+  
+  if (alarm.name === 'dmPolling') {
+    // Poll for new DMs in background
+    try {
+      const hasKey = await keyManager.hasKey();
+      if (!hasKey) return;
+      
+      const protectionMode = await keyManager.getProtectionMode();
+      
+      // Nur pollen wenn entsperrt (cached password/passkey)
+      let privateKey = null;
+      try {
+        if (protectionMode === KeyManager.MODE_NONE) {
+          privateKey = await keyManager.getKey(null);
+        } else if (protectionMode === KeyManager.MODE_PASSWORD) {
+          const cached = await getCachedPassword();
+          if (cached) {
+            privateKey = await keyManager.getKey(cached);
+          }
+        } else if (protectionMode === KeyManager.MODE_PASSKEY) {
+          const cached = await getCachedPasskeyAuth();
+          if (cached) {
+            privateKey = await keyManager.getKey(null);
+          }
+        }
+      } catch {
+        // Key nicht verfügbar - skip polling
+      }
+      
+      if (privateKey) {
+        try {
+          const myPubkey = getPublicKey(privateKey);
+          
+          // DM-Relay aus Settings holen
+          const dmRelayResult = await chrome.storage.local.get(['dmRelayUrl']);
+          const relayUrl = normalizeRelayUrl(dmRelayResult.dmRelayUrl) || 'wss://relay.damus.io';
+          
+          await pollForNewDms(activeKeyScope, relayUrl, myPubkey, privateKey);
+        } finally {
+          privateKey.fill(0);
+        }
+      }
+    } catch (error) {
+      console.warn('[NIP-17] Background DM polling failed:', error.message);
+    }
+  }
 });
