@@ -1089,34 +1089,51 @@ function mergeContacts(nostrContacts, profiles, wpMembers) {
     .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
 }
 
-async function getCachedContacts(pubkey, includeWpMembers = false) {
-  try {
-    const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
-    const cache = result[CONTACTS_CACHE_KEY];
-    // Cache ist an pubkey gebunden, nicht an scope
-    // Damit sind Kontakte auf allen Websites verfügbar
-    if (!cache || cache.pubkey !== pubkey) return null;
-    if (Boolean(cache.includeWpMembers) !== Boolean(includeWpMembers)) return null;
-    if (Date.now() - cache.fetchedAt > CONTACTS_CACHE_TTL) return null;
-    return cache.contacts;
-  } catch {
-    return null;
-  }
-}
+async function fetchDmMessagesFromRelays(privateKey, since, limit, contactPubkey) {
+  const myPubkey = getPublicKey(privateKey);
+  
+  // 1. Inbox Relays herausfinden (wo empfange ich?)
+  // Für NIP-17 empfange ich auf meinen eigenen Inbox-Relays (Kind 10050)
+  // oder Standard-Relays.
+  // Wir fragen 10050 ab, oder nehmen Default.
+  
+  // Optimization: Wenn contactPubkey bekannt ist, müssen wir eigentlich auch dessen
+  // OUTBOX relays checken? Nein, GiftWraps werden an MEINE Inbox geschickt.
+  // Der Absender publiziert auf MEINEN Read-Relays.
+  
+  const myInboxRelays = await fetchDmRelays(myPubkey, 'wss://relay.damus.io');
+  const relaysToQuery = myInboxRelays.length > 0 ? myInboxRelays : ['wss://relay.damus.io', 'wss://nos.lol'];
+  
+  // Deduplicate Relays
+  const uniqueRelays = [...new Set(relaysToQuery.map(normalizeRelayUrl).filter(Boolean))];
+  
+  console.log('[NIP-17] Fetching DMs from:', uniqueRelays);
+  
+  const filters = [{
+    kinds: [1059],
+    '#p': [myPubkey], // GiftWraps addressed to me
+    limit: limit || 50
+  }];
+  
+  if (since) filters[0].since = since;
 
-async function setCachedContacts(pubkey, contacts, includeWpMembers = false) {
-  try {
-    await chrome.storage.local.set({
-      [CONTACTS_CACHE_KEY]: {
-        pubkey, // Cache an pubkey binden statt scope
-        includeWpMembers: Boolean(includeWpMembers),
-        contacts,
-        fetchedAt: Date.now()
-      }
-    });
-  } catch (error) {
-    console.warn('[Nostr] Failed to cache contacts:', error.message);
-  }
+  // Parallel Fetch von allen Relays
+  const fetchPromises = uniqueRelays.map(relayUrl => 
+    subscribeOnce(relayUrl, filters, 5000)
+      .catch(err => {
+        console.warn(`[NIP-17] Fetch failed from ${relayUrl}:`, err);
+        return [];
+      })
+  );
+  
+  const results = await Promise.all(fetchPromises);
+  const allEvents = results.flat();
+  
+  // Deduplizieren (gleiche Event ID auf mehreren Relays)
+  const uniqueEvents = new Map();
+  allEvents.forEach(e => uniqueEvents.set(e.id, e));
+  
+  return Array.from(uniqueEvents.values());
 }
 
 async function clearContactsCache() {
@@ -3040,23 +3057,52 @@ async function handleMessage(request, sender) {
         throw e;
       }
       
+      
       const myPubkey = getPublicKey(privateKey);
-      const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+      
+      // Multi-Relay Logik:
+      // 1. Zuerst schauen ob wir ein Relay vom Client mitbekommen haben (force)
+      let inboxRelays = [];
+      
+      if (relayUrl) {
+         inboxRelays = Array.isArray(relayUrl) ? relayUrl : [relayUrl];
+      }
+      
+      inboxRelays = inboxRelays.map(normalizeRelayUrl).filter(Boolean);
 
-      // Gift Wraps vom Relay holen
+      // 2. Falls nicht, versuchen wir unsere eigenen Inbox-Relays herauszufinden (NIP-17 Kind 10050)
+      if (inboxRelays.length === 0) {
+        try {
+           const discovered = await fetchDmRelays(myPubkey, 'wss://relay.damus.io');
+           inboxRelays = discovered.length > 0 ? discovered : ['wss://relay.damus.io', 'wss://nos.lol'];
+        } catch(e) {
+           inboxRelays = ['wss://relay.damus.io', 'wss://nos.lol'];
+        }
+      }
+
+      // Deduplizieren
+      inboxRelays = [...new Set(inboxRelays)];
+
       const filters = [{
         kinds: [1059],
         '#p': [myPubkey],
-        limit: limit || 50 // Standard limit für Sync
+        limit: limit || 100
       }];
       if (fetchSince) filters[0].since = fetchSince;
 
       // Timeout verkürzen für bessere UX (5s statt 15s), da wir eh Cache haben
-      const giftWraps = await subscribeOnce(normalizedRelay, filters, 5000);
+      // Parallel Fetch
+      const fetchPromises = inboxRelays.map(r => subscribeOnce(r, filters, 5000).catch(() => []));
+      const results = await Promise.all(fetchPromises);
+      const giftWraps = results.flat();
+
+      // Deduplizieren der GiftWraps
+      const uniqueWraps = new Map();
+      giftWraps.forEach(gw => uniqueWraps.set(gw.id, gw));
 
       // Entschlüsseln und validieren
       const newMessages = [];
-      for (const gw of giftWraps) {
+      for (const gw of uniqueWraps.values()) {
         try {
           const msg = unwrapGiftWrap(privateKey, gw);
           msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
@@ -3070,7 +3116,7 @@ async function handleMessage(request, sender) {
           }
           
           newMessages.push(msg);
-        } catch {
+        } catch(e) {
           // Silently skip undecrytable wraps (nicht für uns)
         }
       }
@@ -3092,7 +3138,7 @@ async function handleMessage(request, sender) {
         await cacheDmMessages(combinedMessages, scope);
       }
 
-      return { messages: combinedMessages, source: 'merged' };
+      return { messages: combinedMessages, source: 'merged', relays: inboxRelays };
       
     } catch (error) {
        console.error('Failed to fetch/decrypt DMs:', error);
@@ -4092,3 +4138,4 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
   }
 });
+async function getCachedContacts(pubkey, includeWpMembers = false) { try { const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]); const cache = result[CONTACTS_CACHE_KEY]; if (!cache || cache.pubkey !== pubkey) return null; if (Boolean(cache.includeWpMembers) !== Boolean(includeWpMembers)) return null; if (Date.now() - cache.fetchedAt > CONTACTS_CACHE_TTL) return null; return cache.contacts; } catch { return null; } } async function setCachedContacts(pubkey, contacts, includeWpMembers = false) { try { await chrome.storage.local.set({ [CONTACTS_CACHE_KEY]: { pubkey, includeWpMembers: Boolean(includeWpMembers), contacts, fetchedAt: Date.now() } }); } catch (error) { console.warn('[Nostr] Failed to cache contacts:', error.message); } }

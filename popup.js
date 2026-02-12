@@ -2133,24 +2133,35 @@ function closeConversation() {
 
 async function loadConversationMessages(contactPubkey) {
   const messageList = document.getElementById('message-list');
+  const relayStatus = document.getElementById('conversation-relays');
   if (!messageList) return;
   
   messageList.innerHTML = '<p class="empty">Nachrichten werden geladen...</p>';
+  if (relayStatus) relayStatus.style.display = 'none';
   
   try {
     const dmRelayInput = document.getElementById('dm-relay-url');
-    const relayUrl = dmRelayInput?.value || null; // Use entered relay or default logic
-    
+    // Multirelay-Support: Split by comma
+    const rawRelayUrl = dmRelayInput?.value || '';
+    const relayUrls = rawRelayUrl.split(',').map(r => r.trim()).filter(Boolean);
+
     // We request DMs with this specific contact
     const response = await chrome.runtime.sendMessage({
       type: 'NOSTR_GET_DMS',
       payload: {
         scope: contactsRequestScope,
-        relayUrl: relayUrl, 
+        relayUrl: relayUrls.length > 0 ? relayUrls : null, // Pass array or null
         contactPubkey: contactPubkey,
         limit: 50
       }
     });
+
+    // Display used relays if available in response
+    if (relayStatus && response?.result?.relays) {
+       const usedRelays = Array.isArray(response.result.relays) ? response.result.relays : [response.result.relays];
+       relayStatus.innerHTML = `Relays: ${usedRelays.map(r => `<span class="relay-tag">${new URL(r).hostname}</span>`).join('')}`;
+       relayStatus.style.display = 'flex';
+    }
     
     // Error Handling
     if (response?.error) {
