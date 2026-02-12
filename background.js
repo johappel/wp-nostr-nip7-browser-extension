@@ -1895,22 +1895,15 @@ async function handleMessage(request, sender) {
     'NOSTR_NIP04_DECRYPT',
     'NOSTR_NIP44_ENCRYPT',
     'NOSTR_NIP44_DECRYPT',
-    // NIP-17 Direktnachrichten
-    'NOSTR_SEND_DM',
-    'NOSTR_GET_DMS',
-    'NOSTR_GET_DM_RELAYS',
-    'NOSTR_SUBSCRIBE_DMS',
-    'NOSTR_UNSUBSCRIBE_DMS',
-    'NOSTR_GET_UNREAD_COUNT',
-    'NOSTR_CLEAR_UNREAD',
-    'NOSTR_SET_DM_NOTIFICATIONS',
-    'NOSTR_GET_DM_NOTIFICATIONS',
-    'NOSTR_CLEAR_DM_CACHE',
-    'NOSTR_POLL_DMS',
     // WP Members Cache
     'NOSTR_GET_WP_MEMBERS',
     'NOSTR_REFRESH_WP_MEMBERS',
     'NOSTR_ADD_CONTACT'
+    // NIP-17 Direktnachrichten: NICHT in scopedTypes!
+    // DM-Handler nutzen findDmKey() das alle Scopes eigenständig durchsucht.
+    // ensureKeyScope() würde sonst den Scope auf 'global' resetten (Popup sendet
+    // keinen scope), clearUnlockCaches() triggern und unnötige Passkey/Passwort-Prompts
+    // auslösen, obwohl der User z.B. 'ohne Schutz' gewählt hat.
   ]);
 
   if (scopedTypes.has(requestType)) {
