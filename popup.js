@@ -14,6 +14,9 @@ const UNLOCK_CACHE_POLICY_LABELS = {
   session: 'Bis Browser-Neustart'
 };
 
+let contactsRequestScope = 'global';
+let contactsRequestWpApi = null;
+
 // ========================================
 // View-Router
 // ========================================
@@ -261,6 +264,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const initialSigner = await refreshSignerIdentity(protectionRow, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
+  setContactRequestContext(activeScope, activeWpApi);
   
   // UI aktualisieren
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
@@ -340,6 +344,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        setContactRequestContext(activeScope, activeWpApi);
         
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
@@ -413,6 +418,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         renderInstanceCard(instanceCard, activeViewer);
         updateUserHero(activeViewer, activeRuntimeStatus);
@@ -603,6 +609,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
@@ -641,6 +648,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
         updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
@@ -729,6 +737,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
         activeRuntimeStatus = signerContext?.runtimeStatus || null;
         activeScope = signerContext?.scope || activeScope;
+        setContactRequestContext(activeScope, activeWpApi);
         renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
         updateUserHero(activeViewer, activeRuntimeStatus);
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
@@ -854,6 +863,11 @@ function sanitizeAuthBroker(raw) {
   } catch {
     return null;
   }
+}
+
+function setContactRequestContext(scope, wpApi) {
+  contactsRequestScope = normalizeScope(scope);
+  contactsRequestWpApi = sanitizeWpApi(wpApi);
 }
 
 function hasProfileContext(viewer) {
@@ -1713,9 +1727,6 @@ async function saveDmRelay(url) {
 // Contact List Functions (TASK-18)
 // ========================================
 
-const CONTACTS_CACHE_KEY = 'nostrContactsCacheV1';
-const CONTACTS_CACHE_TTL = 15 * 60 * 1000; // 15 minutes
-
 let currentContacts = [];
 let currentContactFilter = 'all';
 let contactSearchQuery = '';
@@ -1728,20 +1739,14 @@ async function loadContacts(forceRefresh = false) {
   contactList.innerHTML = '<div class="contact-loading"><p class="empty">Kontakte werden geladen...</p></div>';
   
   try {
-    // Check cache first
-    if (!forceRefresh) {
-      const cached = await getCachedContacts();
-      if (cached && cached.length > 0) {
-        currentContacts = cached;
-        renderContacts(cached, currentContactFilter, contactSearchQuery);
-        return;
-      }
-    }
-    
     // Fetch from background
+    const requestType = forceRefresh ? 'NOSTR_REFRESH_CONTACTS' : 'NOSTR_GET_CONTACTS';
     const response = await chrome.runtime.sendMessage({
-      type: 'NOSTR_GET_CONTACTS',
-      payload: { forceRefresh }
+      type: requestType,
+      payload: {
+        scope: contactsRequestScope,
+        wpApi: contactsRequestWpApi
+      }
     });
     
     if (response?.error) {
@@ -1762,33 +1767,38 @@ async function loadContacts(forceRefresh = false) {
   }
 }
 
-async function getCachedContacts() {
-  try {
-    const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
-    const cache = result?.[CONTACTS_CACHE_KEY];
-    if (!cache || typeof cache !== 'object') return null;
-    
-    const now = Date.now();
-    if (typeof cache.timestamp === 'number' && (now - cache.timestamp) < CONTACTS_CACHE_TTL) {
-      return Array.isArray(cache.contacts) ? cache.contacts : null;
+function getContactSources(contact) {
+  const sources = new Set();
+  const rawSources = Array.isArray(contact?.sources) ? contact.sources : [];
+  for (const source of rawSources) {
+    const normalized = String(source || '').trim().toLowerCase();
+    if (!normalized) continue;
+    if (normalized === 'wp') {
+      sources.add('wordpress');
+      continue;
     }
-    return null;
-  } catch {
-    return null;
+    if (normalized === 'both' || normalized === 'merged') {
+      sources.add('nostr');
+      sources.add('wordpress');
+      continue;
+    }
+    sources.add(normalized);
   }
-}
 
-async function cacheContacts(contacts) {
-  try {
-    await chrome.storage.local.set({
-      [CONTACTS_CACHE_KEY]: {
-        contacts,
-        timestamp: Date.now()
-      }
-    });
-  } catch {
-    // Cache failure is non-critical
+  const rawSource = String(contact?.source || '').trim().toLowerCase();
+  if (rawSource === 'wp') {
+    sources.add('wordpress');
+  } else if (rawSource === 'both' || rawSource === 'merged') {
+    sources.add('nostr');
+    sources.add('wordpress');
+  } else if (rawSource) {
+    sources.add(rawSource);
   }
+
+  if (!sources.size) {
+    sources.add('nostr');
+  }
+  return Array.from(sources);
 }
 
 function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
@@ -1799,7 +1809,7 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
   let filtered = contacts;
   if (sourceFilter !== 'all') {
     filtered = filtered.filter(c => {
-      const sources = c.sources || [];
+      const sources = getContactSources(c);
       if (sourceFilter === 'nostr') return sources.includes('nostr');
       if (sourceFilter === 'wordpress') return sources.includes('wordpress');
       return true;
@@ -1848,13 +1858,12 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
 
 function renderContactItem(contact) {
   const pubkey = String(contact.pubkey || '');
-  const npub = String(contact.npub || '');
   const displayName = String(contact.displayName || contact.name || '').trim() || formatShortHex(pubkey);
   const nip05 = String(contact.nip05 || '').trim();
   const avatarUrl = String(contact.picture || contact.avatarUrl || '').trim();
   
   // Determine source badge
-  const sources = contact.sources || [];
+  const sources = getContactSources(contact);
   let sourceLabel = 'nostr';
   let sourceClass = 'nostr';
   if (sources.includes('nostr') && sources.includes('wordpress')) {

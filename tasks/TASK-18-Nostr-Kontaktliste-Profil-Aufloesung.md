@@ -34,9 +34,10 @@ Für jeden Kontakt wird das Nostr-Profil (Kind 0) aufgelöst und gecacht.
 
 ### WordPress-User (REST API)
 
-- Endpunkt: `{restUrl}/wp-nostr/v1/members` (oder ähnlich)
-- Liefert: `{ userId, displayName, avatarUrl, npub, nip05 }`
+- Endpunkt: `{restUrl}/members` (restUrl stammt aus dem Viewer-Context)
+- Liefert: `{ userId, displayName, avatarUrl, pubkey, npub, nip05 }`
 - Nur User der Primary Domain werden abgerufen
+- Nur User mit gueltigem Nostr-Pubkey (hex oder npub) werden beruecksichtigt
 - Merge-Logik: WP-User mit passendem Pubkey werden mit Nostr-Profil zusammengeführt
 
 ## Architektur
@@ -56,11 +57,11 @@ Für jeden Kontakt wird das Nostr-Profil (Kind 0) aufgelöst und gecacht.
 
 ```javascript
 // Kontaktliste abrufen
-{ type: 'NOSTR_GET_CONTACTS', payload: { scope } }
+{ type: 'NOSTR_GET_CONTACTS', payload: { scope, wpApi } }
 → { result: { contacts: [...], source: 'cache'|'fresh' } }
 
 // Kontaktliste aktualisieren (Force-Refresh)
-{ type: 'NOSTR_REFRESH_CONTACTS', payload: { scope, relayUrl } }
+{ type: 'NOSTR_REFRESH_CONTACTS', payload: { scope, relayUrl, wpApi } }
 → { result: { contacts: [...], source: 'fresh' } }
 
 // WP-User der Primary Domain abrufen
@@ -170,7 +171,7 @@ async function fetchWpMembers(wpApi) {
   if (!context) return [];
   
   const baseUrl = normalizeWpRestBaseUrl(context.restUrl);
-  const endpoint = new URL('wp-nostr/v1/members', baseUrl).toString();
+  const endpoint = new URL('members', baseUrl).toString();
   
   const response = await fetch(endpoint, {
     headers: { 'X-WP-Nonce': context.nonce },
@@ -255,6 +256,7 @@ async function setCachedContacts(scope, contacts) {
 - [ ] Kind 3 Contact List wird vom konfigurierten Relay abgerufen
 - [ ] Kind 0 Profile werden batch-weise für alle Kontakte geladen
 - [ ] WP-User der Primary Domain werden per REST API abgerufen
+- [ ] Es werden nur WP-User mit gueltigem Nostr-Pubkey/npub in die Kontaktliste uebernommen
 - [ ] Nostr- und WP-Kontakte werden korrekt zusammengeführt (Deduplizierung über Pubkey)
 - [ ] Kontaktdaten werden in `chrome.storage.local` gecacht (TTL: 15 min)
 - [ ] Force-Refresh möglich (Cache invalidieren)
@@ -277,3 +279,4 @@ async function setCachedContacts(scope, contacts) {
 - WebSocket-Verbindungen nur zu `wss://` (kein `ws://`)
 - Relay-URL wird validiert und normalisiert (`normalizeRelayUrl()`)
 - WP REST API Anfragen nutzen Nonce-Validierung
+

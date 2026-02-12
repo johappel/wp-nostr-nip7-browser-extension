@@ -831,7 +831,7 @@ async function fetchWpMembers(wpApi) {
   if (!baseUrl) return [];
 
   try {
-    const endpoint = new URL('wp-nostr/v1/members', baseUrl).toString();
+    const endpoint = new URL('members', baseUrl).toString();
     const response = await fetch(endpoint, {
       headers: { 'X-WP-Nonce': context.nonce },
       credentials: 'include',
@@ -841,7 +841,9 @@ async function fetchWpMembers(wpApi) {
     if (!response.ok) return [];
 
     const data = await response.json();
-    const members = data.members || data || [];
+    const members = Array.isArray(data?.members)
+      ? data.members
+      : (Array.isArray(data) ? data : []);
 
     return members
       .filter(m => m.pubkey || m.npub_hex || m.npub)
@@ -936,11 +938,12 @@ function mergeContacts(nostrContacts, profiles, wpMembers) {
     .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
 }
 
-async function getCachedContacts(scope) {
+async function getCachedContacts(scope, includeWpMembers = false) {
   try {
     const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
     const cache = result[CONTACTS_CACHE_KEY];
     if (!cache || cache.scope !== scope) return null;
+    if (Boolean(cache.includeWpMembers) !== Boolean(includeWpMembers)) return null;
     if (Date.now() - cache.fetchedAt > CONTACTS_CACHE_TTL) return null;
     return cache.contacts;
   } catch {
@@ -948,11 +951,12 @@ async function getCachedContacts(scope) {
   }
 }
 
-async function setCachedContacts(scope, contacts) {
+async function setCachedContacts(scope, contacts, includeWpMembers = false) {
   try {
     await chrome.storage.local.set({
       [CONTACTS_CACHE_KEY]: {
         scope,
+        includeWpMembers: Boolean(includeWpMembers),
         contacts,
         fetchedAt: Date.now()
       }
@@ -1738,9 +1742,11 @@ async function handleMessage(request, sender) {
     if (!pubkey) {
       return { contacts: [], source: 'none', reason: 'no_key' };
     }
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    const includeWpMembers = Boolean(wpApi);
 
     // Cache prüfen
-    const cached = await getCachedContacts(scope);
+    const cached = await getCachedContacts(scope, includeWpMembers);
     if (cached) {
       return { contacts: cached, source: 'cache' };
     }
@@ -1756,13 +1762,13 @@ async function handleMessage(request, sender) {
 
     // WP Members falls wpApi vorhanden
     let wpMembers = [];
-    if (request.payload?.wpApi) {
-      wpMembers = await fetchWpMembers(request.payload.wpApi);
+    if (wpApi) {
+      wpMembers = await fetchWpMembers(wpApi);
     }
 
     // Merge
     const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
-    await setCachedContacts(scope, contacts);
+    await setCachedContacts(scope, contacts, includeWpMembers);
 
     return { contacts, source: 'fresh' };
   }
@@ -1780,6 +1786,8 @@ async function handleMessage(request, sender) {
     if (!pubkey) {
       return { contacts: [], source: 'none', reason: 'no_key' };
     }
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    const includeWpMembers = Boolean(wpApi);
 
     const relayUrl = normalizeRelayUrl(request.payload?.relayUrl) ||
       normalizeRelayUrl((await chrome.storage.local.get(['dmRelayUrl'])).dmRelayUrl) ||
@@ -1790,12 +1798,12 @@ async function handleMessage(request, sender) {
     const profiles = await fetchProfiles(pubkeys, relayUrl);
 
     let wpMembers = [];
-    if (request.payload?.wpApi) {
-      wpMembers = await fetchWpMembers(request.payload.wpApi);
+    if (wpApi) {
+      wpMembers = await fetchWpMembers(wpApi);
     }
 
     const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
-    await setCachedContacts(scope, contacts);
+    await setCachedContacts(scope, contacts, includeWpMembers);
 
     return { contacts, source: 'fresh' };
   }

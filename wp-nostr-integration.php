@@ -166,6 +166,12 @@ function nostr_register_endpoints() {
         'permission_callback' => '__return_true'
     ]);
 
+    register_rest_route('nostr/v1', '/members', [
+        'methods' => 'GET',
+        'callback' => 'nostr_get_members',
+        'permission_callback' => 'is_user_logged_in'
+    ]);
+
     // Encrypted key backup endpoints (user-scoped)
     register_rest_route('nostr/v1', '/backup/upload', [
         'methods' => 'POST',
@@ -395,6 +401,47 @@ function nostr_get_viewer() {
         'authBrokerUrl' => nostr_is_auth_broker_enabled() ? nostr_get_auth_broker_url() : '',
         'authBrokerOrigin' => nostr_get_auth_broker_origin(),
         'authBrokerRpId' => nostr_get_auth_broker_rp_id()
+    ];
+}
+
+function nostr_get_members() {
+    $users = get_users([
+        'fields' => ['ID', 'display_name', 'user_login'],
+        'orderby' => 'display_name',
+        'order' => 'ASC',
+        'meta_query' => [
+            [
+                'key' => 'nostr_pubkey',
+                'compare' => 'EXISTS'
+            ]
+        ]
+    ]);
+
+    $members = [];
+    foreach ($users as $user) {
+        $user_id = (int) ($user->ID ?? 0);
+        if ($user_id <= 0) {
+            continue;
+        }
+
+        $pubkey = strtolower((string) get_user_meta($user_id, 'nostr_pubkey', true));
+        if (!preg_match('/^[a-f0-9]{64}$/', $pubkey)) {
+            continue;
+        }
+
+        $members[] = [
+            'userId' => $user_id,
+            'displayName' => (string) ($user->display_name ?? ''),
+            'avatarUrl' => (string) get_avatar_url($user_id, ['size' => 96]),
+            'pubkey' => $pubkey,
+            'npub' => '',
+            'nip05' => ''
+        ];
+    }
+
+    return [
+        'members' => $members,
+        'count' => count($members)
     ];
 }
 
