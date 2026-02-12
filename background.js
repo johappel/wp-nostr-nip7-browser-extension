@@ -3018,16 +3018,19 @@ async function handleMessage(request, sender) {
     }
 
     const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
+    
+    // Use scoped KeyManager instance to avoid race conditions with global keyManager state
+    const scopedKm = new KeyManager(chrome.storage.local, activeKeyScope);
 
     // Private Key holen
-    const hasKey = await keyManager.hasKey();
+    const hasKey = await scopedKm.hasKey();
     if (!hasKey) {
       throw new Error('No local key found for this scope.');
     }
 
-    const protectionMode = await keyManager.getProtectionMode();
+    const protectionMode = await scopedKm.getProtectionMode();
     const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKeyRaw = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    const privateKeyRaw = await scopedKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
     if (!privateKeyRaw) {
       throw new Error('Failed to unlock key');
     }
@@ -3108,6 +3111,8 @@ async function handleMessage(request, sender) {
 
     const { relayUrl, since, limit, contactPubkey } = request.payload || {};
     const scope = activeKeyScope;
+    // Use scoped KeyManager instance to avoid race conditions with global keyManager state
+    const scopedKm = new KeyManager(chrome.storage.local, scope);
 
     // Zuerst aus Cache holen
     const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
@@ -3121,22 +3126,25 @@ async function handleMessage(request, sender) {
       // Da wir deduplizieren, ist Over-Fetching okay.
       fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
     }
-
-    // Private Key für Entschlüsselung
-    const hasKey = await keyManager.hasKey();
+scopedKm.hasKey();
     if (!hasKey) {
       return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' }; // Return cache if no key
     }
 
     try {
-      const protectionMode = await keyManager.getProtectionMode();
+      const protectionMode = await scopedKm.getProtectionMode();
       // Hier kein interaktiver Prompt wenn Cache da ist? 
       // Doch, wir brauchen den Key zum Entschlüsseln neuer Nachrichten.
       // Falls User abbricht, geben wir Cache zurück.
       let privateKey;
+      let rawKey; // Hoisted for debug access
+      let password; // Hoisted for debug access
+
       try {
-        const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-        const rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+        password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+        rawKey = await scopedKm
+        password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+        rawKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
         privateKey = ensureUint8(rawKey);
       } catch (e) {
         if (cachedMessages.length > 0) {
@@ -3151,7 +3159,7 @@ async function handleMessage(request, sender) {
              mode: protectionMode,
              hasPassword: !!password,
              rawKeyType: typeof rawKey,
-             rawKeyVal: rawKey,
+             rawKeyVal: rawKey ? 'PRESENT' : 'NULL', // Avoid dumping full key
              ensureResult: privateKey
          });
          
