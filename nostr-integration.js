@@ -476,14 +476,15 @@ class NostrWPIntegration {
     container.id = 'nostr-register-container';
     container.innerHTML = `
       <div class="nostr-register-prompt">
-        <p>Verknuepfe dein WordPress-Account mit Nostr</p>
         <button id="nostr-register-btn" class="nostr-btn nostr-btn-primary">
           Mit Nostr verknuepfen
         </button>
+        <p>Verknuepfe dein WordPress-Account mit Nostr</p>
         <p class="nostr-register-hint">
           Du bekommst einen einmaligen Nostr-Key, der mit deinem Account verknuepft wird.
           Du kannst ihn zusätzlich mit einem Passwort oder einem Passkey in deinem Browser verschllüsseln, damit keine anderen Nutzer deines Computers darauf zugreifen koennen.
         </p>
+              
       </div>
     `;
 
@@ -503,22 +504,23 @@ class NostrWPIntegration {
     btn.textContent = 'Registriere...';
 
     try {
-      const hexPubkey = await this.getPublicKey();
+      let hexPubkey = await this.getPublicKey();
 
-      const response = await fetch(`${this.config.restUrl}register`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-WP-Nonce': this.config.nonce
-        },
-        body: JSON.stringify({ pubkey: hexPubkey })
-      });
+      let response = await this.postRegistration(hexPubkey);
+      let result = await this.safeJson(response);
 
-      let result = {};
-      try {
-        result = await response.json();
-      } catch {
-        result = {};
+      // Auto-recovery: if the pubkey was wrongly inherited from another WP user's
+      // scope, discard it and generate a fresh key, then retry once.
+      if (response.status === 409 && String(result?.code || '') === 'pubkey_in_use') {
+        console.warn('[Nostr] pubkey_in_use on first registration – requesting fresh key');
+        try {
+          hexPubkey = await this.requestFreshKey();
+          response = await this.postRegistration(hexPubkey);
+          result = await this.safeJson(response);
+        } catch (retryErr) {
+          console.error('[Nostr] Fresh-key retry failed:', retryErr);
+          // Fall through to normal error handling with original response
+        }
       }
 
       if (response.ok && result.success) {
@@ -534,6 +536,33 @@ class NostrWPIntegration {
       btn.disabled = false;
       btn.textContent = 'Mit Nostr verknuepfen';
     }
+  }
+
+  async postRegistration(hexPubkey) {
+    return fetch(`${this.config.restUrl}register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-WP-Nonce': this.config.nonce
+      },
+      body: JSON.stringify({ pubkey: hexPubkey })
+    });
+  }
+
+  async safeJson(response) {
+    try { return await response.json(); } catch { return {}; }
+  }
+
+  /**
+   * Ask the extension to discard the current scope's key and generate a brand-new one.
+   * Returns the new hex pubkey.
+   */
+  async requestFreshKey() {
+    const pubkey = await this.sendExtensionMessage('NOSTR_GET_PUBLIC_KEY', { forceNew: true }, 30000);
+    if (typeof pubkey !== 'string' || pubkey.length < 10) {
+      throw new Error('Extension returned invalid public key after forceNew');
+    }
+    return pubkey;
   }
 
   formatRegistrationError(response, result, attemptedPubkey) {

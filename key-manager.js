@@ -389,6 +389,24 @@ export class KeyManager {
     await this.storage.set({ [this.keyName(KeyManager.PUBKEY_KEY)]: normalized });
     return normalized;
   }
+
+  /**
+   * Remove all key data for the current scope.
+   * Used to discard a wrongly-inherited key before generating a fresh one.
+   */
+  async clearScopeKeys() {
+    const allKeys = this.keyNames([
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.MODE_KEY,
+      KeyManager.CREATED_KEY
+    ]);
+    await this.storage.remove(allKeys);
+  }
 }
 
 export default KeyManager;

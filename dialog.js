@@ -110,6 +110,8 @@ function showPasswordDialog(mode) {
   const app = document.getElementById('app');
   const isCreate = mode === 'create';
   const isUnlockPasskey = mode === 'unlock-passkey';
+  const isCreatePasskey = mode === 'create-passkey';
+  const isCreatePassword = mode === 'create-password';
   const passkeySupported = typeof window.PublicKeyCredential !== 'undefined';
 
   if (isUnlockPasskey) {
@@ -150,6 +152,101 @@ function showPasswordDialog(mode) {
         errorEl.hidden = false;
       }
     };
+
+    document.getElementById('cancel').onclick = () => {
+      chrome.storage.session.set({ passwordResult: null });
+      window.close();
+    };
+    return;
+  }
+
+  // Dedicated passkey-creation dialog (used by CHANGE_PROTECTION → passkey)
+  if (isCreatePasskey) {
+    app.innerHTML = `
+      <div class="dialog password">
+        <h2>Passkey einrichten</h2>
+        <p>Erstelle einen Passkey mit Biometrie oder PIN, um deinen Schl\u00fcssel zu sch\u00fctzen.</p>
+        <p id="error" class="error" hidden></p>
+        <div class="actions">
+          <button id="setup-passkey-direct" class="btn-primary">\ud83d\udd10 Passkey erstellen</button>
+          <button id="cancel" class="btn-secondary">Abbrechen</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('setup-passkey-direct').onclick = async () => {
+      const errorEl = document.getElementById('error');
+      errorEl.hidden = true;
+      try {
+        if (!passkeySupported) {
+          throw new Error('Passkey wird in diesem Browser-Kontext nicht unterst\u00fctzt');
+        }
+        const credentialId = await createPasskeyCredential();
+        await chrome.storage.session.set({
+          passwordResult: {
+            protection: 'passkey',
+            credentialId
+          }
+        });
+        window.close();
+      } catch (err) {
+        errorEl.textContent = mapPasskeyError(err, 'setup');
+        errorEl.hidden = false;
+      }
+    };
+
+    document.getElementById('cancel').onclick = () => {
+      chrome.storage.session.set({ passwordResult: null });
+      window.close();
+    };
+    return;
+  }
+
+  // Dedicated password-creation dialog (used by CHANGE_PROTECTION → password)
+  if (isCreatePassword) {
+    app.innerHTML = `
+      <div class="dialog password">
+        <h2>Passwort festlegen</h2>
+        <p>W\u00e4hle ein Passwort, um deinen privaten Schl\u00fcssel zu sch\u00fctzen.</p>
+        <div class="input-group">
+          <input type="password" id="password" placeholder="Passwort (mind. 8 Zeichen)" autofocus />
+        </div>
+        <div class="input-group">
+          <input type="password" id="password-confirm" placeholder="Passwort wiederholen" />
+        </div>
+        <p id="error" class="error" hidden></p>
+        <div class="actions">
+          <button id="submit" class="btn-primary">Mit Passwort speichern</button>
+          <button id="cancel" class="btn-secondary">Abbrechen</button>
+        </div>
+      </div>
+    `;
+
+    const passwordEl = document.getElementById('password');
+    const confirmEl = document.getElementById('password-confirm');
+
+    document.getElementById('submit').onclick = async () => {
+      const pw = passwordEl.value;
+      const pw2 = confirmEl.value;
+      const errorEl = document.getElementById('error');
+
+      if (pw !== pw2) {
+        errorEl.textContent = 'Passw\u00f6rter stimmen nicht \u00fcberein';
+        errorEl.hidden = false;
+        return;
+      }
+      if (pw.length < 8) {
+        errorEl.textContent = 'Mindestens 8 Zeichen erforderlich';
+        errorEl.hidden = false;
+        return;
+      }
+
+      await chrome.storage.session.set({ passwordResult: { password: pw } });
+      window.close();
+    };
+
+    passwordEl.onkeypress = (e) => { if (e.key === 'Enter') confirmEl.focus(); };
+    confirmEl.onkeypress = (e) => { if (e.key === 'Enter') document.getElementById('submit').click(); };
 
     document.getElementById('cancel').onclick = () => {
       chrome.storage.session.set({ passwordResult: null });

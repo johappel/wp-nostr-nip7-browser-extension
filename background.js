@@ -1940,7 +1940,7 @@ async function handleMessage(request, sender) {
         await keyManager.storeKey(secretKey, null);
         await clearUnlockCaches();
       } else if (newMode === KeyManager.MODE_PASSWORD) {
-        const setupResult = await promptPassword('create');
+        const setupResult = await promptPassword('create-password');
         if (!setupResult) throw new Error('Password setup canceled');
         const password = extractPasswordFromDialogResult(setupResult);
         if (!password) throw new Error('Password required');
@@ -1948,7 +1948,7 @@ async function handleMessage(request, sender) {
         await clearUnlockCaches();
         await cachePasswordWithPolicy(password);
       } else if (newMode === KeyManager.MODE_PASSKEY) {
-        const setupResult = await promptPassword('create');
+        const setupResult = await promptPassword('create-passkey');
         if (!setupResult || setupResult.protection !== KeyManager.MODE_PASSKEY) {
           throw new Error('Passkey setup canceled');
         }
@@ -2922,6 +2922,16 @@ async function handleMessage(request, sender) {
   switch (request.type) {
     case 'NOSTR_GET_PUBLIC_KEY': {
       const allowCreateIfMissing = request?.payload?.createIfMissing !== false;
+
+      // forceNew: discard any existing key in this scope and generate a fresh one.
+      // Used by performRegistration() to recover from pubkey_in_use conflicts
+      // (e.g. a key wrongly copied from another WP user's scope).
+      if (request?.payload?.forceNew === true) {
+        console.log('[Nostr] forceNew requested for scope', activeKeyScope, '– discarding existing key');
+        await keyManager.clearScopeKeys();
+        await clearUnlockCaches();
+      }
+
       if (!await keyManager.hasKey()) {
         if (!allowCreateIfMissing) {
           throw new Error('No local key found for this scope.');
@@ -3112,12 +3122,20 @@ async function getExistingProtectionPreference() {
       if (preferredUserId) {
         const candidateUserIdMatch = scope.match(/:u:(\d+)$/);
         if (candidateUserIdMatch && candidateUserIdMatch[1] === preferredUserId) {
-          // Exact user-id match – use immediately
+          // Exact user-id match (same identity across domains) – use immediately
           return candidate;
+        }
+        // IMPORTANT: When the active scope is user-specific (wp:host:u:N),
+        // never inherit keys from a DIFFERENT user (wp:host:u:M where M≠N).
+        // This prevents the same private key being shared between distinct
+        // WordPress accounts, which would cause "pubkey_in_use" errors.
+        if (candidateUserIdMatch && candidateUserIdMatch[1] !== preferredUserId) {
+          continue; // skip scopes belonging to a different WP user
         }
       }
 
-      // Remember first valid scope as fallback
+      // Remember first valid scope as fallback (only global or non-user scopes reach here
+      // when preferredUserId is set, since cross-user scopes are skipped above)
       if (!fallbackMatch) {
         fallbackMatch = candidate;
       }
@@ -3201,7 +3219,10 @@ function getPasswordDialogWindowSize(mode) {
     case 'create':
       return { width: 520, height: 720 };
     case 'unlock-passkey':
+    case 'create-passkey':
       return { width: 560, height: 760 };
+    case 'create-password':
+      return { width: 420, height: 480 };
     case 'unlock':
     default:
       return { width: 420, height: 420 };
