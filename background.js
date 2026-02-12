@@ -1296,13 +1296,20 @@ function unwrapGiftWrap(recipientPrivateKey, giftWrapEvent) {
   const recipientTag = rumor.tags?.find(t => t[0] === 'p');
   const recipientPubkey = recipientTag?.[1] || '';
   
+  // Eindeutige ID generieren (basierend auf Inhalt + Timestamp + Sender um Kollisionen zu vermeiden)
+  // Einfache Hash-Alternative für Strings:
+  const contentHash = Array.from(rumor.content).reduce((h, c) => Math.imul(31, h) + c.charCodeAt(0) | 0, 0).toString(16);
+
   return {
-    id: rumor.created_at + ':' + rumor.pubkey.slice(0, 8), // Pseudo-ID
-    senderPubkey: rumor.pubkey,
-    recipientPubkey: recipientPubkey,
+    id: giftWrapEvent.id, // ID des Gift Wraps als Referenz nutzen (eindeutig auf Relay)
+    innerId: rumor.id || (rumor.created_at + ':' + rumor.pubkey.slice(0, 8) + ':' + contentHash),
+    pubkey: rumor.pubkey,
     content: rumor.content,
     createdAt: rumor.created_at,
-    giftWrapId: giftWrapEvent.id
+    kind: rumor.kind,
+    tags: rumor.tags,
+    senderPubkey: rumor.pubkey,
+    recipientPubkey: recipientPubkey
   };
 }
 
@@ -3000,24 +3007,39 @@ async function handleMessage(request, sender) {
 
     // Zuerst aus Cache holen
     const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
-    if (cachedMessages.length > 0 && !request.payload?.forceRefresh) {
-      return { messages: cachedMessages, source: 'cache' };
+    
+    // Immer versuchen, neue Nachrichten vom Relay zu holen (Sync-Verhalten für "lückenlosen" Chat),
+    // es sei denn, forceRefresh=false ist explizit gesetzt (was hier nicht der Standard ist).
+    // Wir nutzen den Zeitstempel der letzten bekannten Nachricht als 'since'-Filter.
+    let fetchSince = request.payload?.since;
+    if (!fetchSince && cachedMessages.length > 0) {
+      // Sicherheits-Puffer: 1 Stunde zurück, um eventuell verpasste Nachrichten oder Uhren-Drift abzudecken
+      // Da wir deduplizieren, ist Over-Fetching okay.
+      fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
     }
 
     // Private Key für Entschlüsselung
     const hasKey = await keyManager.hasKey();
     if (!hasKey) {
-      return { messages: [], source: 'none', reason: 'no_key' };
-    }
-
-    const protectionMode = await keyManager.getProtectionMode();
-    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
-    const privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
-    if (!privateKey) {
-      return { messages: [], source: 'none', reason: 'locked' };
+      return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' }; // Return cache if no key
     }
 
     try {
+      const protectionMode = await keyManager.getProtectionMode();
+      // Hier kein interaktiver Prompt wenn Cache da ist? 
+      // Doch, wir brauchen den Key zum Entschlüsseln neuer Nachrichten.
+      // Falls User abbricht, geben wir Cache zurück.
+      let privateKey;
+      try {
+        const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+        privateKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      } catch (e) {
+        if (cachedMessages.length > 0) {
+           return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
+        }
+        throw e;
+      }
+      
       const myPubkey = getPublicKey(privateKey);
       const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
 
@@ -3025,14 +3047,15 @@ async function handleMessage(request, sender) {
       const filters = [{
         kinds: [1059],
         '#p': [myPubkey],
-        limit: limit || 100
+        limit: limit || 50 // Standard limit für Sync
       }];
-      if (since) filters[0].since = since;
+      if (fetchSince) filters[0].since = fetchSince;
 
-      const giftWraps = await subscribeOnce(normalizedRelay, filters, 15000);
+      // Timeout verkürzen für bessere UX (5s statt 15s), da wir eh Cache haben
+      const giftWraps = await subscribeOnce(normalizedRelay, filters, 5000);
 
       // Entschlüsseln und validieren
-      const messages = [];
+      const newMessages = [];
       for (const gw of giftWraps) {
         try {
           const msg = unwrapGiftWrap(privateKey, gw);
@@ -3046,21 +3069,35 @@ async function handleMessage(request, sender) {
             }
           }
           
-          messages.push(msg);
+          newMessages.push(msg);
         } catch {
           // Silently skip undecrytable wraps (nicht für uns)
         }
       }
+      
+      privateKey.fill(0); // Key cleanen
+
+      // Merging: Deduplizierung basierend auf ID (GiftWrap ID)
+      const messageMap = new Map();
+      cachedMessages.forEach(m => messageMap.set(m.id, m));
+      newMessages.forEach(m => messageMap.set(m.id, m));
+      
+      const combinedMessages = Array.from(messageMap.values());
 
       // Sortieren nach created_at
-      messages.sort((a, b) => a.createdAt - b.createdAt);
+      combinedMessages.sort((a, b) => a.createdAt - b.createdAt);
 
-      // Cachen
-      await cacheDmMessages(messages, scope);
+      // Cachen (nur wenn wir neue haben oder Cache leer war)
+      if (newMessages.length > 0 || cachedMessages.length === 0) {
+        await cacheDmMessages(combinedMessages, scope);
+      }
 
-      return { messages, source: 'fresh' };
-    } finally {
-      privateKey.fill(0);
+      return { messages: combinedMessages, source: 'merged' };
+      
+    } catch (error) {
+       console.error('Failed to fetch/decrypt DMs:', error);
+       // Fallback auf Cache im Fehlerfall
+       return { messages: cachedMessages, source: 'cache_fallback', error: error.message }; 
     }
   }
 
