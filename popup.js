@@ -2147,6 +2147,12 @@ function appendNewMessage(msg) {
   const messageList = document.getElementById('message-list');
   if (!messageList) return;
   
+  // Dedup: Prüfe ob Nachricht schon in der UI ist (per innerId oder giftWrapId)
+  const msgInnerId = msg.innerId;
+  const msgGiftWrapId = msg.giftWrapId || msg.id;
+  if (msgInnerId && messageList.querySelector(`[data-inner-id="${CSS.escape(msgInnerId)}"]`)) return;
+  if (msgGiftWrapId && messageList.querySelector(`[data-gw-id="${CSS.escape(msgGiftWrapId)}"]`)) return;
+  
   // Remove "empty" placeholder if present
   const empty = messageList.querySelector('.empty');
   if (empty) empty.remove();
@@ -2156,6 +2162,8 @@ function appendNewMessage(msg) {
   
   const div = document.createElement('div');
   div.className = `message-bubble ${isOutgoing ? 'message-out' : 'message-in'} message-new`;
+  if (msgInnerId) div.dataset.innerId = msgInnerId;
+  if (msgGiftWrapId) div.dataset.gwId = msgGiftWrapId;
   div.innerHTML = `
     <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
     <div class="message-time">${timeStr}</div>
@@ -2266,13 +2274,13 @@ function renderMessages(messages, contactPubkey) {
   messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   
   const html = messages.map(msg => {
-    // Determine direction
-    // If we sent it, direction is 'out'. If contact sent it, 'in'.
     const isOutgoing = msg.direction === 'out'; 
     const timeStr = formatMessageTime(msg.createdAt);
+    const innerIdAttr = msg.innerId ? ` data-inner-id="${escapeHtml(msg.innerId)}"` : '';
+    const gwIdAttr = (msg.giftWrapId || msg.id) ? ` data-gw-id="${escapeHtml(msg.giftWrapId || msg.id)}"` : '';
     
     return `
-      <div class="message-bubble ${isOutgoing ? 'message-out' : 'message-in'}">
+      <div class="message-bubble ${isOutgoing ? 'message-out' : 'message-in'}"${innerIdAttr}${gwIdAttr}>
         <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
         <div class="message-time">${timeStr}</div>
       </div>
@@ -2312,25 +2320,31 @@ async function sendMessage() {
        throw new Error(response.error);
     }
     
-    // Success: Optimistic Append
+    // Success: Append nur wenn nicht schon per Broadcast eingefügt
     const messageList = document.getElementById('message-list');
     if (messageList) {
-       const hasEmpty = messageList.querySelector('.empty');
-       if (hasEmpty) hasEmpty.remove();
-       
-       const tempMsg = {
-         direction: 'out',
-         content: content,
-         createdAt: Math.floor(Date.now() / 1000)
-       };
-       
-       const div = document.createElement('div');
-       div.className = 'message-bubble message-out';
-       div.innerHTML = `
-        <div class="message-content">${renderMinimalMarkdown(tempMsg.content)}</div>
-        <div class="message-time">${formatMessageTime(tempMsg.createdAt)}</div>
-       `;
-       messageList.appendChild(div);
+       const innerId = response.result?.innerId;
+       const eventId = response.result?.eventId;
+
+       // Dedup: Falls die Self-Copy per Subscription-Broadcast schon da ist, überspringen
+       const alreadyExists =
+         (innerId && messageList.querySelector(`[data-inner-id="${CSS.escape(innerId)}"]`)) ||
+         (eventId && messageList.querySelector(`[data-gw-id="${CSS.escape(eventId)}"]`));
+
+       if (!alreadyExists) {
+         const hasEmpty = messageList.querySelector('.empty');
+         if (hasEmpty) hasEmpty.remove();
+         
+         const div = document.createElement('div');
+         div.className = 'message-bubble message-out';
+         if (innerId) div.dataset.innerId = innerId;
+         if (eventId) div.dataset.gwId = eventId;
+         div.innerHTML = `
+          <div class="message-content">${renderMinimalMarkdown(content)}</div>
+          <div class="message-time">${formatMessageTime(Math.floor(Date.now() / 1000))}</div>
+         `;
+         messageList.appendChild(div);
+       }
        messageList.scrollTop = messageList.scrollHeight;
     }
     

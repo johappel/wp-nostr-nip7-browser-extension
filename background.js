@@ -1680,8 +1680,9 @@ async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
         msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
         msg.receivedAt = Date.now();
         
-        // In Cache speichern
+        // In Cache speichern (null = Duplikat)
         const cachedMsg = await cacheDmMessage(msg, scope, myPubkey);
+        if (!cachedMsg) return; // Duplikat überspringen
         
         // Notify any active frontend listeners (popup/chat UI) about the new message
         try {
@@ -1747,7 +1748,8 @@ async function pollForNewDms(scope, relayUrl, myPubkey, privateKey) {
         msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
         msg.receivedAt = Date.now();
         
-        await cacheDmMessage(msg, scope, myPubkey);
+        const cached = await cacheDmMessage(msg, scope, myPubkey);
+        if (!cached) continue; // Duplikat überspringen
         
         if (msg.direction === 'in') {
           await showDmNotification(msg);
@@ -2912,6 +2914,7 @@ async function handleMessage(request, sender) {
       return {
         success: true,
         eventId: wrapForRecipient.id,
+        innerId,
         publishedTo: targetRelays,
         errors: publishErrors.length > 0 ? publishErrors : undefined
       };
