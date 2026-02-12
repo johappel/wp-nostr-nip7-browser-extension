@@ -417,6 +417,7 @@ async function createPasskeyCredential() {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
   const passkeyIdentity = buildPasskeyIdentity(keyScope, userId, wpDisplayName);
+  const isChromium = /\b(?:Chrome|Chromium|Edg)\//i.test(navigator.userAgent);
 
   // Do NOT set rp.id explicitly – the browser derives the RP ID from the
   // extension origin (chrome-extension:// or moz-extension://) automatically.
@@ -444,16 +445,30 @@ async function createPasskeyCredential() {
   // We avoid sequential retries because the browser's WebAuthn prompt consumes
   // the user activation – a second attempt without a fresh click will instantly
   // fail with NotAllowedError.
-  // On non-Firefox Chromium we hint 'platform' to prefer Windows Hello / Touch ID
-  // but do NOT require it (no authenticatorAttachment) so the browser can fall
-  // back to other authenticators if needed.
+  const authenticatorSelection = {
+    userVerification: 'preferred',
+    residentKey: 'preferred'
+  };
+
+  // In Chromium extension popup windows, the cross-device passkey flow
+  // (QR code / phone) doesn't work and causes NotAllowedError.
+  // Force 'platform' authenticator (Windows Hello / Touch ID) on Chromium
+  // to bypass the broken cross-device path.  Firefox does not support
+  // authenticatorAttachment reliably, so we leave it unset there.
+  if (isChromium) {
+    authenticatorSelection.authenticatorAttachment = 'platform';
+  }
+
   const publicKey = {
     ...baseOptions,
-    authenticatorSelection: {
-      userVerification: 'preferred',
-      residentKey: 'preferred'
-    }
+    authenticatorSelection
   };
+
+  // Ensure the window has proper focus before triggering WebAuthn.
+  // Extension popup windows can lose focus briefly during creation,
+  // which causes Chrome to reject navigator.credentials.create().
+  window.focus();
+  await new Promise((r) => requestAnimationFrame(r));
 
   const credential = await navigator.credentials.create({ publicKey });
   if (!credential?.rawId) {
