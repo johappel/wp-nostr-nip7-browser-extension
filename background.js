@@ -1112,8 +1112,8 @@ async function fetchDmMessagesFromRelays(privateKey, since, limit, contactPubkey
   // OUTBOX relays checken? Nein, GiftWraps werden an MEINE Inbox geschickt.
   // Der Absender publiziert auf MEINEN Read-Relays.
   
-  const myInboxRelays = await fetchDmRelays(myPubkey, 'wss://relay.damus.io');
-  const relaysToQuery = myInboxRelays.length > 0 ? myInboxRelays : ['wss://relay.damus.io', 'wss://nos.lol'];
+  const myInboxRelays = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS);
+  const relaysToQuery = myInboxRelays.length > 0 ? myInboxRelays : [...DEFAULT_DM_RELAYS];
   
   // Deduplicate Relays
   const uniqueRelays = [...new Set(relaysToQuery.map(normalizeRelayUrl).filter(Boolean))];
@@ -1158,35 +1158,49 @@ async function clearContactsCache() {
 /**
  * Ruft DM-Relays eines Pubkeys ab (Kind 10050).
  * @param {string} pubkey - Hex pubkey
- * @param {string} lookupRelay - Relay URL für Lookup
+ * @param {string|string[]} lookupRelays - Relay URL(s) für Lookup (String oder Array)
  * @returns {Promise<Array<string>>} - Array von Relay URLs
  */
-async function fetchDmRelays(pubkey, lookupRelay) {
+async function fetchDmRelays(pubkey, lookupRelays) {
   const normalizedPubkey = normalizePubkeyHex(pubkey);
   if (!normalizedPubkey) return [];
   
-  const normalizedRelay = normalizeRelayUrl(lookupRelay);
-  if (!normalizedRelay) return [];
+  // Immer als Array behandeln
+  const relayList = Array.isArray(lookupRelays) ? lookupRelays : [lookupRelays];
+  const normalizedRelays = relayList
+    .map(r => normalizeRelayUrl(r))
+    .filter(Boolean);
+  if (!normalizedRelays.length) return [];
   
-  try {
-    const events = await subscribeOnce(normalizedRelay, [
-      { kinds: [10050], authors: [normalizedPubkey], limit: 1 }
-    ]);
-    
-    if (!events.length) return [];
-    
-    // Neuestes Event
-    const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
-    
-    // relay-Tags extrahieren
-    return latest.tags
-      .filter(t => t[0] === 'relay' && t[1])
-      .map(t => normalizeRelayUrl(t[1]))
-      .filter(Boolean);
-  } catch (error) {
-    console.warn('[NIP-17] Failed to fetch DM relays:', error.message);
-    return [];
+  // Nacheinander versuchen bis Kind 10050 gefunden
+  for (const relay of normalizedRelays) {
+    try {
+      const events = await subscribeOnce(relay, [
+        { kinds: [10050], authors: [normalizedPubkey], limit: 1 }
+      ]);
+      
+      if (!events.length) continue;
+      
+      // Neuestes Event
+      const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
+      
+      // relay-Tags extrahieren
+      const relays = latest.tags
+        .filter(t => t[0] === 'relay' && t[1])
+        .map(t => normalizeRelayUrl(t[1]))
+        .filter(Boolean);
+      
+      if (relays.length) {
+        console.log('[NIP-17] Found Kind 10050 for', normalizedPubkey.slice(0, 8), 'on', relay, '→', relays);
+        return relays;
+      }
+    } catch (error) {
+      console.warn('[NIP-17] Failed to fetch Kind 10050 from', relay, ':', error.message);
+    }
   }
+  
+  console.log('[NIP-17] No Kind 10050 found for', normalizedPubkey.slice(0, 8), 'on any of', normalizedRelays);
+  return [];
 }
 
 // ============================================================
@@ -1548,7 +1562,7 @@ async function resolveDmInboxRelays(clientRelayUrl = null, myPubkey = null) {
   // 3. Kind 10050 (NIP-17 Inbox Relays)
   if (relays.length === 0 && myPubkey) {
     try {
-      const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS[0]);
+      const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS);
       if (discovered.length > 0) {
         relays = discovered;
       }
@@ -2798,21 +2812,23 @@ async function handleMessage(request, sender) {
     try {
       const senderPubkey = getPublicKey(privateKey);
 
-      // Eigene Inbox-Relays ermitteln (für Self-Copy und als Lookup-Relay)
+      // Eigene Inbox-Relays ermitteln (für Self-Copy)
       const myInboxRelays = await resolveDmInboxRelays(relayUrl, senderPubkey);
-      const lookupRelay = myInboxRelays[0] || 'wss://relay.damus.io';
 
       // DM-Relays des Empfängers herausfinden (Kind 10050)
-      let targetRelays = await fetchDmRelays(normalizedRecipient, lookupRelay);
+      // WICHTIG: Lookup über allgemeine Relays, NICHT über eigene Inbox-Relays!
+      // Eigene Inbox-Relays haben das Kind 10050 des Empfängers i.d.R. nicht.
+      let targetRelays = await fetchDmRelays(normalizedRecipient, DEFAULT_DM_RELAYS);
       if (!targetRelays.length) {
-        // Fallback: eigene Inbox-Relays
-        targetRelays = [...myInboxRelays];
+        // Fallback: allgemeine Relays (nicht eigene Inbox!)
+        console.log('[NIP-17] No recipient relays found, using DEFAULT_DM_RELAYS as fallback');
+        targetRelays = [...DEFAULT_DM_RELAYS];
       }
 
       // Gift Wraps erstellen
       // Force Uint8Array conversion for crypto ops
       const secureKey = ensureUint8(privateKey);
-      const { wrapForRecipient, wrapForSelf, rumorId } = createGiftWrappedDM(
+      const { wrapForRecipient, wrapForSelf, innerId, rumorId } = createGiftWrappedDM(
         secureKey, normalizedRecipient, content
       );
 
@@ -2847,6 +2863,7 @@ async function handleMessage(request, sender) {
       // Lokal cachen
       await cacheDmMessage({
         id: wrapForRecipient.id,
+        innerId,
         senderPubkey,
         recipientPubkey: normalizedRecipient,
         content,
@@ -3012,8 +3029,9 @@ async function handleMessage(request, sender) {
       throw new Error('Invalid pubkey');
     }
 
-    const normalizedRelay = normalizeRelayUrl(relayUrl) || 'wss://relay.damus.io';
-    const relays = await fetchDmRelays(normalizedPubkey, normalizedRelay);
+    const normalizedRelay = normalizeRelayUrl(relayUrl);
+    const lookupRelays = normalizedRelay ? [normalizedRelay, ...DEFAULT_DM_RELAYS] : DEFAULT_DM_RELAYS;
+    const relays = await fetchDmRelays(normalizedPubkey, lookupRelays);
 
     return { relays };
   }
