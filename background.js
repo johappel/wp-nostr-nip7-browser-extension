@@ -509,6 +509,25 @@ function toNpub(pubkeyHex) {
   }
 }
 
+function normalizeContactInputPubkey(input) {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  const direct = normalizePubkeyHex(value);
+  if (direct) return direct;
+
+  try {
+    const decoded = nip19.decode(value);
+    if (decoded?.type === 'npub') {
+      return normalizePubkeyHex(decoded.data);
+    }
+  } catch {
+    // ignore decoding errors
+  }
+
+  return null;
+}
+
 async function getKnownPublicKeyHex(password = null) {
   const storedPubkey = await keyManager.getStoredPublicKey();
   if (storedPubkey) return storedPubkey;
@@ -764,6 +783,25 @@ async function fetchContactList(pubkey, relayUrl) {
   } catch (error) {
     console.warn('[Nostr] Failed to fetch contact list:', error.message);
     return [];
+  }
+}
+
+async function fetchLatestContactListEvent(pubkey, relayUrl) {
+  const normalizedPubkey = normalizePubkeyHex(pubkey);
+  if (!normalizedPubkey) return null;
+
+  const normalizedRelay = normalizeRelayUrl(relayUrl);
+  if (!normalizedRelay) return null;
+
+  try {
+    const events = await subscribeOnce(normalizedRelay, [
+      { kinds: [3], authors: [normalizedPubkey], limit: 1 }
+    ]);
+
+    if (!events.length) return null;
+    return events.sort((a, b) => b.created_at - a.created_at)[0] || null;
+  } catch {
+    return null;
   }
 }
 
@@ -2002,7 +2040,8 @@ async function handleMessage(request, sender) {
     'NOSTR_POLL_DMS',
     // WP Members Cache
     'NOSTR_GET_WP_MEMBERS',
-    'NOSTR_REFRESH_WP_MEMBERS'
+    'NOSTR_REFRESH_WP_MEMBERS',
+    'NOSTR_ADD_CONTACT'
   ]);
 
   if (scopedTypes.has(requestType)) {
@@ -2696,6 +2735,105 @@ async function handleMessage(request, sender) {
     await setCachedContacts(pubkey, contacts, includeWpMembers);
 
     return { contacts, source: 'fresh' };
+  }
+
+  if (request.type === 'NOSTR_ADD_CONTACT') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Adding contacts is only available from extension UI');
+    }
+
+    const contactPubkey = normalizeContactInputPubkey(request.payload?.contact || request.payload?.pubkey || request.payload?.npub);
+    if (!contactPubkey) {
+      throw new Error('Ungültiger Kontakt-Pubkey (erwarte hex oder npub).');
+    }
+
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const relayUrl = normalizeRelayUrl(request.payload?.relayUrl) ||
+      normalizeRelayUrl((await chrome.storage.local.get(['dmRelayUrl'])).dmRelayUrl) ||
+      'wss://relay.damus.io';
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const unlockPassword = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null);
+    if (!secretKey) {
+      throw new Error('Failed to unlock key for contact update.');
+    }
+
+    try {
+      const ownPubkey = getPublicKey(secretKey);
+      if (ownPubkey === contactPubkey) {
+        throw new Error('Du kannst dich nicht selbst hinzufügen.');
+      }
+
+      const latestContactEvent = await fetchLatestContactListEvent(ownPubkey, relayUrl);
+      const baseTags = Array.isArray(latestContactEvent?.tags) ? latestContactEvent.tags : [];
+      const nonContactTags = baseTags.filter((tag) => !(Array.isArray(tag) && tag[0] === 'p'));
+      const existingContactTags = baseTags.filter((tag) => Array.isArray(tag) && tag[0] === 'p' && normalizePubkeyHex(tag[1]));
+
+      const contactMap = new Map();
+      for (const tag of existingContactTags) {
+        const pk = normalizePubkeyHex(tag[1]);
+        if (!pk || contactMap.has(pk)) continue;
+        contactMap.set(pk, {
+          relayUrl: String(tag[2] || '').trim() || null,
+          petname: String(tag[3] || '').trim() || null
+        });
+      }
+
+      if (contactMap.has(contactPubkey)) {
+        return {
+          success: true,
+          alreadyExists: true,
+          pubkey: contactPubkey,
+          npub: toNpub(contactPubkey),
+          relay: relayUrl,
+          totalContacts: contactMap.size
+        };
+      }
+
+      contactMap.set(contactPubkey, { relayUrl: null, petname: null });
+
+      const updatedContactTags = [];
+      for (const [pk, meta] of contactMap.entries()) {
+        const tag = ['p', pk];
+        if (meta.relayUrl || meta.petname) {
+          tag.push(meta.relayUrl || '');
+          if (meta.petname) {
+            tag.push(meta.petname);
+          }
+        }
+        updatedContactTags.push(tag);
+      }
+
+      const signedEvent = await keyManager.signEvent(
+        {
+          kind: 3,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [...nonContactTags, ...updatedContactTags],
+          content: typeof latestContactEvent?.content === 'string' ? latestContactEvent.content : ''
+        },
+        protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null
+      );
+
+      await publishEventToRelay(relayUrl, signedEvent, 10000);
+      await clearContactsCache();
+
+      return {
+        success: true,
+        alreadyExists: false,
+        pubkey: contactPubkey,
+        npub: toNpub(contactPubkey),
+        relay: relayUrl,
+        eventId: signedEvent.id,
+        totalContacts: contactMap.size
+      };
+    } finally {
+      secretKey.fill(0);
+    }
   }
 
   // NOSTR_GET_WP_MEMBERS - WordPress Mitglieder mit Nostr-Profil

@@ -43,8 +43,16 @@
         </div>
         
         <!-- Search/Filter -->
-        <div class="contact-search">
-          <input id="contact-search-input" type="text" placeholder="Kontakte durchsuchen..." />
+        <div class="contact-search-row">
+          <div class="contact-search">
+            <input id="contact-search-input" type="text" placeholder="Kontakte durchsuchen..." />
+          </div>
+          <button id="toggle-add-contact" class="btn-secondary btn-small" type="button">+ Kontakt</button>
+        </div>
+
+        <div class="contact-add-form" id="contact-add-form" hidden>
+          <input id="add-contact-input" type="text" placeholder="Pubkey (hex oder npub)" />
+          <button id="add-contact-submit" class="btn-secondary" type="button">Zu meinen Kontakten hinzufügen</button>
         </div>
         
         <!-- Source Filter -->

@@ -1938,6 +1938,92 @@ function initContactListEvents() {
       }, 200);
     });
   }
+
+  const toggleAddButton = document.getElementById('toggle-add-contact');
+  const addContactForm = document.getElementById('contact-add-form');
+  const addContactInput = document.getElementById('add-contact-input');
+  const addContactSubmit = document.getElementById('add-contact-submit');
+
+  const closeAddContactForm = (clearInput = true) => {
+    if (addContactForm) {
+      addContactForm.hidden = true;
+    }
+    if (clearInput && addContactInput) {
+      addContactInput.value = '';
+    }
+  };
+
+  if (toggleAddButton && addContactForm) {
+    toggleAddButton.addEventListener('click', () => {
+      const nextHidden = !addContactForm.hidden;
+      addContactForm.hidden = nextHidden;
+      if (!nextHidden && addContactInput) {
+        addContactInput.focus();
+        addContactInput.select();
+      }
+      if (nextHidden && addContactInput) {
+        addContactInput.value = '';
+      }
+    });
+  }
+
+  const submitAddContact = async () => {
+    const value = String(addContactInput?.value || '').trim();
+    if (!value) {
+      showStatus('Bitte einen Pubkey (hex oder npub) eingeben.', true);
+      return;
+    }
+
+    if (addContactSubmit) addContactSubmit.disabled = true;
+    if (toggleAddButton) toggleAddButton.disabled = true;
+    if (addContactInput) addContactInput.disabled = true;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_ADD_CONTACT',
+        payload: {
+          scope: contactsRequestScope,
+          contact: value
+        }
+      });
+
+      if (response?.error) {
+        throw new Error(response.error);
+      }
+
+      const result = response?.result || {};
+      if (result.alreadyExists) {
+        showStatus('Kontakt ist bereits in deiner Nostr-Kontaktliste.');
+      } else {
+        showStatus('Kontakt wurde hinzugefügt.');
+      }
+
+      closeAddContactForm(true);
+      await loadContacts(true);
+    } catch (error) {
+      showStatus(`Kontakt konnte nicht hinzugefügt werden: ${error.message || error}`, true);
+    } finally {
+      if (addContactSubmit) addContactSubmit.disabled = false;
+      if (toggleAddButton) toggleAddButton.disabled = false;
+      if (addContactInput) addContactInput.disabled = false;
+    }
+  };
+
+  if (addContactSubmit) {
+    addContactSubmit.addEventListener('click', submitAddContact);
+  }
+
+  if (addContactInput) {
+    addContactInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeAddContactForm(true);
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitAddContact();
+      }
+    });
+  }
   
   // Filter buttons
   document.querySelectorAll('.filter-btn').forEach(btn => {
