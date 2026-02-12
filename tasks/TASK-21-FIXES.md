@@ -11,8 +11,12 @@ Autolink: Urls sollten automatisch in Links umgewandelt werden
 # contact-list
 Der eingeloggt User sollte selbst nicht in der Kontaktliste auftauchen, da er sich ja nicht selbst kontaktieren will. 
 
-# Schlüsselkopie in Wordpress:
+# PASSKEY: Key aktionen, Schlüsselkopie in Wordpress wird nicht mit dem korrekten Passkey Scope gespeichert:
 
-wemn ich eine Schlüsselkopie in Wordpress sperichern will, öffnet sich der Passkey Dialog aber ich finde in chro nicht wp-norstre-u2-joachim@forums.test-  was korrekt wäre sondern wp-nostre-global-9412, was vermutem lässt dass der passkey für das Backup auschließlich für den aktuellen User-Scope gespeichert wird.
+wemn ich eine Schlüsselkopie in Wordpress speichern will, öffnet sich der Passkey Dialog aber ich finde in chrome nicht wp-norstre-u2-joachim@forums.test-  was korrekt wäre, sondern wp-nostre-global-9412, was vermutem lässt dass der passkey für das Backup auschließlich für den aktuellen User-Scope gespeichert wird.
+
+Es ist sicher zu stellen, dass Passkeys zum Anlegen, Importieren, Exportieren, Speichern, Wiederherstellen und Löschen von Nostr Keys sowie das wechseln der Schutzart an den aktuell in Wordpress eingeloggten User gebunden sind.
+
+Die Anfrage an den Passkey-Dialog sollte zumindest in chrome den Scope `wp-nostr-u2-<username>@<domain>-rnd` verwenden. Firefox hat glaube einen Fallback.
 
 
