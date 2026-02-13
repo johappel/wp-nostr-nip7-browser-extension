@@ -23,6 +23,9 @@ let contactsRequestWpApi = null;
 let currentUserPubkey = null;
 let dmConversationMeta = new Map();
 let dmLastReadByContact = {};
+let dmSubscriptionStarted = false;
+let dmSubscriptionRelayKey = '';
+let dmSubscriptionInFlight = null;
 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';
@@ -55,13 +58,7 @@ async function onViewActivated(viewId) {
   
   // Ensure we are subscribed to DMs when viewing relevant pages
   if (['home', 'conversation', 'chat'].includes(viewId)) {
-     try {
-       const dmRelayResult = await chrome.storage.local.get(['dmRelayUrl']);
-       chrome.runtime.sendMessage({ 
-         type: 'NOSTR_SUBSCRIBE_DMS',
-         payload: { relayUrl: dmRelayResult.dmRelayUrl }
-       }).catch(() => {}); // catch harmless errors
-     } catch(e) {}
+    ensureDmSubscription().catch(() => {});
   }
 
   switch (viewId) {
@@ -82,6 +79,47 @@ async function onViewActivated(viewId) {
       }
       break;
   }
+}
+
+function normalizeRelayListForKey(input) {
+  const raw = Array.isArray(input) ? input : String(input || '').split(',');
+  return [...new Set(raw
+    .map((entry) => normalizeRelayUrl(String(entry || '').trim()))
+    .filter(Boolean))]
+    .sort()
+    .join(',');
+}
+
+async function ensureDmSubscription(force = false) {
+  if (!force && dmSubscriptionInFlight) {
+    return await dmSubscriptionInFlight;
+  }
+
+  const dmRelayResult = await chrome.storage.local.get([DM_RELAY_KEY]);
+  const relayInput = dmRelayResult?.[DM_RELAY_KEY] || '';
+  const relayKey = normalizeRelayListForKey(relayInput);
+
+  if (!force && dmSubscriptionStarted && relayKey === dmSubscriptionRelayKey) {
+    return null;
+  }
+
+  dmSubscriptionInFlight = chrome.runtime.sendMessage({
+    type: 'NOSTR_SUBSCRIBE_DMS',
+    payload: { relayUrl: relayInput || null }
+  }).then((response) => {
+    if (!response?.error) {
+      dmSubscriptionStarted = true;
+      dmSubscriptionRelayKey = relayKey;
+    }
+    return response;
+  }).catch(() => {
+    dmSubscriptionStarted = false;
+    return null;
+  }).finally(() => {
+    dmSubscriptionInFlight = null;
+  });
+
+  return await dmSubscriptionInFlight;
 }
 
 // ========================================
@@ -393,6 +431,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (dmNotificationsCheckbox) {
     dmNotificationsCheckbox.checked = await loadDmNotificationsEnabled();
   }
+  ensureDmSubscription().catch(() => {});
 
   // ========================================
   // Event Listeners: DM-Relay
@@ -405,6 +444,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       try {
         const saved = await saveDmRelay(url);
         dmRelayInput.value = saved;
+        await ensureDmSubscription(true);
         showStatus(saved
           ? `Nachrichten-Relay gespeichert: ${saved}`
           : 'Nachrichten-Relay entfernt (verwendet Gegenüber-Relay).');

@@ -1120,10 +1120,48 @@ function extractRelayTagsFromKind10050(event) {
   return [];
 }
 
-async function fetchDmRelays(pubkey, lookupRelays) {
+const DM_RELAY_LOOKUP_TIMEOUT_MS = 2200;
+const DM_RELAY_CACHE_HIT_TTL_MS = 10 * 60 * 1000;
+const DM_RELAY_CACHE_MISS_TTL_MS = 2 * 60 * 1000;
+const DM_RELAY_CACHE_MAX_ENTRIES = 200;
+const dmRelayLookupCache = new Map(); // key -> { relays, expiresAt }
+const dmRelayLookupInFlight = new Map(); // key -> Promise<Array<string>>
+
+function getDmRelayLookupCacheKey(pubkey, relays) {
+  return `${pubkey}|${[...relays].sort().join(',')}`;
+}
+
+function pruneDmRelayLookupCache() {
+  while (dmRelayLookupCache.size > DM_RELAY_CACHE_MAX_ENTRIES) {
+    const firstKey = dmRelayLookupCache.keys().next().value;
+    if (!firstKey) break;
+    dmRelayLookupCache.delete(firstKey);
+  }
+}
+
+function getCachedDmRelayLookup(cacheKey) {
+  const cached = dmRelayLookupCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() >= cached.expiresAt) {
+    dmRelayLookupCache.delete(cacheKey);
+    return null;
+  }
+  return Array.isArray(cached.relays) ? [...cached.relays] : [];
+}
+
+function setCachedDmRelayLookup(cacheKey, relays) {
+  const ttl = relays.length > 0 ? DM_RELAY_CACHE_HIT_TTL_MS : DM_RELAY_CACHE_MISS_TTL_MS;
+  dmRelayLookupCache.set(cacheKey, {
+    relays: [...relays],
+    expiresAt: Date.now() + ttl
+  });
+  pruneDmRelayLookupCache();
+}
+
+async function fetchDmRelays(pubkey, lookupRelays, options = {}) {
   const normalizedPubkey = normalizePubkeyHex(pubkey);
   if (!normalizedPubkey) return [];
-  
+
   // Immer als Array behandeln
   const relayList = Array.isArray(lookupRelays) ? lookupRelays : [lookupRelays];
   const normalizedRelays = [...new Set(relayList
@@ -1131,12 +1169,29 @@ async function fetchDmRelays(pubkey, lookupRelays) {
     .filter(Boolean))];
   if (!normalizedRelays.length) return [];
 
+  const timeoutMs = Number(options.timeoutMs) > 0
+    ? Number(options.timeoutMs)
+    : DM_RELAY_LOOKUP_TIMEOUT_MS;
+  const useCache = options.useCache !== false;
+  const cacheKey = getDmRelayLookupCacheKey(normalizedPubkey, normalizedRelays);
+
+  if (useCache) {
+    const cached = getCachedDmRelayLookup(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+    if (dmRelayLookupInFlight.has(cacheKey)) {
+      return await dmRelayLookupInFlight.get(cacheKey);
+    }
+  }
+
+  const lookupPromise = (async () => {
   const foundRelays = new Set();
   await Promise.all(normalizedRelays.map(async (relay) => {
     try {
       const events = await subscribeOnce(relay, [
         { kinds: [10050], authors: [normalizedPubkey], limit: 2 }
-      ], 4000);
+      ], timeoutMs);
 
       if (!events.length) return;
 
@@ -1152,12 +1207,28 @@ async function fetchDmRelays(pubkey, lookupRelays) {
   }));
 
   const discovered = [...foundRelays];
+    if (useCache) {
+      setCachedDmRelayLookup(cacheKey, discovered);
+    }
   if (discovered.length > 0) {
     return discovered;
   }
 
   console.log('[NIP-17] No Kind 10050 found for', normalizedPubkey.slice(0, 8), 'on any of', normalizedRelays);
   return [];
+  })();
+
+  if (useCache) {
+    dmRelayLookupInFlight.set(cacheKey, lookupPromise);
+  }
+
+  try {
+    return await lookupPromise;
+  } finally {
+    if (useCache) {
+      dmRelayLookupInFlight.delete(cacheKey);
+    }
+  }
 }
 
 // ============================================================
@@ -1486,7 +1557,8 @@ const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay
 const DM_RELAY_DISCOVERY_RELAYS = [
   ...DEFAULT_DM_RELAYS,
   'wss://relay.0xchat.com',
-  'wss://auth.nostr1.com',
+  'wss://relay.oxchat.com',
+  'wss://inbox.nostr.wine',
 ];
 
 function parseRelayInputList(input) {
@@ -1547,7 +1619,9 @@ async function resolveDmInboxRelays(clientRelayUrl = null, myPubkey = null) {
   // 3. Kind 10050 (NIP-17 Inbox Relays)
   if (relays.length === 0 && myPubkey) {
     try {
-      const discovered = await fetchDmRelays(myPubkey, DM_RELAY_DISCOVERY_RELAYS);
+      const discovered = await fetchDmRelays(myPubkey, DM_RELAY_DISCOVERY_RELAYS, {
+        timeoutMs: DM_RELAY_LOOKUP_TIMEOUT_MS
+      });
       if (discovered.length > 0) {
         relays = discovered;
       }
@@ -2689,7 +2763,9 @@ async function handleMessage(request, sender) {
       // WICHTIG: Lookup über allgemeine Relays, NICHT über eigene Inbox-Relays!
       // Eigene Inbox-Relays haben das Kind 10050 des Empfängers i.d.R. nicht.
       const recipientLookupRelays = await resolveRecipientLookupRelays(relayUrl);
-      let targetRelays = await fetchDmRelays(normalizedRecipient, recipientLookupRelays);
+      let targetRelays = await fetchDmRelays(normalizedRecipient, recipientLookupRelays, {
+        timeoutMs: 3500
+      });
       if (!targetRelays.length) {
         // Fallback: send to lookup relays to maximize interoperability.
         console.log('[NIP-17] No recipient relays found, using lookup relays as fallback');
@@ -2823,8 +2899,9 @@ async function handleMessage(request, sender) {
       }];
       if (fetchSince) filters[0].since = fetchSince;
 
-      // Parallel Fetch (5s Timeout, da Cache als Fallback existiert)
-      const fetchPromises = inboxRelays.map(r => subscribeOnce(r, filters, 5000).catch(() => []));
+      // Parallel Fetch: mit Cache schneller (kürzerer Timeout), ohne Cache etwas großzügiger.
+      const dmFetchTimeoutMs = cachedMessages.length > 0 ? 2200 : 3500;
+      const fetchPromises = inboxRelays.map(r => subscribeOnce(r, filters, dmFetchTimeoutMs).catch(() => []));
       const results = await Promise.all(fetchPromises);
       const giftWraps = results.flat();
 
