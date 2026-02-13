@@ -1485,9 +1485,8 @@ async function getContactProfile(pubkey) {
 const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
 const DM_RELAY_DISCOVERY_RELAYS = [
   ...DEFAULT_DM_RELAYS,
-  'wss://relay.oxchat.com',
+  'wss://relay.0xchat.com',
   'wss://auth.nostr1.com',
-  'wss://inbox.nostr.wine'
 ];
 
 function parseRelayInputList(input) {
