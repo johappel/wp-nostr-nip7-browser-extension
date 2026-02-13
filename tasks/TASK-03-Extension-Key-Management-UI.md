@@ -1,5 +1,14 @@
 # TASK-03: Extension Key-Management & UI
 
+## Hinweis zum Iststand (2026-02)
+
+Historisches Task-Dokument. Teile der gezeigten Message-Handler sind inzwischen obsolet.
+
+- `NOSTR_CHECK_VERSION` entfernt
+- `NOSTR_LOCK` entfernt
+
+Aktueller Einstieg ohne Domain-Validierung bleibt `NOSTR_PING`; der aktive Handler-Satz ist in [API-Referenz.md](../API-Referenz.md) dokumentiert.
+
 ## Ziel
 Sichere Key-Generierung, Storage und Backup-Dialog. Implementierung der NIP-07 API Methoden im Background Script.
 
@@ -283,19 +292,9 @@ async function handleMessage(request, sender) {
     return { pong: true, version: CURRENT_VERSION };
   }
 
-  // NOSTR_CHECK_VERSION erfordert keine Domain-Validierung
-  if (request.type === 'NOSTR_CHECK_VERSION') {
-    return {
-      version: CURRENT_VERSION,
-      updateRequired: !semverSatisfies(CURRENT_VERSION, request.payload?.minVersion)
-    };
-  }
-
-  // NOSTR_LOCK - Passwort-Cache löschen
-  if (request.type === 'NOSTR_LOCK') {
-    cachedPassword = null;
-    return { locked: true };
-  }
+  // Hinweis (Iststand):
+  // - NOSTR_CHECK_VERSION wurde entfernt
+  // - NOSTR_LOCK wurde entfernt
 
   // Domain-Validierung mit Bootstrapping
   const domainStatus = await checkDomainAccess(domain);

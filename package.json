@@ -1,12 +1,18 @@
 {
   "name": "wp-nostr-nip7-signer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NIP-07 Signer Extension for WordPress",
   "scripts": {
     "clean": "rimraf dist",
     "build": "npm run clean && rollup -c",
+    "package:chrome": "npm run build && node scripts/package-chrome.js",
+    "package:chrome:only": "node scripts/package-chrome.js",
     "package:firefox": "npm run build && node scripts/package-firefox.js",
     "package:firefox:only": "node scripts/package-firefox.js",
+    "sign:firefox": "npm run build && node scripts/sign-firefox.js",
+    "sign:firefox:only": "node scripts/sign-firefox.js",
+    "release:chrome": "npm run package:chrome && node scripts/release-chrome.js",
+    "release:chrome:only": "node scripts/release-chrome.js",
     "dev": "npm run clean && rollup -c -w",
     "test": "vitest run"
   },

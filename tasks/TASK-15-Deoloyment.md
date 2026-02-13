@@ -92,7 +92,7 @@ Nach Abschluss dieses Tasks:
 1. Keine Klartext-Ausgabe von `nsec` in Logs oder API-Responses.
 2. CSP/Nonce/Origin-Regeln fuer relevante Flows validieren.
 3. Domain-Whitelist-Signaturen auf Staging und Produktion pruefen.
-4. Mindestversion-Mechanismus (`NOSTR_CHECK_VERSION`) fuer kritische Fixes testen.
+4. Release-/Store-Versionierung und Changelog fuer kritische Fixes pruefen (historisch ersetzte Runtime-MinVersion-Logik).
 
 ## Rollback-Strategie
 1. **Extension Rollback**

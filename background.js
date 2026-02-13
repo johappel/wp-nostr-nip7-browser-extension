@@ -1,16 +1,24 @@
 // Background Service Worker
 // Importiert nostr-tools via Rollup Bundle
 
-import { generateSecretKey, getPublicKey, finalizeEvent, nip19 } from 'nostr-tools';
+import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import { KeyManager } from './lib/key-manager.js';
-import { checkDomainAccess, DOMAIN_STATUS, allowDomain, blockDomain, verifyWhitelistSignature } from './lib/domain-access.js';
-import { semverSatisfies } from './lib/semver.js';
-import { handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt } from './lib/crypto-handlers.js';
+import { checkDomainAccess, DOMAIN_STATUS, allowDomain, verifyWhitelistSignature } from './lib/domain-access.js';
+import { 
+  handleNIP04Encrypt, handleNIP04Decrypt, handleNIP44Encrypt, handleNIP44Decrypt,
+} from './lib/crypto-handlers.js';
+import {
+  ensureUint8,
+  createGiftWrappedDM,
+  unwrapGiftWrap,
+  DM_NOTIFICATIONS_KEY,
+  cacheDmMessage, cacheDmMessages, getCachedDmMessages, clearDmCache,
+  incrementUnreadCount,
+  formatShortHex
+} from './lib/nip17-chat.js';
 
-const CURRENT_VERSION = '1.0.0';
+const CURRENT_VERSION = '1.0.1';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
-const LEGACY_PRIMARY_DOMAIN_KEY = 'primaryDomain';
-const LEGACY_DOMAIN_SECRET_KEY = 'domainSecret';
 const UNLOCK_CACHE_POLICY_KEY = 'unlockCachePolicy';
 const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
 const UNLOCK_PASSKEY_SESSION_KEY = 'unlockPasskeySession';
@@ -19,6 +27,9 @@ const UNLOCK_CACHE_ALLOWED_POLICY_LIST = ['off', '5m', '15m', '30m', '60m', 'ses
 const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(UNLOCK_CACHE_ALLOWED_POLICY_LIST);
 const KEY_SCOPE_DEFAULT = 'global';
 const LAST_ACTIVE_SCOPE_KEY = 'lastActiveKeyScope';
+const OPEN_IN_SIDEBAR_KEY = 'openInSidebar';
+const DEFAULT_ACTION_POPUP_PATH = 'popup.html';
+const DEFAULT_SIDEBAR_PANEL_PATH = 'sidebar.html';
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
@@ -29,10 +40,10 @@ let cachedPasswordExpiresAt = null;
 let cachedPasskeyVerified = false;
 let cachedPasskeyExpiresAt = null;
 let activeKeyScope = KEY_SCOPE_DEFAULT;
+let activeDmSubscriptionIds = [];
 let activeScopeRestored = false;
 const DIALOG_TIMEOUT_MS = 25000;
 const PASSKEY_DIALOG_TIMEOUT_MS = 180000;
-let domainSyncMigrationDone = false;
 
 /**
  * Restore the last active key scope from storage on service worker cold start.
@@ -52,6 +63,138 @@ async function restoreActiveScope() {
   } catch {
     // ignore – keep default scope
   }
+}
+
+function hasChromeSidePanelApi() {
+  return typeof chrome?.sidePanel?.setPanelBehavior === 'function';
+}
+
+function hasFirefoxSidebarApi() {
+  return typeof chrome?.sidebarAction?.open === 'function';
+}
+
+function isFirefoxUserInputRestrictionError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('may only be called from a user input handler');
+}
+
+async function getSidebarTargetTabIds(windowId = null) {
+  if (typeof chrome?.tabs?.query !== 'function') return [];
+  try {
+    const query = {};
+    if (typeof windowId === 'number') {
+      query.windowId = windowId;
+    }
+    const tabs = await chrome.tabs.query(query);
+    return tabs
+      .map((tab) => tab?.id)
+      .filter((tabId) => typeof tabId === 'number');
+  } catch {
+    return [];
+  }
+}
+
+async function setChromeSidePanelEnabledForTabs(enabled, windowId = null) {
+  if (!hasChromeSidePanelApi() || typeof chrome?.sidePanel?.setOptions !== 'function') return;
+
+  const tabIds = await getSidebarTargetTabIds(windowId);
+  if (!tabIds.length) return;
+
+  await Promise.all(tabIds.map(async (tabId) => {
+    try {
+      if (enabled) {
+        await chrome.sidePanel.setOptions({
+          tabId,
+          enabled: true,
+          path: DEFAULT_SIDEBAR_PANEL_PATH
+        });
+        return;
+      }
+      await chrome.sidePanel.setOptions({
+        tabId,
+        enabled: false
+      });
+    } catch {
+      // ignore tab-specific side panel errors
+    }
+  }));
+}
+
+async function closeOpenSidebarPanels(windowId = null, { includeFirefox = false } = {}) {
+  if (hasChromeSidePanelApi()) {
+    if (typeof chrome?.sidePanel?.close === 'function') {
+      try {
+        if (typeof windowId === 'number') {
+          await chrome.sidePanel.close({ windowId });
+        } else {
+          await chrome.sidePanel.close({});
+        }
+        return;
+      } catch (error) {
+        console.warn('[UI] Failed to close Chrome side panel directly:', error?.message || error);
+      }
+    }
+
+    // Fallback for older Chrome versions without sidePanel.close()
+    await setChromeSidePanelEnabledForTabs(false, windowId);
+  }
+
+  if (!includeFirefox) return;
+
+  if (hasFirefoxSidebarApi() && typeof chrome?.sidebarAction?.close === 'function') {
+    try {
+      if (typeof windowId === 'number') {
+        await chrome.sidebarAction.close(windowId);
+      } else {
+        await chrome.sidebarAction.close();
+      }
+    } catch (error) {
+      if (isFirefoxUserInputRestrictionError(error)) return;
+      console.warn('[UI] Failed to close Firefox sidebar:', error?.message || error);
+    }
+  }
+}
+
+async function getOpenInSidebarEnabled() {
+  try {
+    const result = await chrome.storage.local.get([OPEN_IN_SIDEBAR_KEY]);
+    return result?.[OPEN_IN_SIDEBAR_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+async function applyOpenInSidebarMode(closeWindowId = null) {
+  const enabled = await getOpenInSidebarEnabled();
+
+  if (typeof chrome?.action?.setPopup === 'function') {
+    try {
+      await chrome.action.setPopup({
+        popup: enabled ? '' : DEFAULT_ACTION_POPUP_PATH
+      });
+    } catch (error) {
+      console.warn('[UI] Failed to set action popup mode:', error?.message || error);
+    }
+  }
+
+  if (hasChromeSidePanelApi()) {
+    try {
+      await chrome.sidePanel.setPanelBehavior({
+        openPanelOnActionClick: enabled
+      });
+    } catch (error) {
+      console.warn('[UI] Failed to configure side panel behavior:', error?.message || error);
+    }
+  }
+
+  if (enabled) {
+    // Re-enable tab-level side panel overrides in case they were disabled as a close fallback.
+    await setChromeSidePanelEnabledForTabs(true);
+    return;
+  }
+
+  // User disabled sidebar mode: close currently open sidebars to avoid duplicate UI.
+  await closeOpenSidebarPanels(closeWindowId, { includeFirefox: false });
 }
 
 function extractPasswordFromDialogResult(result) {
@@ -506,6 +649,25 @@ function toNpub(pubkeyHex) {
   }
 }
 
+function normalizeContactInputPubkey(input) {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  const direct = normalizePubkeyHex(value);
+  if (direct) return direct;
+
+  try {
+    const decoded = nip19.decode(value);
+    if (decoded?.type === 'npub') {
+      return normalizePubkeyHex(decoded.data);
+    }
+  } catch {
+    // ignore decoding errors
+  }
+
+  return null;
+}
+
 async function getKnownPublicKeyHex(password = null) {
   const storedPubkey = await keyManager.getStoredPublicKey();
   if (storedPubkey) return storedPubkey;
@@ -643,6 +805,1134 @@ async function publishEventToRelay(relayUrl, event, timeoutMs = 9000) {
       finish(new Error(reason));
     };
   });
+}
+
+/**
+ * Einmalige Subscription: Sammelt Events bis EOSE oder Timeout.
+ * @param {string} relayUrl - WebSocket Relay URL
+ * @param {Array} filters - Nostr Filter-Array
+ * @param {number} timeout - Timeout in ms (default: 8000)
+ * @returns {Promise<Array>} - Array von Events
+ */
+async function subscribeOnce(relayUrl, filters, timeout = 8000) {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let socket;
+    const events = [];
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        try { socket.close(); } catch { /* ignore */ }
+      }
+      if (error) reject(error);
+      else resolve(events);
+    };
+
+    const timer = setTimeout(() => {
+      finish(null); // Timeout = return what we have
+    }, timeout);
+
+    try {
+      socket = new WebSocket(relayUrl);
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+
+    socket.onopen = () => {
+      // REQ mit zufälliger Subscription-ID
+      const subId = 'sub_' + Math.random().toString(36).slice(2);
+      socket.send(JSON.stringify(['REQ', subId, ...filters]));
+    };
+
+    socket.onerror = () => {
+      finish(new Error(`Relay connection failed: ${relayUrl}`));
+    };
+
+    socket.onmessage = (messageEvent) => {
+      let data;
+      try {
+        data = JSON.parse(messageEvent.data);
+      } catch {
+        return;
+      }
+
+      if (!Array.isArray(data) || data.length < 2) return;
+
+      // EVENT: ["EVENT", subId, event]
+      if (data[0] === 'EVENT' && data[2]) {
+        events.push(data[2]);
+        return;
+      }
+
+      // EOSE: ["EOSE", subId] - End of Stored Events
+      if (data[0] === 'EOSE') {
+        finish(null);
+        return;
+      }
+    };
+  });
+}
+
+// ============================================================
+// Kontaktliste & Profile (TASK-18)
+// ============================================================
+
+const CONTACTS_CACHE_KEY = 'nostrContactsCacheV1';
+const CONTACTS_CACHE_TTL = 15 * 60 * 1000; // 15 Minuten
+
+// WP-Members Cache (separat, 3 Tage TTL)
+const WP_MEMBERS_CACHE_KEY = 'nostrWpMembersCacheV1';
+const WP_MEMBERS_CACHE_TTL = 3 * 24 * 60 * 60 * 1000; // 3 Tage
+
+/**
+ * Ruft die Kontaktliste (Kind 3) eines Pubkeys ab.
+ * @param {string} pubkey - Hex pubkey
+ * @param {string} relayUrl - Relay URL
+ * @returns {Promise<Array>} - Array von {pubkey, relayUrl, petname}
+ */
+async function fetchContactList(pubkey, relayUrl) {
+  const normalizedPubkey = normalizePubkeyHex(pubkey);
+  if (!normalizedPubkey) return [];
+
+  const normalizedRelay = normalizeRelayUrl(relayUrl);
+  if (!normalizedRelay) return [];
+
+  try {
+    const events = await subscribeOnce(normalizedRelay, [
+      { kinds: [3], authors: [normalizedPubkey], limit: 1 }
+    ]);
+
+    if (!events.length) return [];
+
+    // Neuestes Event (höchstes created_at)
+    const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
+
+    // p-Tags extrahieren: ["p", pubkey, relayUrl?, petname?]
+    return latest.tags
+      .filter(t => t[0] === 'p' && t[1])
+      .map(t => ({
+        pubkey: t[1],
+        relayUrl: t[2] || null,
+        petname: t[3] || null
+      }));
+  } catch (error) {
+    console.warn('[Nostr] Failed to fetch contact list:', error.message);
+    return [];
+  }
+}
+
+async function fetchLatestContactListEvent(pubkey, relayUrl) {
+  const normalizedPubkey = normalizePubkeyHex(pubkey);
+  if (!normalizedPubkey) return null;
+
+  const normalizedRelay = normalizeRelayUrl(relayUrl);
+  if (!normalizedRelay) return null;
+
+  try {
+    const events = await subscribeOnce(normalizedRelay, [
+      { kinds: [3], authors: [normalizedPubkey], limit: 1 }
+    ]);
+
+    if (!events.length) return null;
+    return events.sort((a, b) => b.created_at - a.created_at)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ruft Profile (Kind 0) für mehrere Pubkeys ab.
+ * Max 100 Pubkeys pro Request (Relay-Limit).
+ * @param {Array<string>} pubkeys - Array von Hex pubkeys
+ * @param {string} relayUrl - Relay URL
+ * @returns {Promise<Map<string, Object>>} - Map pubkey -> Profil
+ */
+async function fetchProfiles(pubkeys, relayUrl) {
+  const normalizedRelay = normalizeRelayUrl(relayUrl);
+  if (!normalizedRelay) return new Map();
+
+  // Filter invalid pubkeys
+  const validPubkeys = pubkeys
+    .map(pk => normalizePubkeyHex(pk))
+    .filter(Boolean);
+
+  if (!validPubkeys.length) return new Map();
+
+  // Chunk in 100er-Blöcke
+  const chunks = [];
+  for (let i = 0; i < validPubkeys.length; i += 100) {
+    chunks.push(validPubkeys.slice(i, i + 100));
+  }
+
+  const profiles = new Map();
+
+  for (const chunk of chunks) {
+    try {
+      const events = await subscribeOnce(normalizedRelay, [
+        { kinds: [0], authors: chunk }
+      ]);
+
+      for (const event of events) {
+        try {
+          const meta = JSON.parse(event.content);
+          // Neuestes Profil pro pubkey behalten
+          const existing = profiles.get(event.pubkey);
+          if (!existing || event.created_at > existing.createdAt) {
+            profiles.set(event.pubkey, {
+              displayName: String(meta.display_name || meta.name || '').trim(),
+              name: String(meta.name || '').trim(),
+              picture: String(meta.picture || '').trim(),
+              nip05: String(meta.nip05 || '').trim(),
+              about: String(meta.about || '').trim(),
+              fetchedAt: Date.now(),
+              createdAt: event.created_at
+            });
+          }
+        } catch { /* skip malformed JSON */ }
+      }
+    } catch (error) {
+      console.warn('[Nostr] Failed to fetch profiles chunk:', error.message);
+    }
+  }
+
+  return profiles;
+}
+
+/**
+ * Ruft WordPress-Benutzer mit Nostr-Profil ab.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @returns {Promise<Array>} - Array von Member-Objekten
+ */
+async function fetchWpMembers(wpApi) {
+  const context = sanitizeWpApiContext(wpApi);
+  if (!context) return [];
+
+  const baseUrl = normalizeWpRestBaseUrl(context.restUrl);
+  if (!baseUrl) return [];
+
+  try {
+    const endpoint = new URL('members', baseUrl).toString();
+    const response = await fetch(endpoint, {
+      headers: { 'X-WP-Nonce': context.nonce },
+      credentials: 'include',
+      cache: 'no-store'
+    });
+
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    const members = Array.isArray(data?.members)
+      ? data.members
+      : (Array.isArray(data) ? data : []);
+
+    return members
+      .filter(m => m.pubkey || m.npub_hex || m.npub)
+      .map(m => {
+        // npub zu hex konvertieren falls nötig
+        let pubkey = normalizePubkeyHex(m.pubkey || m.npub_hex);
+        if (!pubkey && m.npub) {
+          try {
+            const decoded = nip19.decode(m.npub);
+            if (decoded?.type === 'npub') {
+              pubkey = decoded.data;
+            }
+          } catch { /* ignore */ }
+        }
+
+        return {
+          pubkey,
+          npub: m.npub || toNpub(pubkey) || '',
+          displayName: String(m.display_name || m.displayName || m.name || '').trim(),
+          name: String(m.name || m.user_login || '').trim(),
+          picture: String(m.avatar_url || m.avatarUrl || '').trim(),
+          nip05: String(m.nip05 || '').trim(),
+          wpUserId: Number(m.user_id || m.userId) || null,
+          source: 'wp'
+        };
+      })
+      .filter(m => m.pubkey); // Nur mit gültigem pubkey
+  } catch (error) {
+    console.warn('[Nostr] Failed to fetch WP members:', error.message);
+    return [];
+  }
+}
+
+// ============================================================
+// WP-Members Cache Funktionen (3 Tage TTL)
+// ============================================================
+
+/**
+ * Generiert einen Cache-Key basierend auf der WP REST URL.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @returns {string} - Cache-Key
+ */
+function getWpMembersCacheKey(wpApi) {
+  const baseUrl = normalizeWpRestBaseUrl(wpApi?.restUrl);
+  if (!baseUrl) return null;
+  // Hash der URL für eindeutigen Key
+  return `${WP_MEMBERS_CACHE_KEY}_${baseUrl.replace(/[^a-zA-Z0-9]/g, '_')}`;
+}
+
+/**
+ * Holt WP-Members aus dem Cache.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @returns {Promise<Object|null>} - { members, fetchedAt, isStale } oder null
+ */
+async function getCachedWpMembers(wpApi) {
+  try {
+    const cacheKey = getWpMembersCacheKey(wpApi);
+    if (cacheKey) {
+      const result = await chrome.storage.local.get([cacheKey]);
+      const cache = result[cacheKey];
+
+      if (cache && Array.isArray(cache.members)) {
+        const fetchedAt = cache.fetchedAt || 0;
+        const isStale = Date.now() - fetchedAt > WP_MEMBERS_CACHE_TTL;
+        return {
+          members: cache.members,
+          fetchedAt,
+          isStale,
+          cacheKey
+        };
+      }
+    }
+
+    const all = await chrome.storage.local.get(null);
+    const cacheKeys = Object.keys(all).filter((key) => key.startsWith(`${WP_MEMBERS_CACHE_KEY}_`));
+    if (!cacheKeys.length) return null;
+
+    let freshest = null;
+    for (const key of cacheKeys) {
+      const entry = all[key];
+      if (!entry || !Array.isArray(entry.members)) continue;
+      const fetchedAt = Number(entry.fetchedAt) || 0;
+      if (!freshest || fetchedAt > freshest.fetchedAt) {
+        freshest = {
+          members: entry.members,
+          fetchedAt,
+          cacheKey: key
+        };
+      }
+    }
+
+    if (!freshest) return null;
+
+    return {
+      members: freshest.members,
+      fetchedAt: freshest.fetchedAt,
+      isStale: Date.now() - freshest.fetchedAt > WP_MEMBERS_CACHE_TTL,
+      cacheKey: freshest.cacheKey
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Speichert WP-Members im Cache.
+ * @param {Object} wpApi - {restUrl, nonce}
+ * @param {Array} members - Array von Member-Objekten
+ */
+async function setCachedWpMembers(wpApi, members) {
+  try {
+    const cacheKey = getWpMembersCacheKey(wpApi);
+    if (!cacheKey) return;
+    
+    await chrome.storage.local.set({
+      [cacheKey]: {
+        members,
+        fetchedAt: Date.now(),
+        count: members.length
+      }
+    });
+  } catch (error) {
+    console.warn('[Nostr] Failed to cache WP members:', error.message);
+  }
+}
+
+/**
+ * Führt Nostr-Kontakte und WP-Members zusammen.
+ * @param {Array} nostrContacts - Kontakte aus Kind 3
+ * @param {Map} profiles - Profile aus Kind 0
+ * @param {Array} wpMembers - WP Members
+ * @returns {Array} - Zusammengeführte Kontaktliste
+ */
+function mergeContacts(nostrContacts, profiles, wpMembers) {
+  const merged = new Map();
+
+  // 1. Nostr-Kontakte mit Profilen anreichern
+  for (const c of nostrContacts) {
+    const profile = profiles.get(c.pubkey) || {};
+    merged.set(c.pubkey, {
+      pubkey: c.pubkey,
+      npub: toNpub(c.pubkey) || '',
+      displayName: profile.displayName || '',
+      name: profile.name || '',
+      picture: profile.picture || '',
+      nip05: profile.nip05 || '',
+      about: profile.about || '',
+      relayUrl: c.relayUrl || null,
+      petname: c.petname || null,
+      source: 'nostr',
+      wpUserId: null,
+      lastSeen: null
+    });
+  }
+
+  // 2. WP-Members ergänzen/mergen
+  for (const m of wpMembers) {
+    if (!m.pubkey) continue;
+
+    const existing = merged.get(m.pubkey);
+    if (existing) {
+      // Merge: WP-Daten ergänzen fehlende Felder
+      merged.set(m.pubkey, {
+        ...existing,
+        displayName: existing.displayName || m.displayName,
+        name: existing.name || m.name,
+        picture: existing.picture || m.picture,
+        nip05: existing.nip05 || m.nip05,
+        source: 'both',
+        wpUserId: m.wpUserId
+      });
+    } else {
+      // Neuer WP-Kontakt
+      merged.set(m.pubkey, {
+        ...m,
+        relayUrl: null,
+        petname: null,
+        lastSeen: null
+      });
+    }
+  }
+
+  // Nach displayName sortieren
+  return Array.from(merged.values())
+    .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
+}
+
+async function clearContactsCache() {
+  try {
+    await chrome.storage.local.remove([CONTACTS_CACHE_KEY]);
+  } catch { /* ignore */ }
+}
+
+// NIP-17 Protokoll-Funktionen → importiert aus ./lib/nip17-chat.js
+
+/**
+ * Ruft DM-Relays eines Pubkeys ab (Kind 10050).
+ * @param {string} pubkey - Hex pubkey
+ * @param {string|string[]} lookupRelays - Relay URL(s) für Lookup (String oder Array)
+ * @returns {Promise<Array<string>>} - Array von Relay URLs
+ */
+function extractRelayTagsFromKind10050(event) {
+  const relaysFromTags = Array.isArray(event?.tags)
+    ? event.tags
+      .filter((tag) => Array.isArray(tag) && (tag[0] === 'relay' || tag[0] === 'r') && tag[1])
+      .map((tag) => normalizeRelayUrl(tag[1]))
+      .filter(Boolean)
+    : [];
+  if (relaysFromTags.length > 0) {
+    return relaysFromTags;
+  }
+
+  // Some clients may serialize relay URLs in content (JSON array fallback).
+  try {
+    const parsed = JSON.parse(String(event?.content || ''));
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((value) => normalizeRelayUrl(value))
+        .filter(Boolean);
+    }
+  } catch {
+    // ignore malformed content fallback
+  }
+  return [];
+}
+
+const DM_RELAY_LOOKUP_TIMEOUT_MS = 2200;
+const DM_RELAY_CACHE_HIT_TTL_MS = 10 * 60 * 1000;
+const DM_RELAY_CACHE_MISS_TTL_MS = 2 * 60 * 1000;
+const DM_RELAY_CACHE_MAX_ENTRIES = 200;
+const dmRelayLookupCache = new Map(); // key -> { relays, expiresAt }
+const dmRelayLookupInFlight = new Map(); // key -> Promise<Array<string>>
+
+function getDmRelayLookupCacheKey(pubkey, relays) {
+  return `${pubkey}|${[...relays].sort().join(',')}`;
+}
+
+function pruneDmRelayLookupCache() {
+  while (dmRelayLookupCache.size > DM_RELAY_CACHE_MAX_ENTRIES) {
+    const firstKey = dmRelayLookupCache.keys().next().value;
+    if (!firstKey) break;
+    dmRelayLookupCache.delete(firstKey);
+  }
+}
+
+function getCachedDmRelayLookup(cacheKey) {
+  const cached = dmRelayLookupCache.get(cacheKey);
+  if (!cached) return null;
+  if (Date.now() >= cached.expiresAt) {
+    dmRelayLookupCache.delete(cacheKey);
+    return null;
+  }
+  return Array.isArray(cached.relays) ? [...cached.relays] : [];
+}
+
+function setCachedDmRelayLookup(cacheKey, relays) {
+  const ttl = relays.length > 0 ? DM_RELAY_CACHE_HIT_TTL_MS : DM_RELAY_CACHE_MISS_TTL_MS;
+  dmRelayLookupCache.set(cacheKey, {
+    relays: [...relays],
+    expiresAt: Date.now() + ttl
+  });
+  pruneDmRelayLookupCache();
+}
+
+async function fetchDmRelays(pubkey, lookupRelays, options = {}) {
+  const normalizedPubkey = normalizePubkeyHex(pubkey);
+  if (!normalizedPubkey) return [];
+
+  // Immer als Array behandeln
+  const relayList = Array.isArray(lookupRelays) ? lookupRelays : [lookupRelays];
+  const normalizedRelays = [...new Set(relayList
+    .map(r => normalizeRelayUrl(r))
+    .filter(Boolean))];
+  if (!normalizedRelays.length) return [];
+
+  const timeoutMs = Number(options.timeoutMs) > 0
+    ? Number(options.timeoutMs)
+    : DM_RELAY_LOOKUP_TIMEOUT_MS;
+  const useCache = options.useCache !== false;
+  const cacheKey = getDmRelayLookupCacheKey(normalizedPubkey, normalizedRelays);
+
+  if (useCache) {
+    const cached = getCachedDmRelayLookup(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+    if (dmRelayLookupInFlight.has(cacheKey)) {
+      return await dmRelayLookupInFlight.get(cacheKey);
+    }
+  }
+
+  const lookupPromise = (async () => {
+  const foundRelays = new Set();
+  await Promise.all(normalizedRelays.map(async (relay) => {
+    try {
+      const events = await subscribeOnce(relay, [
+        { kinds: [10050], authors: [normalizedPubkey], limit: 2 }
+      ], timeoutMs);
+
+      if (!events.length) return;
+
+      const latest = events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+      const relays = extractRelayTagsFromKind10050(latest);
+      if (!relays.length) return;
+
+      relays.forEach((r) => foundRelays.add(r));
+      console.log('[NIP-17] Found Kind 10050 for', normalizedPubkey.slice(0, 8), 'on', relay, '→', relays);
+    } catch (error) {
+      console.warn('[NIP-17] Failed to fetch Kind 10050 from', relay, ':', error.message);
+    }
+  }));
+
+  const discovered = [...foundRelays];
+    if (useCache) {
+      setCachedDmRelayLookup(cacheKey, discovered);
+    }
+  if (discovered.length > 0) {
+    return discovered;
+  }
+
+  console.log('[NIP-17] No Kind 10050 found for', normalizedPubkey.slice(0, 8), 'on any of', normalizedRelays);
+  return [];
+  })();
+
+  if (useCache) {
+    dmRelayLookupInFlight.set(cacheKey, lookupPromise);
+  }
+
+  try {
+    return await lookupPromise;
+  } finally {
+    if (useCache) {
+      dmRelayLookupInFlight.delete(cacheKey);
+    }
+  }
+}
+
+// ============================================================
+// Relay Connection Manager für persistente Verbindungen
+// ============================================================
+
+class RelayConnectionManager {
+  constructor() {
+    this.connections = new Map(); // relayUrl -> WebSocket
+    this.subscriptions = new Map(); // subId -> { filters, onMessage, onEose }
+    this._failCount = new Map(); // relayUrl -> consecutive failure count
+    this.reconnectInterval = 30000;
+    this.keepAliveInterval = 25000; // < 30s für MV3 Service Worker
+  }
+  
+  /**
+   * Stellt eine Verbindung zu einem Relay her.
+   * @param {string} relayUrl - WebSocket Relay URL
+   * @returns {Promise<WebSocket>} - Die WebSocket-Verbindung
+   */
+  async connect(relayUrl) {
+    const normalized = normalizeRelayUrl(relayUrl);
+    if (!normalized) throw new Error('Invalid relay URL');
+    
+    // Bestehende Verbindung prüfen
+    if (this.connections.has(normalized)) {
+      const existing = this.connections.get(normalized);
+      if (existing.readyState === WebSocket.OPEN) {
+        return existing;
+      }
+    }
+    
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(normalized);
+      
+      // Connection Timeout: 10 Sekunden
+      const connectTimeout = setTimeout(() => {
+        if (ws.readyState === WebSocket.CONNECTING) {
+          console.warn(`[Relay] Connection timeout for ${normalized}`);
+          ws._manualClose = true;
+          ws.close();
+          reject(new Error(`Connection timeout for ${normalized}`));
+        }
+      }, 10000);
+      
+      ws.onopen = () => {
+        clearTimeout(connectTimeout);
+        console.log(`[Relay] Connected to ${normalized}`);
+        this.connections.set(normalized, ws);
+        this._failCount.delete(normalized);
+        // Re-subscribe to existing subscriptions
+        this.resubscribeAll(normalized);
+        resolve(ws);
+      };
+      
+      ws.onclose = () => {
+        clearTimeout(connectTimeout);
+        console.log(`[Relay] Disconnected from ${normalized}`);
+        this.connections.delete(normalized);
+        // Kein Auto-Reconnect wenn manuell geschlossen
+        if (ws._manualClose) return;
+        // Exponential Backoff bei wiederholten Fehlern
+        const fails = (this._failCount.get(normalized) || 0) + 1;
+        this._failCount.set(normalized, fails);
+        if (fails > 5) {
+          console.warn(`[Relay] Too many failures for ${normalized}, stopping reconnect`);
+          return;
+        }
+        const delay = Math.min(this.reconnectInterval * Math.pow(2, fails - 1), 300000);
+        setTimeout(() => {
+          this.connect(normalized).catch(() => {});
+        }, delay);
+      };
+      
+      ws.onerror = (error) => {
+        clearTimeout(connectTimeout);
+        console.warn(`[Relay] Error on ${normalized}:`, error);
+        if (ws.readyState === WebSocket.CONNECTING) {
+          reject(new Error(`Failed to connect to ${normalized}`));
+        }
+      };
+      
+      ws.onmessage = (event) => {
+        this.handleMessage(normalized, event.data);
+      };
+    });
+  }
+  
+  /**
+   * Verarbeitet eingehende Nachrichten vom Relay.
+   */
+  handleMessage(relayUrl, data) {
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    
+    if (!Array.isArray(parsed) || parsed.length < 2) return;
+    
+    // ["EVENT", subId, event]
+    if (parsed[0] === 'EVENT' && parsed[2]) {
+      const subId = parsed[1];
+      const event = parsed[2];
+      const sub = this.subscriptions.get(subId);
+      if (sub?.onMessage) {
+        try {
+          sub.onMessage(event, relayUrl);
+        } catch (e) {
+          console.warn('[Relay] Error in message handler:', e);
+        }
+      }
+    }
+    
+    // ["EOSE", subId]
+    if (parsed[0] === 'EOSE') {
+      const sub = this.subscriptions.get(parsed[1]);
+      if (sub?.onEose) {
+        try {
+          sub.onEose();
+        } catch (e) {
+          console.warn('[Relay] Error in EOSE handler:', e);
+        }
+      }
+    }
+    
+    // ["OK", eventId, accepted, message]
+    if (parsed[0] === 'OK') {
+      // Wird von publishEvent verwendet
+    }
+    
+    // ["NOTICE", message]
+    if (parsed[0] === 'NOTICE') {
+      console.warn(`[Relay] NOTICE from ${relayUrl}:`, parsed[1]);
+    }
+  }
+  
+  /**
+   * Abonniert Events von einem Relay.
+   * @param {string} relayUrl - Relay URL
+   * @param {Array} filters - Nostr Filter-Array
+   * @param {Function} onMessage - Callback für eingehende Events
+   * @param {Function} onEose - Callback für EOSE (optional)
+   * @returns {Promise<string>} - Subscription ID
+   */
+  async subscribe(relayUrl, filters, onMessage, onEose = null) {
+    const ws = await this.connect(relayUrl);
+    const subId = 'dm_' + Math.random().toString(36).slice(2);
+    
+    this.subscriptions.set(subId, { filters, onMessage, onEose });
+    
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(['REQ', subId, ...filters]));
+    }
+    
+    return subId;
+  }
+  
+  /**
+   * Beendet eine Subscription.
+   */
+  unsubscribe(subId) {
+    this.subscriptions.delete(subId);
+    // Send CLOSE to all connected relays
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(['CLOSE', subId]));
+      }
+    }
+  }
+  
+  /**
+   * Re-subscribed alle aktiven Subscriptions nach Reconnect.
+   */
+  resubscribeAll(relayUrl) {
+    const ws = this.connections.get(relayUrl);
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    
+    for (const [subId, sub] of this.subscriptions) {
+      ws.send(JSON.stringify(['REQ', subId, ...sub.filters]));
+    }
+  }
+  
+  /**
+   * Prüft alle Verbindungen und reconnectet falls nötig.
+   */
+  checkConnections() {
+    for (const [relayUrl, ws] of this.connections) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        this.connect(relayUrl).catch(() => {});
+      }
+    }
+  }
+  
+  /**
+   * Publiziert ein Event an ein Relay.
+   * @param {string} relayUrl - Relay URL
+   * @param {Object} event - Das zu publizierende Event
+   * @param {number} timeout - Timeout in ms
+   * @returns {Promise<boolean>} - true wenn akzeptiert
+   */
+  async publishEvent(relayUrl, event, timeout = 10000) {
+    const ws = await this.connect(relayUrl);
+    
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        ws.removeEventListener('message', handleResponse);
+        console.warn(`[Relay] Timeout waiting for OK from ${relayUrl} for event ${event.id}`);
+        reject(new Error('Publish timeout'));
+      }, timeout);
+      
+      const handleResponse = (msgEvent) => {
+        try {
+          const data = msgEvent.data;
+          const parsed = JSON.parse(data);
+          
+          // Debug Logging für alle Antworten während des Publish-Vorgangs
+          // console.log(`[Relay Debug] Response from ${relayUrl}:`, data);
+
+          if (!Array.isArray(parsed)) return;
+
+          // OK Check
+          if (parsed[0] === 'OK' && parsed[1] === event.id) {
+            clearTimeout(timer);
+            ws.removeEventListener('message', handleResponse);
+            if (parsed[2] === true) {
+              console.log(`[Relay] OK from ${relayUrl} for event ${event.id}`);
+              resolve(true);
+            } else {
+              console.warn(`[Relay] REJECTED by ${relayUrl}:`, parsed[3]);
+              reject(new Error(parsed[3] || 'Relay rejected event'));
+            }
+          }
+          
+          // NOTICE Check (Fehlermeldungen vom Relay)
+          if (parsed[0] === 'NOTICE') {
+            console.warn(`[Relay] NOTICE from ${relayUrl} during publish:`, parsed[1]);
+          }
+           
+          // CLOSED Check (NIP-01)
+          if (parsed[0] === 'CLOSED' && parsed[1] === event.id) {
+             clearTimeout(timer);
+             ws.removeEventListener('message', handleResponse);
+             reject(new Error(`Subscription/Event CLOSED: ${parsed[2]}`));
+          }
+
+        } catch (e) {
+            console.error('[Relay] Error parsing response:', e);
+        }
+      };
+      
+      ws.addEventListener('message', handleResponse);
+      
+      console.log(`[Relay] Publishing event ${event.id} (kind: ${event.kind}) to ${relayUrl}...`);
+      ws.send(JSON.stringify(['EVENT', event]));
+    });
+  }
+}
+
+// Singleton Instance
+const relayManager = new RelayConnectionManager();
+
+// DM Cache, Unread Counter, formatShortHex → importiert aus ./lib/nip17-chat.js
+
+// ============================================================
+// Notification System (bleibt in background.js wegen getContactProfile)
+// ============================================================
+
+/**
+ * Zeigt eine Desktop-Notification für eine neue DM.
+ * @param {Object} msg - Die Nachricht
+ */
+async function showDmNotification(msg) {
+  try {
+    // Prüfen ob Notifications erlaubt sind
+    const settings = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
+    if (settings[DM_NOTIFICATIONS_KEY] === false) return;
+    
+    // Absender-Profil laden für Anzeigename
+    const profile = await getContactProfile(msg.senderPubkey);
+    const displayName = profile?.displayName || formatShortHex(msg.senderPubkey);
+    
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon48.png'),
+      title: `Neue Nachricht von ${displayName}`,
+      message: msg.content.slice(0, 100) + (msg.content.length > 100 ? '...' : ''),
+      priority: 2
+    });
+  } catch (error) {
+    console.warn('[NIP-17] Failed to show notification:', error.message);
+  }
+}
+
+/**
+ * Holt das Profil eines Kontakts aus dem Cache oder von Relays.
+ * @param {string} pubkey - Hex pubkey
+ * @returns {Promise<Object|null>} - Profil oder null
+ */
+async function getContactProfile(pubkey) {
+  try {
+    const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
+    const cache = result[CONTACTS_CACHE_KEY];
+    if (cache?.contacts) {
+      const contact = cache.contacts.find(c => c.pubkey === pubkey);
+      if (contact) {
+        return {
+          displayName: contact.displayName || contact.name,
+          picture: contact.picture,
+          nip05: contact.nip05
+        };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================
+// DM Relay Discovery (Multi-Relay, NIP-17 Kind 10050)
+// ============================================================
+
+const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
+const DM_RELAY_DISCOVERY_RELAYS = [
+  ...DEFAULT_DM_RELAYS,
+  'wss://relay.0xchat.com',
+  'wss://inbox.nostr.wine',
+];
+
+function parseRelayInputList(input) {
+  const raw = Array.isArray(input) ? input : String(input || '').split(',');
+  return raw
+    .map((entry) => normalizeRelayUrl(String(entry || '').trim()))
+    .filter(Boolean);
+}
+
+async function getConfiguredDmRelayList() {
+  try {
+    const stored = await chrome.storage.local.get(['dmRelayUrl']);
+    return parseRelayInputList(stored.dmRelayUrl);
+  } catch {
+    return [];
+  }
+}
+
+async function resolveRecipientLookupRelays(clientRelayUrl = null) {
+  const explicit = parseRelayInputList(clientRelayUrl);
+  const configured = await getConfiguredDmRelayList();
+  return [...new Set([
+    ...explicit,
+    ...configured,
+    ...DM_RELAY_DISCOVERY_RELAYS
+  ])];
+}
+
+/**
+ * Ermittelt alle Inbox-Relays für DM-Operationen.
+ * Priorisierung:
+ *   1. Explizit vom Client übergebene Relays (kommagetrennt oder Array)
+ *   2. Gespeichertes DM-Relay aus Settings (dmRelayUrl)
+ *   3. Kind 10050 (NIP-17 Inbox Relays) des eigenen Pubkeys
+ *   4. Fallback-Relays (damus, nos.lol, nostr.band)
+ * 
+ * WICHTIG: Diese Relays haben NICHTS mit dem Profil-Relay zu tun!
+ * Profil → Kind 0 via configures relay in Settings
+ * DMs    → Kind 1059 via NIP-17 Inbox Relays (Kind 10050)
+ * 
+ * @param {string|string[]|null} clientRelayUrl - Vom Client übergebene Relay-URL(s)
+ * @param {string|null} myPubkey - Eigener Pubkey für Kind 10050 Lookup (optional)
+ * @returns {Promise<string[]>} - Array von normalisierten Relay-URLs
+ */
+async function resolveDmInboxRelays(clientRelayUrl = null, myPubkey = null) {
+  let relays = [];
+
+  // 1. Explizit vom Client
+  if (clientRelayUrl) {
+    relays = parseRelayInputList(clientRelayUrl);
+  }
+
+  // 2. Gespeichertes DM-Relay aus Settings
+  if (relays.length === 0) {
+    relays = await getConfiguredDmRelayList();
+  }
+
+  // 3. Kind 10050 (NIP-17 Inbox Relays)
+  if (relays.length === 0 && myPubkey) {
+    try {
+      const discovered = await fetchDmRelays(myPubkey, DM_RELAY_DISCOVERY_RELAYS, {
+        timeoutMs: DM_RELAY_LOOKUP_TIMEOUT_MS
+      });
+      if (discovered.length > 0) {
+        relays = discovered;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 4. Fallback
+  if (relays.length === 0) {
+    relays = [...DEFAULT_DM_RELAYS];
+  }
+
+  // Deduplizieren
+  return [...new Set(relays)];
+}
+
+// ============================================================
+// DM Key Helper (Race-Condition-sicher, Scope-agnostisch)
+// ============================================================
+
+/**
+ * Findet einen nutzbaren Key für DM-Operationen, unabhängig vom aktuellen Scope.
+ * Erstellt einen scope-lokalen KeyManager, der immun gegen konkurrierende Scope-Wechsel ist.
+ * Prüft zuerst den aktuellen Scope, dann alle verfügbaren Scopes.
+ * 
+ * WARUM: chrome.runtime.onMessage verarbeitet Nachrichten konkurrierend.
+ * Wenn GET_STATUS und GET_DMS gleichzeitig ankommen, kann ensureKeyScope()
+ * den globalen keyManager.namespace zwischen den async-Aufrufen wechseln.
+ * Ein scope-lokaler KeyManager verhindert dieses Problem.
+ * 
+ * @returns {Promise<{km: KeyManager, scope: string, protectionMode: string}|null>}
+ */
+async function findDmKey() {
+  const check = async (scope) => {
+    const ns = scope === KEY_SCOPE_DEFAULT ? '' : scope;
+    const km = new KeyManager(chrome.storage.local, ns);
+    const has = await km.hasKey();
+    if (!has) return null;
+    const mode = await km.getProtectionMode();
+    if (mode === null) return null;
+    return { km, scope, protectionMode: mode };
+  };
+
+  // 1. Aktuellen Scope prüfen (scope-lokaler Snapshot)
+  const currentScope = activeKeyScope;
+  const current = await check(currentScope);
+  if (current) return current;
+
+  // 2. Alle Scopes durchsuchen
+  const scopes = await listStoredKeyScopes();
+  for (const scope of scopes) {
+    if (scope === currentScope) continue;
+    const found = await check(scope);
+    if (found) {
+      console.log('[NIP-17] Key gefunden in alternativem Scope:', scope, 'mode:', found.protectionMode);
+      return found;
+    }
+  }
+
+  console.warn('[NIP-17] Kein nutzbarer Key in irgendeinem Scope gefunden. Scopes geprüft:', [currentScope, ...scopes.filter(s => s !== currentScope)]);
+  return null;
+}
+
+// ============================================================
+// DM Subscription Handler
+// ============================================================
+
+/**
+ * Startet eine Subscription für eingehende DMs.
+ * @param {string} scope - Der Key Scope
+ * @param {string} relayUrl - Relay URL
+ * @param {string} myPubkey - Eigener Pubkey
+ * @param {Uint8Array} privateKey - Private Key für Entschlüsselung
+ * @returns {Promise<string>} - Subscription ID
+ */
+async function startDmSubscription(scope, relayUrl, myPubkey, privateKey) {
+  const filters = [{
+    kinds: [1059], // Gift Wrap
+    '#p': [myPubkey],
+    limit: 100
+  }];
+  
+  const subId = await relayManager.subscribe(
+    relayUrl,
+    filters,
+    async (event, relayUrl) => {
+      // Neue Gift Wrap Nachricht empfangen
+      try {
+        const msg = unwrapGiftWrap(privateKey, event);
+        msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
+        msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+        msg.receivedAt = Date.now();
+        
+        // In Cache speichern (null = Duplikat)
+        const cachedMsg = await cacheDmMessage(msg, scope, myPubkey);
+        if (!cachedMsg) return; // Duplikat überspringen
+        
+        // Notify any active frontend listeners (popup/chat UI) about the new message
+        try {
+          chrome.runtime.sendMessage({
+            type: 'NOSTR_NEW_DM',
+            payload: cachedMsg
+          }).catch(() => {
+             // Suppress error if no receiver is listening (popup closed)
+          });
+        } catch (err) {
+           console.warn('[Nostr] Failed to broadcast new DM to UI:', err);
+        }
+        
+        // Notification auslösen (nur für eingehende Nachrichten)
+        if (msg.direction === 'in') {
+          try {
+             await showDmNotification(msg);
+             await incrementUnreadCount();
+          } catch (notifErr) {
+             console.warn('[NIP-17] Failed to show notification:', notifErr.message);
+          }
+        }
+      } catch (e) {
+        // Erwarteter Fehler bei fremden Gift Wraps (andere Keys, Spam, ältere Events)
+        // Nur loggen wenn keine MAC-Fehler (die kommen häufig auf öffentlichen Relays)
+        if (!e.message?.includes('invalid MAC') && !e.message?.includes('Failed to decrypt')) {
+          console.debug('[NIP-17] Could not unwrap gift wrap:', e.message);
+        }
+      }
+    }
+  );
+  
+  return subId;
+}
+
+/**
+ * Pollt nach neuen DMs (Fallback).
+ * @param {string} scope - Der Key Scope
+ * @param {string} relayUrl - Relay URL
+ * @param {string} myPubkey - Eigener Pubkey
+ * @param {Uint8Array} privateKey - Private Key
+ */
+async function pollForNewDms(scope, relayUrl, myPubkey, privateKey) {
+  try {
+    // Letzten Check aus Storage holen
+    const lastCheckKey = 'dmLastPoll_' + scope;
+    const result = await chrome.storage.local.get([lastCheckKey]);
+    const since = result[lastCheckKey] || Math.floor(Date.now() / 1000) - 3600; // Default: 1h
+    
+    const filters = [{
+      kinds: [1059],
+      '#p': [myPubkey],
+      since: since,
+      limit: 50
+    }];
+    
+    const events = await subscribeOnce(relayUrl, filters, 10000);
+    
+    for (const event of events) {
+      try {
+        const msg = unwrapGiftWrap(privateKey, event);
+        msg.giftWrapId = msg.id; // Sicherstellen, dass dedup in cacheDmMessage funktioniert
+        msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+        msg.receivedAt = Date.now();
+        
+        const cached = await cacheDmMessage(msg, scope, myPubkey);
+        if (!cached) continue; // Duplikat überspringen
+        
+        if (msg.direction === 'in') {
+          await showDmNotification(msg);
+          await incrementUnreadCount();
+        }
+      } catch {
+        // Nicht für uns
+      }
+    }
+    
+    // Letzten Check aktualisieren
+    await chrome.storage.local.set({ [lastCheckKey]: Math.floor(Date.now() / 1000) });
+  } catch (error) {
+    console.warn('[NIP-17] Poll failed:', error.message);
+  }
 }
 
 async function getStoredPasskeyCredentialIdForActiveScope() {
@@ -786,6 +2076,64 @@ async function resolvePasskeyAuthOptions(request, domain, isInternalExtensionReq
 // ============================================================
 // Message Handler
 // ============================================================
+applyOpenInSidebarMode().catch((error) => {
+  console.warn('[UI] Failed to initialize open-in-sidebar mode:', error?.message || error);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode on install/update:', error?.message || error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode on startup:', error?.message || error);
+  });
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes?.[OPEN_IN_SIDEBAR_KEY]) return;
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode after setting change:', error?.message || error);
+  });
+});
+
+chrome.action.onClicked.addListener((tab) => {
+  if (hasFirefoxSidebarApi()) {
+    try {
+      const result = chrome.sidebarAction.open();
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          if (isFirefoxUserInputRestrictionError(error)) return;
+          console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
+        });
+      }
+      return;
+    } catch (error) {
+      if (isFirefoxUserInputRestrictionError(error)) return;
+      console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
+      return;
+    }
+  }
+
+  if (hasChromeSidePanelApi() && typeof chrome?.sidePanel?.open === 'function') {
+    try {
+      const windowId = tab?.windowId;
+      const result = (typeof windowId === 'number')
+        ? chrome.sidePanel.open({ windowId })
+        : chrome.sidePanel.open({});
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          console.warn('[UI] Failed to open Chrome side panel:', error?.message || error);
+        });
+      }
+    } catch (error) {
+      console.warn('[UI] Failed to open Chrome side panel:', error?.message || error);
+    }
+  }
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   handleMessage(request, sender)
     .then(result => sendResponse({ result }))
@@ -799,7 +2147,6 @@ async function handleMessage(request, sender) {
   const isInternalExtensionRequest = sender?.id === chrome.runtime.id && !sender?.tab?.url;
   const requestType = String(request?.type || '');
   const scopedTypes = new Set([
-    'NOSTR_LOCK',
     'NOSTR_SET_UNLOCK_CACHE_POLICY',
     'NOSTR_CHANGE_PROTECTION',
     'NOSTR_GET_STATUS',
@@ -816,7 +2163,13 @@ async function handleMessage(request, sender) {
     'NOSTR_NIP04_ENCRYPT',
     'NOSTR_NIP04_DECRYPT',
     'NOSTR_NIP44_ENCRYPT',
-    'NOSTR_NIP44_DECRYPT'
+    'NOSTR_NIP44_DECRYPT',
+    'NOSTR_ADD_CONTACT'
+    // NIP-17 Direktnachrichten: NICHT in scopedTypes!
+    // DM-Handler nutzen findDmKey() das alle Scopes eigenständig durchsucht.
+    // ensureKeyScope() würde sonst den Scope auf 'global' resetten (Popup sendet
+    // keinen scope), clearUnlockCaches() triggern und unnötige Passkey/Passwort-Prompts
+    // auslösen, obwohl der User z.B. 'ohne Schutz' gewählt hat.
   ]);
 
   if (scopedTypes.has(requestType)) {
@@ -838,18 +2191,17 @@ async function handleMessage(request, sender) {
     return { pong: true, version: CURRENT_VERSION };
   }
 
-  // NOSTR_CHECK_VERSION erfordert keine Domain-Validierung
-  if (request.type === 'NOSTR_CHECK_VERSION') {
-    return {
-      version: CURRENT_VERSION,
-      updateRequired: !semverSatisfies(CURRENT_VERSION, request.payload?.minVersion)
-    };
-  }
-
-  // NOSTR_LOCK - Passwort-Cache l????schen
-  if (request.type === 'NOSTR_LOCK') {
-    await clearUnlockCaches();
-    return { locked: true };
+  if (request.type === 'NOSTR_SET_OPEN_IN_SIDEBAR') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Sidebar mode can only be set from extension UI');
+    }
+    const enabled = request?.payload?.enabled === true;
+    const requestedWindowId = Number.isInteger(request?.payload?.windowId)
+      ? request.payload.windowId
+      : null;
+    await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: enabled });
+    await applyOpenInSidebarMode(requestedWindowId);
+    return { success: true, enabled };
   }
 
   if (request.type === 'NOSTR_SET_UNLOCK_CACHE_POLICY') {
@@ -914,7 +2266,7 @@ async function handleMessage(request, sender) {
         await keyManager.storeKey(secretKey, null);
         await clearUnlockCaches();
       } else if (newMode === KeyManager.MODE_PASSWORD) {
-        const setupResult = await promptPassword('create');
+        const setupResult = await promptPassword('create-password');
         if (!setupResult) throw new Error('Password setup canceled');
         const password = extractPasswordFromDialogResult(setupResult);
         if (!password) throw new Error('Password required');
@@ -922,7 +2274,7 @@ async function handleMessage(request, sender) {
         await clearUnlockCaches();
         await cachePasswordWithPolicy(password);
       } else if (newMode === KeyManager.MODE_PASSKEY) {
-        const setupResult = await promptPassword('create');
+        const setupResult = await promptPassword('create-passkey');
         if (!setupResult || setupResult.protection !== KeyManager.MODE_PASSKEY) {
           throw new Error('Passkey setup canceled');
         }
@@ -1005,55 +2357,6 @@ async function handleMessage(request, sender) {
       lastActiveScope,
       activeScope: activeKeyScope
     };
-  }
-
-  if (request.type === 'NOSTR_DELETE_SCOPE_KEY') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Scope key deletion is only available from extension UI');
-    }
-    const targetScope = normalizeKeyScope(request.payload?.scope);
-    const targetKm = new KeyManager(chrome.storage.local, targetScope === KEY_SCOPE_DEFAULT ? '' : targetScope);
-
-    if (!await targetKm.hasKey()) {
-      return { deleted: false, reason: 'No key found in scope: ' + targetScope };
-    }
-
-    // Remove all key-related storage entries for the target scope
-    const keysToRemove = targetKm.keyNames([
-      KeyManager.STORAGE_KEY,
-      KeyManager.SALT_KEY,
-      KeyManager.IV_KEY,
-      KeyManager.PLAIN_KEY,
-      KeyManager.PUBKEY_KEY,
-      KeyManager.PASSKEY_ID_KEY,
-      KeyManager.MODE_KEY,
-      KeyManager.CREATED_KEY,
-      KeyManager.LEGACY_MIGRATED_KEY
-    ]);
-    await chrome.storage.local.remove(keysToRemove);
-
-    // If the deleted scope was the active one, reset caches
-    if (targetScope === activeKeyScope) {
-      await clearUnlockCaches();
-    }
-
-    return { deleted: true, scope: targetScope };
-  }
-
-  if (request.type === 'NOSTR_LIST_ALL_SCOPE_KEYS') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Scope key listing is only available from extension UI');
-    }
-    const scopes = await listStoredKeyScopes();
-    const scopeDetails = [];
-    for (const scope of scopes) {
-      const km = new KeyManager(chrome.storage.local, scope === KEY_SCOPE_DEFAULT ? '' : scope);
-      const hasKey = await km.hasKey();
-      const pubkey = await km.getStoredPublicKey();
-      const mode = hasKey ? await km.getProtectionMode() : null;
-      scopeDetails.push({ scope, hasKey, pubkey, protectionMode: mode });
-    }
-    return { scopes: scopeDetails, activeScope: activeKeyScope };
   }
 
   if (request.type === 'NOSTR_BACKUP_STATUS') {
@@ -1266,6 +2569,10 @@ async function handleMessage(request, sender) {
     try {
       const result = await configureProtectionAndStoreSecretKey(secretKey, await getPasskeyAuthOptions());
 
+      // Neuer Key = alte DM-Nachrichten gehören nicht mehr dazu
+      await clearDmCache();
+      console.log('[NIP-17] DM cache cleared after new key creation');
+
       // Register new pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
       if (wpApi && result.pubkey) {
@@ -1315,6 +2622,10 @@ async function handleMessage(request, sender) {
     }
     try {
       const result = await configureProtectionAndStoreSecretKey(importedSecret, await getPasskeyAuthOptions());
+
+      // Key-Wechsel: alte DM-Nachrichten gehören nicht mehr dazu
+      await clearDmCache();
+      console.log('[NIP-17] DM cache cleared after key import');
 
       // Register imported pubkey in WordPress if wpApi context available
       const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
@@ -1404,6 +2715,497 @@ async function handleMessage(request, sender) {
     };
   }
 
+  // NOSTR_GET_CONTACTS - Kontaktliste abrufen (TASK-18)
+  if (request.type === 'NOSTR_GET_CONTACTS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Contacts are only available from extension UI');
+    }
+
+    // Versuche zuerst den pubkey aus dem existierenden Cache zu holen
+    // Das funktioniert auch wenn der Key in einem anderen Scope gespeichert ist
+    const cacheResult = await chrome.storage.local.get([CONTACTS_CACHE_KEY]);
+    const existingCache = cacheResult[CONTACTS_CACHE_KEY];
+    let pubkey = existingCache?.pubkey || null;
+    
+    // Falls kein pubkey im Cache, aus Key Manager holen
+    if (!pubkey) {
+      pubkey = await getKnownPublicKeyHex();
+    }
+    
+    if (!pubkey) {
+      return { contacts: [], source: 'none', reason: 'no_key' };
+    }
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    const cachedWpMembers = await getCachedWpMembers(wpApi);
+    const includeWpMembers = Boolean(wpApi) || Boolean(cachedWpMembers?.members?.length);
+
+    // Cache prüfen - an pubkey gebunden, nicht scope
+    const cached = await getCachedContacts(pubkey, includeWpMembers);
+    if (cached) {
+      return { contacts: cached, source: 'cache' };
+    }
+
+    // Relay-URL bestimmen (DM-Relay aus Settings oder Default)
+    const dmRelayResult = await chrome.storage.local.get(['dmRelayUrl']);
+    const relayUrl = normalizeRelayUrl(dmRelayResult.dmRelayUrl) || 'wss://relay.damus.io';
+
+    // Kontakte abrufen
+    const nostrContacts = await fetchContactList(pubkey, relayUrl);
+    const pubkeys = nostrContacts.map(c => c.pubkey);
+    const profiles = await fetchProfiles(pubkeys, relayUrl);
+
+    // WP Members falls wpApi vorhanden - mit Cache nutzen
+    let wpMembers = [];
+    let wpMembersStale = false;
+    if (cachedWpMembers) {
+      wpMembers = cachedWpMembers.members;
+      wpMembersStale = cachedWpMembers.isStale;
+    }
+      
+    if (wpApi) {
+      // Wenn kein Cache oder stale, neu laden
+      if (!cachedWpMembers || cachedWpMembers.isStale) {
+        const freshWpMembers = await fetchWpMembers(wpApi);
+        if (freshWpMembers.length > 0) {
+          wpMembers = freshWpMembers;
+          await setCachedWpMembers(wpApi, freshWpMembers);
+          wpMembersStale = false;
+        }
+      }
+    }
+
+    // Merge
+    const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
+    await setCachedContacts(pubkey, contacts, includeWpMembers);
+
+    return { 
+      contacts, 
+      source: 'fresh',
+      wpMembersStale 
+    };
+  }
+
+  // NOSTR_REFRESH_CONTACTS - Kontaktliste aktualisieren (Force-Refresh)
+  if (request.type === 'NOSTR_REFRESH_CONTACTS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Contacts refresh is only available from extension UI');
+    }
+
+    await clearContactsCache();
+
+    const pubkey = await getKnownPublicKeyHex();
+    if (!pubkey) {
+      return { contacts: [], source: 'none', reason: 'no_key' };
+    }
+    const wpApi = sanitizeWpApiContext(request.payload?.wpApi);
+    const includeWpMembers = Boolean(wpApi);
+
+    const relayUrl = normalizeRelayUrl(request.payload?.relayUrl) ||
+      normalizeRelayUrl((await chrome.storage.local.get(['dmRelayUrl'])).dmRelayUrl) ||
+      'wss://relay.damus.io';
+
+    const nostrContacts = await fetchContactList(pubkey, relayUrl);
+    const pubkeys = nostrContacts.map(c => c.pubkey);
+    const profiles = await fetchProfiles(pubkeys, relayUrl);
+
+    let wpMembers = [];
+    if (wpApi) {
+      // WP Members neu laden (Force-Refresh)
+      wpMembers = await fetchWpMembers(wpApi);
+      if (wpMembers.length > 0) {
+        await setCachedWpMembers(wpApi, wpMembers);
+      }
+    }
+
+    const contacts = mergeContacts(nostrContacts, profiles, wpMembers);
+    await setCachedContacts(pubkey, contacts, includeWpMembers);
+
+    return { contacts, source: 'fresh' };
+  }
+
+  if (request.type === 'NOSTR_ADD_CONTACT') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Adding contacts is only available from extension UI');
+    }
+
+    const contactPubkey = normalizeContactInputPubkey(request.payload?.contact || request.payload?.pubkey || request.payload?.npub);
+    if (!contactPubkey) {
+      throw new Error('Ungültiger Kontakt-Pubkey (erwarte hex oder npub).');
+    }
+
+    const hasKey = await keyManager.hasKey();
+    if (!hasKey) {
+      throw new Error('No local key found for this scope.');
+    }
+
+    const relayUrl = normalizeRelayUrl(request.payload?.relayUrl) ||
+      normalizeRelayUrl((await chrome.storage.local.get(['dmRelayUrl'])).dmRelayUrl) ||
+      'wss://relay.damus.io';
+
+    const protectionMode = await keyManager.getProtectionMode();
+    const unlockPassword = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const secretKey = await keyManager.getKey(protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null);
+    if (!secretKey) {
+      throw new Error('Failed to unlock key for contact update.');
+    }
+
+    try {
+      const ownPubkey = getPublicKey(secretKey);
+      if (ownPubkey === contactPubkey) {
+        throw new Error('Du kannst dich nicht selbst hinzufügen.');
+      }
+
+      const latestContactEvent = await fetchLatestContactListEvent(ownPubkey, relayUrl);
+      const baseTags = Array.isArray(latestContactEvent?.tags) ? latestContactEvent.tags : [];
+      const nonContactTags = baseTags.filter((tag) => !(Array.isArray(tag) && tag[0] === 'p'));
+      const existingContactTags = baseTags.filter((tag) => Array.isArray(tag) && tag[0] === 'p' && normalizePubkeyHex(tag[1]));
+
+      const contactMap = new Map();
+      for (const tag of existingContactTags) {
+        const pk = normalizePubkeyHex(tag[1]);
+        if (!pk || contactMap.has(pk)) continue;
+        contactMap.set(pk, {
+          relayUrl: String(tag[2] || '').trim() || null,
+          petname: String(tag[3] || '').trim() || null
+        });
+      }
+
+      if (contactMap.has(contactPubkey)) {
+        return {
+          success: true,
+          alreadyExists: true,
+          pubkey: contactPubkey,
+          npub: toNpub(contactPubkey),
+          relay: relayUrl,
+          totalContacts: contactMap.size
+        };
+      }
+
+      contactMap.set(contactPubkey, { relayUrl: null, petname: null });
+
+      const updatedContactTags = [];
+      for (const [pk, meta] of contactMap.entries()) {
+        const tag = ['p', pk];
+        if (meta.relayUrl || meta.petname) {
+          tag.push(meta.relayUrl || '');
+          if (meta.petname) {
+            tag.push(meta.petname);
+          }
+        }
+        updatedContactTags.push(tag);
+      }
+
+      const signedEvent = await keyManager.signEvent(
+        {
+          kind: 3,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [...nonContactTags, ...updatedContactTags],
+          content: typeof latestContactEvent?.content === 'string' ? latestContactEvent.content : ''
+        },
+        protectionMode === KeyManager.MODE_PASSWORD ? unlockPassword : null
+      );
+
+      await publishEventToRelay(relayUrl, signedEvent, 10000);
+      await clearContactsCache();
+
+      return {
+        success: true,
+        alreadyExists: false,
+        pubkey: contactPubkey,
+        npub: toNpub(contactPubkey),
+        relay: relayUrl,
+        eventId: signedEvent.id,
+        totalContacts: contactMap.size
+      };
+    } finally {
+      secretKey.fill(0);
+    }
+  }
+
+  // ============================================================
+  // NIP-17 Direktnachrichten Message Handler
+  // ============================================================
+
+  // NOSTR_SEND_DM - Direktnachricht senden
+  if (request.type === 'NOSTR_SEND_DM') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM sending is only available from extension UI');
+    }
+
+    const { recipientPubkey, content, relayUrl } = request.payload || {};
+    const normalizedRecipient = normalizePubkeyHex(recipientPubkey);
+    if (!normalizedRecipient) {
+      throw new Error('Invalid recipient pubkey');
+    }
+    if (!content || typeof content !== 'string') {
+      throw new Error('Message content is required');
+    }
+    if (content.length > 10000) {
+      throw new Error('Message too long (max 10000 characters)');
+    }
+
+    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    if (!dmKeyInfo) {
+      throw new Error('No local key found for DM operations.');
+    }
+    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
+
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const privateKeyRaw = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!privateKeyRaw) {
+      throw new Error('Failed to unlock key');
+    }
+    const privateKey = ensureUint8(privateKeyRaw);
+
+    try {
+      const senderPubkey = getPublicKey(privateKey);
+
+      // Eigene Inbox-Relays ermitteln (für Self-Copy)
+      const myInboxRelays = await resolveDmInboxRelays(relayUrl, senderPubkey);
+
+      // DM-Relays des Empfängers herausfinden (Kind 10050)
+      // WICHTIG: Lookup über allgemeine Relays, NICHT über eigene Inbox-Relays!
+      // Eigene Inbox-Relays haben das Kind 10050 des Empfängers i.d.R. nicht.
+      const recipientLookupRelays = await resolveRecipientLookupRelays(relayUrl);
+      let targetRelays = await fetchDmRelays(normalizedRecipient, recipientLookupRelays, {
+        timeoutMs: 3500
+      });
+      if (!targetRelays.length) {
+        // Fallback: send to lookup relays to maximize interoperability.
+        console.log('[NIP-17] No recipient relays found, using lookup relays as fallback');
+        targetRelays = [...new Set([...recipientLookupRelays, ...DEFAULT_DM_RELAYS])];
+      }
+
+      // Gift Wraps erstellen
+      // Force Uint8Array conversion for crypto ops
+      const secureKey = ensureUint8(privateKey);
+      const { wrapForRecipient, wrapForSelf, innerId } = createGiftWrappedDM(
+        secureKey, normalizedRecipient, content
+      );
+
+      console.log('[NIP-17] Sending DM via relays:', targetRelays);
+
+      // Parallel an Empfänger-Relays publishen
+      const publishPromises = targetRelays.map(async (relay) => {
+        try {
+          await relayManager.publishEvent(relay, wrapForRecipient, 10000);
+          console.log('[NIP-17] Published to recipient relay:', relay);
+          return { relay, success: true };
+        } catch (e) {
+          console.warn('[NIP-17] Failed to publish to recipient relay:', relay, e.message);
+          return { relay, success: false, error: e.message };
+        }
+      });
+
+      // Selbst-Kopie im Hintergrund auf alle eigenen Inbox-Relays (Fire & Forget)
+      // Damit wir die Nachricht auch auf allen unseren Relays wiederfinden.
+      for (const selfRelay of myInboxRelays) {
+        relayManager.publishEvent(selfRelay, wrapForSelf, 15000)
+          .catch(e => console.warn('[NIP-17] Failed to publish self-copy to', selfRelay, ':', e.message));
+      }
+
+      // Nur auf Empfänger-Bestätigungen warten (kritisch)
+      const recipientResults = await Promise.all(publishPromises);
+      
+      const publishErrors = recipientResults
+        .filter(r => !r.success)
+        .map(r => ({ relay: r.relay, error: r.error }));
+
+      // Lokal cachen
+      await cacheDmMessage({
+        id: wrapForRecipient.id,
+        innerId,
+        senderPubkey,
+        recipientPubkey: normalizedRecipient,
+        content,
+        createdAt: Math.floor(Date.now() / 1000),
+        direction: 'out',
+        giftWrapId: wrapForRecipient.id,
+        receivedAt: Date.now()
+      }, dmScope, senderPubkey);
+
+      return {
+        success: true,
+        eventId: wrapForRecipient.id,
+        innerId,
+        publishedTo: targetRelays,
+        errors: publishErrors.length > 0 ? publishErrors : undefined
+      };
+    } finally {
+      privateKey.fill(0);
+    }
+  }
+
+  // NOSTR_GET_DMS - Direktnachrichten abrufen
+  if (request.type === 'NOSTR_GET_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DMs are only available from extension UI');
+    }
+
+    const { relayUrl, since, limit, contactPubkey } = request.payload || {};
+
+    // Scope-unabhängig Key suchen (Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    const scope = dmKeyInfo ? dmKeyInfo.scope : activeKeyScope;
+
+    // Kein Key → nur Cache zurückgeben (ohne ownerPubkey-Validierung)
+    if (!dmKeyInfo) {
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+      return { messages: cachedMessages, source: 'cache_only', reason: 'no_key' };
+    }
+
+    // Key unlocking
+    const { km: dmKm, protectionMode } = dmKeyInfo;
+    let privateKey;
+
+    try {
+      const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+      const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+      privateKey = ensureUint8(rawKey);
+    } catch (e) {
+      console.warn('[NIP-17] Key unlock exception:', e.message, 'protectionMode:', protectionMode, 'scope:', scope);
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+      if (cachedMessages.length > 0) {
+        return { messages: cachedMessages, source: 'cache_strict', reason: 'unlock_cancelled' };
+      }
+      throw e;
+    }
+
+    if (!privateKey || privateKey.length !== 32) {
+      console.error('[NIP-17] Key unlock failed. protectionMode:', protectionMode, 'scope:', scope,
+        'key:', privateKey ? `length=${privateKey.length}` : 'null');
+      const cachedMessages = await getCachedDmMessages(scope, contactPubkey);
+      if (cachedMessages.length > 0) {
+        return { messages: cachedMessages, source: 'cache_fallback', reason: 'key_unlock_failed' };
+      }
+      throw new Error('Failed to unlock key for DM decryption');
+    }
+
+    const myPubkey = getPublicKey(privateKey);
+
+    // Cache mit ownerPubkey-Validierung lesen (Konversations-basiert)
+    const cachedMessages = await getCachedDmMessages(scope, contactPubkey, myPubkey);
+
+    // since-Filter: Letzten bekannten Zeitstempel als Basis
+    let fetchSince = since;
+    if (!fetchSince && cachedMessages.length > 0) {
+      fetchSince = Math.max(0, cachedMessages[cachedMessages.length - 1].createdAt - 3600);
+    }
+
+    try {
+      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
+      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
+
+      const filters = [{
+        kinds: [1059],
+        '#p': [myPubkey],
+        limit: limit || 100
+      }];
+      if (fetchSince) filters[0].since = fetchSince;
+
+      // Parallel Fetch: mit Cache schneller (kürzerer Timeout), ohne Cache etwas großzügiger.
+      const dmFetchTimeoutMs = cachedMessages.length > 0 ? 2200 : 3500;
+      const fetchPromises = inboxRelays.map(r => subscribeOnce(r, filters, dmFetchTimeoutMs).catch(() => []));
+      const results = await Promise.all(fetchPromises);
+      const giftWraps = results.flat();
+
+      // Deduplizieren der GiftWraps
+      const uniqueWraps = new Map();
+      giftWraps.forEach(gw => uniqueWraps.set(gw.id, gw));
+
+      // Entschlüsseln und validieren
+      const newMessages = [];
+      for (const gw of uniqueWraps.values()) {
+        try {
+          const msg = unwrapGiftWrap(privateKey, gw);
+          msg.giftWrapId = msg.id;
+          msg.direction = msg.senderPubkey === myPubkey ? 'out' : 'in';
+          msg.receivedAt = Date.now();
+          newMessages.push(msg);
+        } catch(e) {
+          // Silently skip (fremde Gift Wraps)
+        }
+      }
+      
+      privateKey.fill(0);
+
+      // Alle neuen Nachrichten cachen (Konversations-Zuordnung passiert automatisch
+      // in cacheDmMessage über resolveConversationPartner)
+      if (newMessages.length > 0) {
+        await cacheDmMessages(newMessages, scope, myPubkey);
+      }
+
+      // Finalen Konversations-Cache lesen (enthält jetzt alte + neue, dedupliziert)
+      const allMessages = await getCachedDmMessages(scope, contactPubkey, myPubkey);
+
+      return { messages: allMessages, source: newMessages.length > 0 ? 'merged' : 'cache', relays: inboxRelays };
+      
+    } catch (error) {
+       console.error('Failed to fetch/decrypt DMs:', error);
+       privateKey.fill(0);
+       return { messages: cachedMessages, source: 'cache_fallback', error: error.message }; 
+    }
+  }
+
+  // NOSTR_SUBSCRIBE_DMS - Subscription für eingehende DMs starten
+  if (request.type === 'NOSTR_SUBSCRIBE_DMS') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('DM subscription is only available from extension UI');
+    }
+
+    const { relayUrl } = request.payload || {};
+
+    // Private Key holen (scope-unabhängig, Race-Condition-sicher)
+    const dmKeyInfo = await findDmKey();
+    if (!dmKeyInfo) {
+      throw new Error('No local key found for DM operations.');
+    }
+    const { km: dmKm, scope: dmScope, protectionMode } = dmKeyInfo;
+
+    const password = await ensureUnlockForMode(protectionMode, await getPasskeyAuthOptions());
+    const rawKey = await dmKm.getKey(protectionMode === KeyManager.MODE_PASSWORD ? password : null);
+    if (!rawKey) {
+      throw new Error('Failed to unlock key');
+    }
+    const privateKey = ensureUint8(rawKey);
+
+    try {
+      const myPubkey = getPublicKey(privateKey);
+
+      // Multi-Relay: Alle DM-Inbox-Relays ermitteln (NIP-17)
+      const inboxRelays = await resolveDmInboxRelays(relayUrl, myPubkey);
+
+      // WICHTIG: Kopie des Keys für die Subscription erstellen!
+      // Die Subscription läuft weiter und braucht den Key für jeden eingehenden Gift Wrap.
+      // Das Original wird im finally-Block sicher gelöscht.
+      const subscriptionKey = new Uint8Array(privateKey);
+
+      // Alte Subscriptions beenden
+      for (const oldSubId of activeDmSubscriptionIds) {
+        relayManager.unsubscribe(oldSubId);
+      }
+      activeDmSubscriptionIds = [];
+
+      // Auf allen Inbox-Relays subscriben
+      const newSubIds = [];
+      for (const relay of inboxRelays) {
+        try {
+          const subId = await startDmSubscription(dmScope, relay, myPubkey, subscriptionKey);
+          newSubIds.push(subId);
+          console.log('[NIP-17] Subscription gestartet auf:', relay, 'subId:', subId);
+        } catch (e) {
+          console.warn('[NIP-17] Subscription fehlgeschlagen auf:', relay, e.message);
+        }
+      }
+      activeDmSubscriptionIds = newSubIds;
+
+      return { subscriptionIds: newSubIds, status: 'active', relays: inboxRelays };
+    } finally {
+      privateKey.fill(0); // Original sicher löschen - Subscription hat eigene Kopie
+    }
+  }
+
   // NOSTR_SET_DOMAIN_CONFIG - Konfiguration f????r Domain-Sync setzen
   if (request.type === 'NOSTR_SET_DOMAIN_CONFIG') {
     const { primaryDomain, domainSecret, authBroker } = request.payload || {};
@@ -1423,66 +3225,7 @@ async function handleMessage(request, sender) {
     return { success: true, configCount: result.configCount, primaryHost: result.primaryHost };
   }
 
-  if (request.type === 'NOSTR_UPSERT_DOMAIN_SYNC_CONFIG') {
-    if (!isInternalExtensionRequest) {
-      throw new Error('Manual domain config is only allowed from extension UI');
-    }
-    const { primaryDomain, domainSecret, authBroker } = request.payload || {};
-    if (!primaryDomain || !domainSecret) {
-      throw new Error('Primary domain and secret are required');
-    }
-    await upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker);
-    await updateDomainWhitelist();
-    return await getDomainSyncState();
-  }
-
   if (request.type === 'NOSTR_GET_DOMAIN_SYNC_STATE') {
-    return await getDomainSyncState();
-  }
-
-  if (request.type === 'NOSTR_SYNC_DOMAINS_NOW') {
-    await updateDomainWhitelist();
-    return await getDomainSyncState();
-  }
-
-  if (request.type === 'NOSTR_REMOVE_DOMAIN_SYNC_CONFIG') {
-    const normalizedHost = normalizeDomainEntry(request.payload?.host);
-    if (!normalizedHost) {
-      throw new Error('Invalid domain sync host');
-    }
-
-    const domainSyncConfigs = await getDomainSyncConfigs();
-    const removedConfig = domainSyncConfigs[normalizedHost];
-    if (!removedConfig) {
-      return await getDomainSyncState();
-    }
-
-    delete domainSyncConfigs[normalizedHost];
-
-    const { allowedDomains = [] } = await chrome.storage.local.get(['allowedDomains']);
-    const keepDomains = new Set(Object.keys(domainSyncConfigs));
-    for (const config of Object.values(domainSyncConfigs)) {
-      for (const syncedDomain of normalizeDomainList(config.syncedDomains || [])) {
-        keepDomains.add(syncedDomain);
-      }
-    }
-
-    const removeDomains = new Set([normalizedHost]);
-    for (const syncedDomain of normalizeDomainList(removedConfig.syncedDomains || [])) {
-      if (!keepDomains.has(syncedDomain)) {
-        removeDomains.add(syncedDomain);
-      }
-    }
-
-    const prunedAllowedDomains = normalizeDomainList(allowedDomains)
-      .filter((domainEntry) => !removeDomains.has(domainEntry));
-
-    await chrome.storage.local.set({
-      [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs,
-      allowedDomains: prunedAllowedDomains
-    });
-
-    await updateDomainWhitelist();
     return await getDomainSyncState();
   }
 
@@ -1509,6 +3252,16 @@ async function handleMessage(request, sender) {
   switch (request.type) {
     case 'NOSTR_GET_PUBLIC_KEY': {
       const allowCreateIfMissing = request?.payload?.createIfMissing !== false;
+
+      // forceNew: discard any existing key in this scope and generate a fresh one.
+      // Used by performRegistration() to recover from pubkey_in_use conflicts
+      // (e.g. a key wrongly copied from another WP user's scope).
+      if (request?.payload?.forceNew === true) {
+        console.log('[Nostr] forceNew requested for scope', activeKeyScope, '– discarding existing key');
+        await keyManager.clearScopeKeys();
+        await clearUnlockCaches();
+      }
+
       if (!await keyManager.hasKey()) {
         if (!allowCreateIfMissing) {
           throw new Error('No local key found for this scope.');
@@ -1699,12 +3452,20 @@ async function getExistingProtectionPreference() {
       if (preferredUserId) {
         const candidateUserIdMatch = scope.match(/:u:(\d+)$/);
         if (candidateUserIdMatch && candidateUserIdMatch[1] === preferredUserId) {
-          // Exact user-id match – use immediately
+          // Exact user-id match (same identity across domains) – use immediately
           return candidate;
+        }
+        // IMPORTANT: When the active scope is user-specific (wp:host:u:N),
+        // never inherit keys from a DIFFERENT user (wp:host:u:M where M≠N).
+        // This prevents the same private key being shared between distinct
+        // WordPress accounts, which would cause "pubkey_in_use" errors.
+        if (candidateUserIdMatch && candidateUserIdMatch[1] !== preferredUserId) {
+          continue; // skip scopes belonging to a different WP user
         }
       }
 
-      // Remember first valid scope as fallback
+      // Remember first valid scope as fallback (only global or non-user scopes reach here
+      // when preferredUserId is set, since cross-user scopes are skipped above)
       if (!fallbackMatch) {
         fallbackMatch = candidate;
       }
@@ -1788,7 +3549,10 @@ function getPasswordDialogWindowSize(mode) {
     case 'create':
       return { width: 520, height: 720 };
     case 'unlock-passkey':
+    case 'create-passkey':
       return { width: 560, height: 760 };
+    case 'create-password':
+      return { width: 420, height: 480 };
     case 'unlock':
     default:
       return { width: 420, height: 420 };
@@ -1996,28 +3760,6 @@ function normalizeDomainSyncConfigs(configs) {
   return normalized;
 }
 
-function createDomainSyncConfig(primaryDomain, domainSecret, authBroker = null) {
-  const normalizedPrimaryDomain = getPrimaryDomainBaseUrl(primaryDomain);
-  const primaryHost = extractHostFromPrimaryDomain(normalizedPrimaryDomain);
-  const normalizedSecret = String(domainSecret || '').trim();
-  if (!normalizedPrimaryDomain || !primaryHost || !normalizedSecret) return null;
-  const normalizedBroker = sanitizePasskeyAuthBroker(authBroker);
-
-  return {
-    primaryHost,
-    config: {
-      primaryDomain: normalizedPrimaryDomain,
-      domainSecret: normalizedSecret,
-      updatedAt: Date.now(),
-      lastSyncAt: null,
-      lastSyncBaseUrl: null,
-      lastSyncError: null,
-      syncedDomains: [],
-      authBroker: normalizedBroker
-    }
-  };
-}
-
 async function getDomainSyncState() {
   const configs = await getDomainSyncConfigs();
   const { allowedDomains = [], lastDomainUpdate = null } = await chrome.storage.local.get([
@@ -2046,30 +3788,8 @@ async function getDomainSyncState() {
 }
 
 async function getDomainSyncConfigs() {
-  const storage = await chrome.storage.local.get([
-    DOMAIN_SYNC_CONFIGS_KEY,
-    LEGACY_PRIMARY_DOMAIN_KEY,
-    LEGACY_DOMAIN_SECRET_KEY
-  ]);
-
-  let configs = normalizeDomainSyncConfigs(storage[DOMAIN_SYNC_CONFIGS_KEY]);
-
-  if (!domainSyncMigrationDone) {
-    const migrated = createDomainSyncConfig(
-      storage[LEGACY_PRIMARY_DOMAIN_KEY],
-      storage[LEGACY_DOMAIN_SECRET_KEY],
-      null
-    );
-
-    if (migrated && !configs[migrated.primaryHost]) {
-      configs[migrated.primaryHost] = migrated.config;
-      await chrome.storage.local.set({ [DOMAIN_SYNC_CONFIGS_KEY]: configs });
-    }
-
-    domainSyncMigrationDone = true;
-  }
-
-  return configs;
+  const storage = await chrome.storage.local.get([DOMAIN_SYNC_CONFIGS_KEY]);
+  return normalizeDomainSyncConfigs(storage[DOMAIN_SYNC_CONFIGS_KEY]);
 }
 
 async function isConfiguredPrimaryDomain(domain) {
@@ -2102,10 +3822,7 @@ async function upsertDomainSyncConfig(primaryDomain, domainSecret, authBroker = 
   };
 
   await chrome.storage.local.set({
-    [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs,
-    // Legacy keys fuer Rueckwaertskompatibilitaet beibehalten
-    [LEGACY_PRIMARY_DOMAIN_KEY]: normalizedPrimaryDomain,
-    [LEGACY_DOMAIN_SECRET_KEY]: normalizedSecret
+    [DOMAIN_SYNC_CONFIGS_KEY]: domainSyncConfigs
   });
 
   return {
@@ -2192,6 +3909,71 @@ async function updateDomainWhitelist() {
 // Alarm: Periodisches Domain-Sync
 // ============================================================
 chrome.alarms.create('domainSync', { periodInMinutes: 5 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'domainSync') updateDomainWhitelist();
+
+// ============================================================
+// Alarm: Keep-Alive für Relay-Verbindungen (MV3 Service Worker)
+// ============================================================
+// MV3 Service Worker werden nach ~30s Inaktivität beendet
+// Alarm alle 25 Sekunden (unter 30s Grenze)
+chrome.alarms.create('relayKeepalive', { periodInMinutes: 0.42 }); // ~25s
+
+// Alarm für DM-Polling (Fallback)
+chrome.alarms.create('dmPolling', { periodInMinutes: 5 });
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'domainSync') {
+    updateDomainWhitelist();
+  }
+  
+  if (alarm.name === 'relayKeepalive') {
+    // Prüfe Relay-Verbindungen, reconnect falls nötig
+    relayManager.checkConnections();
+  }
+  
+  if (alarm.name === 'dmPolling') {
+    // Poll for new DMs in background
+    try {
+      const hasKey = await keyManager.hasKey();
+      if (!hasKey) return;
+      
+      const protectionMode = await keyManager.getProtectionMode();
+      
+      // Nur pollen wenn entsperrt (cached password/passkey)
+      let privateKey = null;
+      try {
+        if (protectionMode === KeyManager.MODE_NONE) {
+          privateKey = await keyManager.getKey(null);
+        } else if (protectionMode === KeyManager.MODE_PASSWORD) {
+          const cached = await getCachedPassword();
+          if (cached) {
+            privateKey = await keyManager.getKey(cached);
+          }
+        } else if (protectionMode === KeyManager.MODE_PASSKEY) {
+          const cached = await getCachedPasskeyAuth();
+          if (cached) {
+            privateKey = await keyManager.getKey(null);
+          }
+        }
+      } catch {
+        // Key nicht verfügbar - skip polling
+      }
+      
+      if (privateKey) {
+        try {
+          const myPubkey = getPublicKey(privateKey);
+          
+          // DM-Relay aus Settings holen
+          const dmRelayResult = await chrome.storage.local.get(['dmRelayUrl']);
+          const relayUrl = normalizeRelayUrl(dmRelayResult.dmRelayUrl) || 'wss://relay.damus.io';
+          
+          await pollForNewDms(activeKeyScope, relayUrl, myPubkey, privateKey);
+        } finally {
+          privateKey.fill(0);
+        }
+      }
+    } catch (error) {
+      console.warn('[NIP-17] Background DM polling failed:', error.message);
+    }
+  }
 });
+async function getCachedContacts(pubkey, includeWpMembers = false) { try { const result = await chrome.storage.local.get([CONTACTS_CACHE_KEY]); const cache = result[CONTACTS_CACHE_KEY]; if (!cache || cache.pubkey !== pubkey) return null; if (Boolean(cache.includeWpMembers) !== Boolean(includeWpMembers)) return null; if (Date.now() - cache.fetchedAt > CONTACTS_CACHE_TTL) return null; return cache.contacts; } catch { return null; } } async function setCachedContacts(pubkey, contacts, includeWpMembers = false) { try { await chrome.storage.local.set({ [CONTACTS_CACHE_KEY]: { pubkey, includeWpMembers: Boolean(includeWpMembers), contacts, fetchedAt: Date.now() } }); } catch (error) { console.warn('[Nostr] Failed to cache contacts:', error.message); } }

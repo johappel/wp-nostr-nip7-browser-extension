@@ -13,6 +13,16 @@ Diese Lösung verbindet die Welt von **WordPress** (als vertrauenswürdige Heima
 
 Weitere Details finden sich im Konzept und der API-Referenz.
 
+## Message-API Iststand (Background)
+
+Der interne Message-Vertrag zwischen Popup/Content und `background.js` wurde bereinigt.
+
+- Aktiv für Chat/DM: `NOSTR_SEND_DM`, `NOSTR_GET_DMS`, `NOSTR_SUBSCRIBE_DMS`
+- Aktiv für Kontakte: `NOSTR_GET_CONTACTS`, `NOSTR_REFRESH_CONTACTS`, `NOSTR_ADD_CONTACT`
+- Entfernt als obsolet: u. a. `NOSTR_GET_DM_RELAYS`, `NOSTR_UNSUBSCRIBE_DMS`, `NOSTR_GET_UNREAD_COUNT`, `NOSTR_CLEAR_UNREAD`, `NOSTR_CLEAR_DM_CACHE`, `NOSTR_POLL_DMS`, `NOSTR_GET_WP_MEMBERS`, `NOSTR_REFRESH_WP_MEMBERS`, `NOSTR_CHECK_VERSION`, `NOSTR_LOCK`
+
+Die Task-Dokumente `TASK-19` und `TASK-20` sind auf den aktuellen Iststand angepasst (historische Plan-Teile bleiben als Referenz erhalten).
+
 ## Roadmap (Task-Status)
 
 - [x] TASK-00: Projekt-Uebersicht
@@ -46,12 +56,47 @@ Weitere Details finden sich im Konzept und der API-Referenz.
 npm install
 npm test
 npm run build
+npm run package:chrome
 npm run package:firefox
 ```
 
 Ergebnis:
 - Extension-Builds liegen in `dist/chrome` und `dist/firefox`.
-- Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.0.xpi`).
+- Chrome-ZIP für CWS liegt in `dist/packages/` (z. B. `wp-nostr-signer-chrome-1.0.1.zip`).
+- Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.1.xpi`).
+- Hinweis: Das lokale XPI ist unsigniert. In Firefox Release kann das als "Datei ist korrupt" erscheinen. Für dauerhafte Installation muss die XPI signiert werden (AMO / `web-ext sign`).
+
+Firefox XPI signieren (AMO):
+
+PowerShell:
+```powershell
+$env:WEB_EXT_API_KEY="DEIN_AMO_JWT_ISSUER"
+$env:WEB_EXT_API_SECRET="DEIN_AMO_JWT_SECRET"
+$env:FIREFOX_SIGN_CHANNEL="unlisted" # optional: unlisted|listed
+npm run sign:firefox
+```
+
+bash:
+```bash
+export WEB_EXT_API_KEY="DEIN_AMO_JWT_ISSUER"
+export WEB_EXT_API_SECRET="DEIN_AMO_JWT_SECRET"
+export FIREFOX_SIGN_CHANNEL="unlisted" # optional: unlisted|listed
+npm run sign:firefox
+```
+
+Hinweis:
+- `sign:firefox` baut zuerst neu (`dist/firefox`) und startet dann `web-ext sign`.
+- Wenn `web-ext` lokal nicht installiert ist, wird automatisch `npx web-ext` verwendet.
+
+Chrome Release (CWS):
+
+```bash
+npm run release:chrome
+```
+
+Hinweis:
+- `release:chrome` erzeugt zuerst das Upload-ZIP und zeigt danach eine kurze CWS-Checkliste.
+- Lokale `.crx`-Installation per Drag-and-drop ist auf Chrome (Windows/macOS) für normale Nutzer blockiert.
 
 ### 3. WordPress-Plugin lokal installieren
 
@@ -135,3 +180,12 @@ Hinweis:
 - Oeffne das Popup der WP Nostr Extension und aktiviere Prefer WP Nostr Lock.
 - Lade den Tab neu, damit die Inpage-API mit Lock neu injiziert wird.
 - Wenn du bewusst die andere Extension bevorzugen willst, deaktiviere den Lock wieder.
+
+8. Firefox zeigt die Extension-Sidebar links statt rechts.
+- Die Position der Firefox-Sidebar ist eine Browser-Einstellung und kann nicht von der Extension erzwungen werden.
+- In Firefox in der Sidebar auf Einstellungen gehen und "Move Sidebar to Right" waehlen.
+
+9. Firefox meldet beim Installieren von `dist/packages/*.xpi` "Datei ist korrupt".
+- Das ist bei unsignierten XPIs in Firefox Release ein typisches Symptom.
+- Für lokale Tests `about:debugging#/runtime/this-firefox` und `Load Temporary Add-on` mit `dist/firefox/manifest.json` nutzen.
+- Für Verteilung oder dauerhafte Installation die Erweiterung signieren (AMO / `web-ext sign`).

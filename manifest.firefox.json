@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "WordPress Nostr Signer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NIP-07 Signer für WordPress Nostr Integration",
   "permissions": [
     "storage",
     "activeTab",
-    "alarms"
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://*/*",
@@ -31,6 +32,21 @@
   ],
   "action": {
     "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "wp-nostr-signer@wp-nostr.local",
+      "strict_min_version": "121.0"
+    }
+  },
+  "sidebar_action": {
+    "default_panel": "sidebar.html",
+    "default_title": "WP Nostr Signer",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

@@ -164,9 +164,21 @@ export class KeyManager {
     const raw = await this.storage.get(this.keyNames(keys));
     const result = this.mapFromStorage(raw, keys);
 
-    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSWORD) return KeyManager.MODE_PASSWORD;
-    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_PASSKEY) return KeyManager.MODE_PASSKEY;
-    if (result[KeyManager.MODE_KEY] === KeyManager.MODE_NONE) return KeyManager.MODE_NONE;
+    // MODE_KEY nur vertrauen wenn die zugehörigen Daten auch vorhanden sind.
+    // Ein Mismatch kann nach Mode-Wechsel oder unvollständiger Migration auftreten.
+    const modeKey = result[KeyManager.MODE_KEY];
+    if (modeKey === KeyManager.MODE_PASSWORD && result[KeyManager.STORAGE_KEY]) return KeyManager.MODE_PASSWORD;
+    if (modeKey === KeyManager.MODE_PASSKEY && result[KeyManager.PLAIN_KEY]) return KeyManager.MODE_PASSKEY;
+    if (modeKey === KeyManager.MODE_NONE && result[KeyManager.PLAIN_KEY]) return KeyManager.MODE_NONE;
+
+    // Fallback: Erkennung anhand tatsächlich vorhandener Daten
+    if (modeKey && !(modeKey === KeyManager.MODE_PASSWORD || modeKey === KeyManager.MODE_PASSKEY || modeKey === KeyManager.MODE_NONE)) {
+      // Unbekannter Mode-Wert — ignorieren und data-basiert erkennen
+    } else if (modeKey) {
+      console.warn('[KeyManager] Mode/data mismatch: mode=' + modeKey +
+        ', hasStorage=' + !!result[KeyManager.STORAGE_KEY] +
+        ', hasPlain=' + !!result[KeyManager.PLAIN_KEY]);
+    }
 
     if (result[KeyManager.STORAGE_KEY]) return KeyManager.MODE_PASSWORD;
     if (result[KeyManager.PLAIN_KEY] && result[KeyManager.PASSKEY_ID_KEY]) return KeyManager.MODE_PASSKEY;
@@ -267,29 +279,59 @@ export class KeyManager {
     const raw = await this.storage.get(this.keyNames(keys));
     const result = this.mapFromStorage(raw, keys);
 
-    const mode = result[KeyManager.MODE_KEY]
-      || (result[KeyManager.STORAGE_KEY] ? KeyManager.MODE_PASSWORD : null)
-      || (result[KeyManager.PLAIN_KEY] && result[KeyManager.PASSKEY_ID_KEY] ? KeyManager.MODE_PASSKEY : null)
-      || (result[KeyManager.PLAIN_KEY] ? KeyManager.MODE_NONE : null);
+    // Mode-Erkennung: MODE_KEY nur vertrauen wenn Daten dazu passen
+    let mode = result[KeyManager.MODE_KEY] || null;
+    const dataForMode =
+      (mode === KeyManager.MODE_PASSWORD && result[KeyManager.STORAGE_KEY]) ||
+      ((mode === KeyManager.MODE_PASSKEY || mode === KeyManager.MODE_NONE) && result[KeyManager.PLAIN_KEY]);
+
+    if (mode && !dataForMode) {
+      // MODE_KEY/Daten-Mismatch: Fallback auf daten-basierte Erkennung
+      console.warn('[KeyManager.getKey] Mode/data mismatch: mode=' + mode +
+        ', hasStorage=' + !!result[KeyManager.STORAGE_KEY] +
+        ', hasPlain=' + !!result[KeyManager.PLAIN_KEY]);
+      mode = null;
+    }
+
+    if (!mode) {
+      mode = (result[KeyManager.STORAGE_KEY] ? KeyManager.MODE_PASSWORD : null)
+        || (result[KeyManager.PLAIN_KEY] && result[KeyManager.PASSKEY_ID_KEY] ? KeyManager.MODE_PASSKEY : null)
+        || (result[KeyManager.PLAIN_KEY] ? KeyManager.MODE_NONE : null);
+    }
 
     if (!mode) return null;
 
     if (mode === KeyManager.MODE_PASSKEY) {
       if (!result[KeyManager.PLAIN_KEY]) return null;
-      return new Uint8Array(result[KeyManager.PLAIN_KEY]);
+      // Robust conversion: Handle Array, Uint8Array or Object {0:x, 1:y}
+      const raw = result[KeyManager.PLAIN_KEY];
+      if (raw instanceof Uint8Array) return raw;
+      if (Array.isArray(raw)) return new Uint8Array(raw);
+      return new Uint8Array(Object.values(raw));
     }
 
     if (mode === KeyManager.MODE_NONE) {
       if (!result[KeyManager.PLAIN_KEY]) return null;
-      return new Uint8Array(result[KeyManager.PLAIN_KEY]);
+      const raw = result[KeyManager.PLAIN_KEY];
+      if (raw instanceof Uint8Array) return raw;
+      if (Array.isArray(raw)) return new Uint8Array(raw);
+      return new Uint8Array(Object.values(raw));
     }
 
     if (!password) throw new Error('Password required');
     if (!result[KeyManager.STORAGE_KEY]) return null;
 
-    const ciphertext = new Uint8Array(result[KeyManager.STORAGE_KEY]);
-    const salt = new Uint8Array(result[KeyManager.SALT_KEY]);
-    const iv = new Uint8Array(result[KeyManager.IV_KEY]);
+    // Helper for robust Uint8Array conversion
+    const toUint8 = (val) => {
+        if (!val) return new Uint8Array(0);
+        if (val instanceof Uint8Array) return val;
+        if (Array.isArray(val)) return new Uint8Array(val);
+        return new Uint8Array(Object.values(val));
+    };
+
+    const ciphertext = toUint8(result[KeyManager.STORAGE_KEY]);
+    const salt = toUint8(result[KeyManager.SALT_KEY]);
+    const iv = toUint8(result[KeyManager.IV_KEY]);
 
     const enc = new TextEncoder();
     const baseKey = await crypto.subtle.importKey(
@@ -346,6 +388,24 @@ export class KeyManager {
     if (!normalized) return null;
     await this.storage.set({ [this.keyName(KeyManager.PUBKEY_KEY)]: normalized });
     return normalized;
+  }
+
+  /**
+   * Remove all key data for the current scope.
+   * Used to discard a wrongly-inherited key before generating a fresh one.
+   */
+  async clearScopeKeys() {
+    const allKeys = this.keyNames([
+      KeyManager.STORAGE_KEY,
+      KeyManager.SALT_KEY,
+      KeyManager.IV_KEY,
+      KeyManager.PLAIN_KEY,
+      KeyManager.PUBKEY_KEY,
+      KeyManager.PASSKEY_ID_KEY,
+      KeyManager.MODE_KEY,
+      KeyManager.CREATED_KEY
+    ]);
+    await this.storage.remove(allKeys);
   }
 }
 

@@ -9,6 +9,35 @@ Diese Dokumentation beschreibt die REST-API-Endpunkte, die vom Backend (z. B. Wo
 *   **Sicherheit:** Schreibende Anfragen (`POST`, `PUT`, `DELETE`) erfordern in WordPress einen Nonce-Header (`X-WP-Nonce`), der im Frontend bereitgestellt wird.
 *   **Datenformat:** JSON.
 
+### Extension Message-Protokoll (Iststand 2026-02)
+
+Diese Datei beschreibt primär die Backend-REST-API. Da in älteren Task-Dokumenten auch interne Extension-Message-Commands dokumentiert wurden, hier der aktuelle Stand für den Background-Message-Vertrag:
+
+**Aktiv:**
+- `NOSTR_PING`
+- `NOSTR_SET_UNLOCK_CACHE_POLICY`
+- `NOSTR_CHANGE_PROTECTION`
+- `NOSTR_GET_STATUS`
+- `NOSTR_GET_KEY_SCOPE_INFO`
+- `NOSTR_BACKUP_STATUS`, `NOSTR_BACKUP_ENABLE`, `NOSTR_BACKUP_RESTORE`, `NOSTR_BACKUP_DELETE`
+- `NOSTR_EXPORT_NSEC`, `NOSTR_CREATE_NEW_KEY`, `NOSTR_IMPORT_NSEC`
+- `NOSTR_PUBLISH_PROFILE`
+- `NOSTR_GET_CONTACTS`, `NOSTR_REFRESH_CONTACTS`, `NOSTR_ADD_CONTACT`
+- `NOSTR_SEND_DM`, `NOSTR_GET_DMS`, `NOSTR_SUBSCRIBE_DMS`
+- `NOSTR_SET_DOMAIN_CONFIG`, `NOSTR_GET_DOMAIN_SYNC_STATE`
+- `NOSTR_GET_PUBLIC_KEY`, `NOSTR_SIGN_EVENT`, `NOSTR_GET_RELAYS`
+- `NOSTR_NIP04_ENCRYPT`, `NOSTR_NIP04_DECRYPT`, `NOSTR_NIP44_ENCRYPT`, `NOSTR_NIP44_DECRYPT`
+
+**Entfernt (Obsolete-Cleanup):**
+- `NOSTR_CHECK_VERSION`, `NOSTR_LOCK`
+- `NOSTR_DELETE_SCOPE_KEY`, `NOSTR_LIST_ALL_SCOPE_KEYS`
+- `NOSTR_GET_WP_MEMBERS`, `NOSTR_REFRESH_WP_MEMBERS`
+- `NOSTR_GET_CONVERSATIONS`, `NOSTR_GET_DM_RELAYS`, `NOSTR_UNSUBSCRIBE_DMS`
+- `NOSTR_GET_UNREAD_COUNT`, `NOSTR_CLEAR_UNREAD`
+- `NOSTR_SET_DM_NOTIFICATIONS`, `NOSTR_GET_DM_NOTIFICATIONS`
+- `NOSTR_CLEAR_DM_CACHE`, `NOSTR_POLL_DMS`
+- `NOSTR_UPSERT_DOMAIN_SYNC_CONFIG`, `NOSTR_SYNC_DOMAINS_NOW`, `NOSTR_REMOVE_DOMAIN_SYNC_CONFIG`
+
 ---
 
 ## 1. Domain Management & Konfiguration

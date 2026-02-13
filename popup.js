@@ -3,6 +3,14 @@ const DEFAULT_VALUE = true;
 const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
 const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
 const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
+const DM_RELAY_KEY = 'dmRelayUrl';
+const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
+const OPEN_IN_SIDEBAR_KEY = 'openInSidebar';
+const DM_CACHE_STORAGE_KEY = 'nostrDmCacheV2';
+const DM_LAST_READ_BY_CONTACT_KEY = 'dmLastReadByContactV1';
+const DEFAULT_APP_TITLE = 'WP Nostr Signer';
+const AVATAR_FALLBACK_DATA_URI = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg==';
+const POPUP_UI_STATE_KEY = 'popupUiStateV1';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
   off: 'Immer nachfragen',
@@ -12,6 +20,274 @@ const UNLOCK_CACHE_POLICY_LABELS = {
   '60m': '60 Minuten',
   session: 'Bis Browser-Neustart'
 };
+
+let contactsRequestScope = 'global';
+let contactsRequestWpApi = null;
+let currentUserPubkey = null;
+let dmConversationMeta = new Map();
+let dmLastReadByContact = {};
+let dmSubscriptionStarted = false;
+let dmSubscriptionRelayKey = '';
+let dmSubscriptionInFlight = null;
+let popupUiStateWriteTimer = null;
+
+function autoResizeTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+// ========================================
+// View-Router
+// ========================================
+
+function switchView(viewId) {
+  // Alle Views deaktivieren
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  
+  // Ziel-View aktivieren
+  const view = document.getElementById(`view-${viewId}`);
+  const navItem = document.querySelector(`[data-view="${viewId}"]`);
+  if (view) view.classList.add('active');
+  if (navItem) navItem.classList.add('active');
+  
+  // View-spezifische Initialisierung
+  onViewActivated(viewId);
+  queueSavePopupUiState();
+}
+
+// View-spezifische Aktionen bei Aktivierung
+async function onViewActivated(viewId) {
+  // Diese Funktion wird nach dem View-Wechsel aufgerufen
+  // und aktualisiert den Zustand der jeweiligen View
+  
+  // Ensure we are subscribed to DMs when viewing relevant pages
+  if (['home', 'conversation', 'chat'].includes(viewId)) {
+    ensureDmSubscription().catch(() => {});
+  }
+
+  switch (viewId) {
+    case 'home':
+      // Kontakte laden, wenn noch nicht geladen
+      if (currentContacts.length === 0) {
+        await loadContacts(false);
+      }
+      break;
+    case 'keys':
+      // Protection Row und Cloud-Backup werden beim Laden aktualisiert
+      break;
+    case 'settings':
+      // Scope-Anzeige aktualisieren
+      const scopeSpan = document.getElementById('active-scope');
+      if (scopeSpan) {
+        // Der Scope wird beim Laden gesetzt
+      }
+      break;
+  }
+}
+
+function getActiveViewId() {
+  const activeView = document.querySelector('.view.active');
+  if (!activeView || !activeView.id) return 'home';
+  return activeView.id.replace(/^view-/, '') || 'home';
+}
+
+async function loadPopupUiState() {
+  try {
+    const result = await chrome.storage.local.get([POPUP_UI_STATE_KEY]);
+    const raw = result?.[POPUP_UI_STATE_KEY];
+    if (!raw || typeof raw !== 'object') return null;
+
+    const viewId = String(raw.viewId || 'home').trim() || 'home';
+    const conversationPubkey = String(raw.conversationPubkey || '').trim();
+    const scope = normalizeScope(raw.scope || 'global');
+    return {
+      viewId,
+      conversationPubkey: conversationPubkey || null,
+      scope
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function savePopupUiState() {
+  const payload = {
+    viewId: getActiveViewId(),
+    conversationPubkey: activeConversationPubkey || null,
+    scope: normalizeScope(contactsRequestScope),
+    savedAt: Date.now()
+  };
+  try {
+    await chrome.storage.local.set({ [POPUP_UI_STATE_KEY]: payload });
+  } catch {
+    // ignore storage write errors
+  }
+}
+
+function queueSavePopupUiState() {
+  if (popupUiStateWriteTimer) {
+    clearTimeout(popupUiStateWriteTimer);
+  }
+  popupUiStateWriteTimer = setTimeout(() => {
+    popupUiStateWriteTimer = null;
+    savePopupUiState().catch(() => {});
+  }, 120);
+}
+
+window.addEventListener('beforeunload', () => {
+  if (popupUiStateWriteTimer) {
+    clearTimeout(popupUiStateWriteTimer);
+    popupUiStateWriteTimer = null;
+  }
+  savePopupUiState().catch(() => {});
+});
+
+function normalizeRelayListForKey(input) {
+  const raw = Array.isArray(input) ? input : String(input || '').split(',');
+  return [...new Set(raw
+    .map((entry) => normalizeRelayUrl(String(entry || '').trim()))
+    .filter(Boolean))]
+    .sort()
+    .join(',');
+}
+
+async function ensureDmSubscription(force = false) {
+  if (!force && dmSubscriptionInFlight) {
+    return await dmSubscriptionInFlight;
+  }
+
+  const dmRelayResult = await chrome.storage.local.get([DM_RELAY_KEY]);
+  const relayInput = dmRelayResult?.[DM_RELAY_KEY] || '';
+  const relayKey = normalizeRelayListForKey(relayInput);
+
+  if (!force && dmSubscriptionStarted && relayKey === dmSubscriptionRelayKey) {
+    return null;
+  }
+
+  dmSubscriptionInFlight = chrome.runtime.sendMessage({
+    type: 'NOSTR_SUBSCRIBE_DMS',
+    payload: { relayUrl: relayInput || null }
+  }).then((response) => {
+    if (!response?.error) {
+      dmSubscriptionStarted = true;
+      dmSubscriptionRelayKey = relayKey;
+    }
+    return response;
+  }).catch(() => {
+    dmSubscriptionStarted = false;
+    return null;
+  }).finally(() => {
+    dmSubscriptionInFlight = null;
+  });
+
+  return await dmSubscriptionInFlight;
+}
+
+// ========================================
+// Dialog-Management
+// ========================================
+
+function openDialog(dialogId) {
+  const overlay = document.getElementById('dialog-overlay');
+  const dialog = document.getElementById(dialogId);
+  if (overlay) {
+    overlay.classList.add('open');
+    overlay.setAttribute('aria-hidden', 'false');
+  }
+  if (dialog) {
+    dialog.classList.add('open');
+  }
+}
+
+function closeDialog() {
+  const overlay = document.getElementById('dialog-overlay');
+  if (overlay) {
+    overlay.classList.remove('open');
+    overlay.setAttribute('aria-hidden', 'true');
+  }
+  document.querySelectorAll('.dialog.open').forEach(d => d.classList.remove('open'));
+}
+
+// ========================================
+// Status-Management
+// ========================================
+
+let statusTimeout = null;
+
+function showStatus(message, isError = false) {
+  const status = document.getElementById('status');
+  if (!status) return;
+  
+  status.textContent = message;
+  status.classList.toggle('error', isError);
+  status.classList.add('visible');
+  
+  // Auto-Hide nach 4 Sekunden
+  if (statusTimeout) clearTimeout(statusTimeout);
+  statusTimeout = setTimeout(() => {
+    status.classList.remove('visible');
+  }, 4000);
+}
+
+// ========================================
+// User Hero Update
+// ========================================
+
+function updateUserHero(viewer, runtimeStatus) {
+  const heroAvatar = document.getElementById('hero-avatar');
+  const heroName = document.getElementById('hero-name');
+  const heroNip05 = document.getElementById('hero-nip05');
+  
+  if (!heroAvatar || !heroName || !heroNip05) return;
+  
+  const avatarUrl = String(viewer?.avatarUrl || '').trim();
+  const displayName = String(viewer?.displayName || viewer?.userLogin || 'Gast').trim();
+  const nip05 = String(viewer?.profileNip05 || '').trim();
+  
+  if (avatarUrl) {
+    heroAvatar.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="Avatar">`;
+  } else {
+    heroAvatar.innerHTML = '<span style="font-size: 20px;">👤</span>';
+  }
+  
+  heroName.textContent = displayName;
+  heroNip05.textContent = nip05 || '(keine NIP-05)';
+}
+
+// ========================================
+// Connection Status Update
+// ========================================
+
+function updateConnectionStatus(connected) {
+  const statusDot = document.querySelector('.status-dot');
+  const statusText = document.querySelector('.status-text');
+  
+  if (statusDot) {
+    statusDot.classList.toggle('offline', !connected);
+  }
+  if (statusText) {
+    statusText.textContent = connected ? 'Connected' : 'Offline';
+  }
+}
+
+function updateHeaderBranding(viewer) {
+  const appTitleNode = document.getElementById('app-title');
+  const primaryDomain = String(viewer?.primaryDomain || '').trim();
+  const activeOrigin = String(viewer?.activeSiteOrigin || '').trim();
+  const origin = String(viewer?.origin || '').trim();
+  const host = extractHost(primaryDomain || activeOrigin || origin);
+  const brandTitle = host ? `${host} - nostr` : DEFAULT_APP_TITLE;
+
+  if (appTitleNode) {
+    appTitleNode.textContent = brandTitle;
+  }
+  document.title = brandTitle;
+}
+
+// ========================================
+// Main Initialization
+// ========================================
 
 document.addEventListener('DOMContentLoaded', async () => {
   const checkbox = document.getElementById('prefer-lock');
@@ -37,34 +313,163 @@ document.addEventListener('DOMContentLoaded', async () => {
   const cloudBackupRestoreButton = document.getElementById('backup-restore-cloud');
   const cloudBackupDeleteButton = document.getElementById('backup-delete-cloud');
   const protectionRow = document.getElementById('protection-row');
+  const userHero = document.getElementById('user-hero');
+  const dialogOverlay = document.getElementById('dialog-overlay');
+  const dialogClose = document.getElementById('dialog-close');
+  const footerNav = document.getElementById('footer-nav');
+  const dmRelayInput = document.getElementById('dm-relay-url');
+  const saveDmRelayButton = document.getElementById('save-dm-relay');
+  const dmNotificationsCheckbox = document.getElementById('dm-notifications-enabled');
+  const openInSidebarCheckbox = document.getElementById('open-in-sidebar');
+  const firefoxSidebarPositionHint = document.getElementById('firefox-sidebar-position-hint');
+  const extensionVersionSpan = document.getElementById('extension-version');
+  const activeScopeSpan = document.getElementById('active-scope');
+  const refreshProfileButton = document.getElementById('refresh-profile');
+  
   let activeScope = 'global';
   let activeWpApi = null;
   let activeAuthBroker = null;
   let activeViewer = null;
   let activeRuntimeStatus = null;
+  const savedUiState = await loadPopupUiState();
+
+  const openInSidebarEnabled = await loadOpenInSidebarEnabled();
+  if (openInSidebarCheckbox) {
+    openInSidebarCheckbox.checked = openInSidebarEnabled;
+  }
+  if (firefoxSidebarPositionHint) {
+    const isFirefoxSidebar = typeof chrome?.sidebarAction?.open === 'function';
+    firefoxSidebarPositionHint.hidden = !isFirefoxSidebar;
+  }
+  applyOpenInSidebarMode(openInSidebarEnabled).catch(() => {});
+
+  // ========================================
+  // Event Listeners: Navigation & Dialogs
+  // ========================================
+
+  // Footer Navigation
+  if (footerNav) {
+    footerNav.addEventListener('click', (e) => {
+      const navItem = e.target.closest('.nav-item');
+      if (!navItem) return;
+      const viewId = navItem.dataset.view;
+      if (viewId) switchView(viewId);
+    });
+  }
+
+  // Initialize contact list events
+  initContactListEvents();
+
+  // Chat View Events (TASK-20)
+  const conversationBack = document.getElementById('conversation-back');
+  const conversationPubkeyNode = document.getElementById('conversation-pubkey');
+  const conversationPubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
+  const sendMessageBtn = document.getElementById('send-message');
+  const messageInput = document.getElementById('message-input');
+
+  if (conversationBack) conversationBack.addEventListener('click', closeConversation);
+
+  if (conversationPubkeyCopyButton && conversationPubkeyNode) {
+    conversationPubkeyCopyButton.addEventListener('click', async () => {
+      const pubkey = String(conversationPubkeyCopyButton.dataset.pubkey || conversationPubkeyNode.textContent || '').trim();
+      if (!pubkey || pubkey === '-') {
+        showStatus('Kein Pubkey zum Kopieren vorhanden.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(pubkey);
+        showStatus('Pubkey in die Zwischenablage kopiert.');
+      } catch {
+        showStatus('Pubkey konnte nicht kopiert werden.', true);
+      }
+    });
+  }
+  
+  if (sendMessageBtn) sendMessageBtn.addEventListener('click', sendMessage);
+  
+  if (messageInput) {
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      } else if (e.key === 'Enter' && e.ctrlKey) {
+        // Ctrl+Enter: Neue Zeile einfügen
+        const start = messageInput.selectionStart;
+        const end = messageInput.selectionEnd;
+        messageInput.value = messageInput.value.substring(0, start) + '\n' + messageInput.value.substring(end);
+        messageInput.selectionStart = messageInput.selectionEnd = start + 1;
+        autoResizeTextarea(messageInput);
+      }
+    });
+    // Auto-resize bei Eingabe
+    messageInput.addEventListener('input', () => autoResizeTextarea(messageInput));
+  }
+
+  // User Hero → Profil-Dialog
+  if (userHero) {
+    userHero.addEventListener('click', () => {
+      openDialog('dialog-profile');
+    });
+    userHero.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openDialog('dialog-profile');
+      }
+    });
+  }
+
+  // Dialog schließen
+  if (dialogClose) {
+    dialogClose.addEventListener('click', closeDialog);
+  }
+  
+  if (dialogOverlay) {
+    dialogOverlay.addEventListener('click', (e) => {
+      if (e.target === dialogOverlay) {
+        closeDialog();
+      }
+    });
+  }
+
+  // ESC-Taste schließt Dialog
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeDialog();
+    }
+  });
+
+  // ========================================
+  // Load Initial Data
+  // ========================================
 
   try {
     const result = await chrome.storage.local.get(SETTING_KEY);
     const value = typeof result[SETTING_KEY] === 'boolean'
       ? result[SETTING_KEY]
       : DEFAULT_VALUE;
-    checkbox.checked = value;
+    if (checkbox) checkbox.checked = value;
   } catch (e) {
-    status.textContent = 'Einstellungen konnten nicht geladen werden.';
-    return;
+    showStatus('Einstellungen konnten nicht geladen werden.', true);
   }
 
   const initialViewer = await loadViewerContext(null, status);
   await persistViewerCache(initialViewer);
   activeViewer = initialViewer;
+  updateHeaderBranding(activeViewer);
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
   const initialSigner = await refreshSignerIdentity(protectionRow, activeScope, !initialViewer?.isLoggedIn);
   activeRuntimeStatus = initialSigner?.runtimeStatus || null;
   activeScope = initialSigner?.scope || activeScope;
+  currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+  setContactRequestContext(activeScope, activeWpApi);
+  
+  // UI aktualisieren
   renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
   renderInstanceCard(instanceCard, activeViewer);
+  updateUserHero(activeViewer, activeRuntimeStatus);
+  updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
   await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
   await refreshCloudBackupState(cloudBackupMeta, {
     enableButton: cloudBackupEnableButton,
@@ -72,16 +477,152 @@ document.addEventListener('DOMContentLoaded', async () => {
     deleteButton: cloudBackupDeleteButton
   }, activeScope, activeWpApi);
 
-  checkbox.addEventListener('change', async () => {
+  // ========================================
+  // Version & Scope Info
+  // ========================================
+
+  if (extensionVersionSpan) {
     try {
-      await chrome.storage.local.set({ [SETTING_KEY]: checkbox.checked });
-      status.textContent = checkbox.checked
-        ? 'Lock aktiviert.'
-        : 'Lock deaktiviert.';
-    } catch (e) {
-      status.textContent = 'Speichern fehlgeschlagen.';
+      const manifest = chrome.runtime.getManifest();
+      extensionVersionSpan.textContent = manifest.version || 'unbekannt';
+    } catch {
+      extensionVersionSpan.textContent = 'unbekannt';
     }
-  });
+  }
+
+  if (activeScopeSpan) {
+    activeScopeSpan.textContent = activeScope || 'global';
+  }
+
+  // ========================================
+  // DM-Relay Initialisierung
+  // ========================================
+
+  if (dmRelayInput) {
+    const currentDmRelay = await loadDmRelay();
+    dmRelayInput.value = currentDmRelay;
+  }
+
+  if (dmNotificationsCheckbox) {
+    dmNotificationsCheckbox.checked = await loadDmNotificationsEnabled();
+  }
+  ensureDmSubscription().catch(() => {});
+
+  // ========================================
+  // Event Listeners: DM-Relay
+  // ========================================
+
+  if (saveDmRelayButton && dmRelayInput) {
+    saveDmRelayButton.addEventListener('click', async () => {
+      const url = String(dmRelayInput.value || '').trim();
+      saveDmRelayButton.disabled = true;
+      try {
+        const saved = await saveDmRelay(url);
+        dmRelayInput.value = saved;
+        await ensureDmSubscription(true);
+        showStatus(saved
+          ? `Nachrichten-Relay gespeichert: ${saved}`
+          : 'Nachrichten-Relay entfernt (verwendet Gegenüber-Relay).');
+      } catch (e) {
+        showStatus(`Fehler: ${e.message || e}`, true);
+      } finally {
+        saveDmRelayButton.disabled = false;
+      }
+    });
+  }
+
+  if (dmNotificationsCheckbox) {
+    dmNotificationsCheckbox.addEventListener('change', async () => {
+      dmNotificationsCheckbox.disabled = true;
+      try {
+        const enabled = await saveDmNotificationsEnabled(dmNotificationsCheckbox.checked);
+        showStatus(enabled
+          ? 'Desktop-Benachrichtigungen für Nachrichten aktiviert.'
+          : 'Desktop-Benachrichtigungen für Nachrichten deaktiviert.');
+      } catch (e) {
+        dmNotificationsCheckbox.checked = await loadDmNotificationsEnabled();
+        showStatus(`Einstellung konnte nicht gespeichert werden: ${e.message || e}`, true);
+      } finally {
+        dmNotificationsCheckbox.disabled = false;
+      }
+    });
+  }
+
+  if (openInSidebarCheckbox) {
+    openInSidebarCheckbox.addEventListener('change', async () => {
+      const requestedEnabled = openInSidebarCheckbox.checked;
+      if (!requestedEnabled) {
+        closeFirefoxSidebarFromUserInput();
+      }
+      openInSidebarCheckbox.disabled = true;
+      try {
+        const enabled = await saveOpenInSidebarEnabled(requestedEnabled);
+        await applyOpenInSidebarMode(enabled);
+        showStatus(enabled
+          ? 'Sidebar/Side-Panel-Modus aktiviert.'
+          : 'Sidebar/Side-Panel-Modus deaktiviert (Popup aktiv).');
+      } catch (e) {
+        openInSidebarCheckbox.checked = await loadOpenInSidebarEnabled();
+        showStatus(`Einstellung konnte nicht gespeichert werden: ${e.message || e}`, true);
+      } finally {
+        openInSidebarCheckbox.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Refresh Profile Dialog
+  // ========================================
+
+  if (refreshProfileButton) {
+    refreshProfileButton.addEventListener('click', async () => {
+      refreshProfileButton.disabled = true;
+      try {
+        const viewer = await loadViewerContext(null, status);
+        await persistViewerCache(viewer);
+        activeViewer = viewer;
+        updateHeaderBranding(activeViewer);
+        activeScope = viewer?.scope || 'global';
+        activeWpApi = sanitizeWpApi(viewer?.wpApi);
+        activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
+        
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+        setContactRequestContext(activeScope, activeWpApi);
+        
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+        
+        if (activeScopeSpan) {
+          activeScopeSpan.textContent = activeScope || 'global';
+        }
+        
+        showStatus('Profil aktualisiert.');
+      } catch (e) {
+        showStatus(`Aktualisierung fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        refreshProfileButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Settings
+  // ========================================
+
+  if (checkbox) {
+    checkbox.addEventListener('change', async () => {
+      try {
+        await chrome.storage.local.set({ [SETTING_KEY]: checkbox.checked });
+        showStatus(checkbox.checked ? 'Lock aktiviert.' : 'Lock deaktiviert.');
+      } catch (e) {
+        showStatus('Speichern fehlgeschlagen.', true);
+      }
+    });
+  }
 
   if (unlockCachePolicySelect) {
     unlockCachePolicySelect.addEventListener('change', async () => {
@@ -96,9 +637,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const updatedPolicy = normalizeUnlockCachePolicy(response?.result?.policy || selectedPolicy);
         unlockCachePolicySelect.value = updatedPolicy;
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-        status.textContent = `ReLogin-Dauer gespeichert: ${formatUnlockCachePolicyLabel(updatedPolicy)}.`;
+        showStatus(`ReLogin-Dauer gespeichert: ${formatUnlockCachePolicyLabel(updatedPolicy)}.`);
       } catch (e) {
-        status.textContent = `ReLogin-Dauer konnte nicht gespeichert werden: ${e.message || e}`;
+        showStatus(`ReLogin-Dauer konnte nicht gespeichert werden: ${e.message || e}`, true);
         await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
       } finally {
         unlockCachePolicySelect.disabled = false;
@@ -106,104 +647,129 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  refreshUserButton.addEventListener('click', async () => {
-    refreshUserButton.disabled = true;
-    try {
-      const viewer = await loadViewerContext(null, status);
-      await persistViewerCache(viewer);
-      activeViewer = viewer;
-      activeScope = viewer?.scope || 'global';
-      activeWpApi = sanitizeWpApi(viewer?.wpApi);
-      activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      renderInstanceCard(instanceCard, activeViewer);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-      if (viewer?.pending) {
-        status.textContent = 'Profilkontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.';
-      } else if (viewer?.isCached) {
-        status.textContent = 'Profil aus Extension-Speicher geladen.';
-      } else {
-        status.textContent = viewer?.isLoggedIn
-          ? 'Profilinformationen aktualisiert.'
-          : 'Kein eingeloggter WordPress-Benutzer auf aktivem Tab.';
-      }
-    } catch (e) {
-      status.textContent = `Profilinformationen konnten nicht geladen werden: ${e.message || e}`;
-    } finally {
-      refreshUserButton.disabled = false;
-    }
-  });
+  // ========================================
+  // Event Listeners: Refresh
+  // ========================================
 
-  publishProfileButton.addEventListener('click', async () => {
-    if (!hasProfileContext(activeViewer)) {
-      status.textContent = 'Kein Profilkontext verfügbar. Öffne eine WordPress-Seite und lade das Popup neu.';
-      return;
-    }
-
-    const profilePayload = buildProfilePublishPayload(activeViewer);
-    if (!profilePayload.relays.length) {
-      status.textContent = 'Kein Profil-Relay konfiguriert. Bitte in WordPress "Profil-Relay (kind:0)" setzen.';
-      return;
-    }
-
-    publishProfileButton.disabled = true;
-    status.textContent = 'Sende Profil-Event (kind:0) an Relay...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_PUBLISH_PROFILE',
-        payload: {
-          scope: activeScope,
-          relays: profilePayload.relays,
-          profile: profilePayload.profile,
-          expectedPubkey: activeRuntimeStatus?.pubkeyHex || null,
-          origin: activeViewer?.origin || null,
-          authBroker: activeAuthBroker
+  if (refreshUserButton) {
+    refreshUserButton.addEventListener('click', async () => {
+      refreshUserButton.disabled = true;
+      try {
+        const viewer = await loadViewerContext(null, status);
+        await persistViewerCache(viewer);
+        activeViewer = viewer;
+        updateHeaderBranding(activeViewer);
+        activeScope = viewer?.scope || 'global';
+        activeWpApi = sanitizeWpApi(viewer?.wpApi);
+        activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, !viewer?.isLoggedIn);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+        setContactRequestContext(activeScope, activeWpApi);
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        renderInstanceCard(instanceCard, activeViewer);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+        if (viewer?.pending) {
+          showStatus('Profilkontext wird noch geladen. Bitte in 1-2 Sekunden erneut aktualisieren.');
+        } else if (viewer?.isCached) {
+          showStatus('Profil aus Extension-Speicher geladen.');
+        } else {
+          showStatus(viewer?.isLoggedIn
+            ? 'Profilinformationen aktualisiert.'
+            : 'Kein eingeloggter WordPress-Benutzer auf aktivem Tab.');
         }
-      });
-      if (response?.error) throw new Error(response.error);
-      const result = response?.result || {};
-      const relay = String(result.relay || profilePayload.relays[0] || '').trim();
-      const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
-      status.textContent = relay
-        ? `Profil veröffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
-        : `Profil veröffentlicht (${formatShortHex(pubkey)}).`;
-    } catch (e) {
-      status.textContent = `Profil-Publish fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      publishProfileButton.disabled = false;
-    }
-  });
+      } catch (e) {
+        showStatus(`Profilinformationen konnten nicht geladen werden: ${e.message || e}`, true);
+      } finally {
+        refreshUserButton.disabled = false;
+      }
+    });
+  }
 
-  exportKeyButton.addEventListener('click', async () => {
-    exportKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_EXPORT_NSEC',
-        payload: { scope: activeScope }
-      });
-      if (response?.error) throw new Error(response.error);
-      const nsec = String(response?.result?.nsec || '').trim();
-      if (!nsec) throw new Error('Export lieferte keinen nsec');
+  // ========================================
+  // Event Listeners: Profile Publish
+  // ========================================
 
-      backupOutput.value = nsec;
-      backupOutput.type = 'password';
-      status.textContent = 'Schlüssel exportiert (verborgen). Nutze 👁 zum Anzeigen.';
-    } catch (e) {
-      status.textContent = `Export fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      exportKeyButton.disabled = false;
-    }
-  });
+  if (publishProfileButton) {
+    publishProfileButton.addEventListener('click', async () => {
+      if (!hasProfileContext(activeViewer)) {
+        showStatus('Kein Profilkontext verfügbar. Öffne eine WordPress-Seite und lade das Popup neu.', true);
+        return;
+      }
 
-  if (backupOutputToggleButton) {
+      const profilePayload = buildProfilePublishPayload(activeViewer);
+      if (!profilePayload.relays.length) {
+        showStatus('Kein Profil-Relay konfiguriert. Bitte in WordPress "Profil-Relay (kind:0)" setzen.', true);
+        return;
+      }
+
+      publishProfileButton.disabled = true;
+      showStatus('Sende Profil-Event (kind:0) an Relay...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_PUBLISH_PROFILE',
+          payload: {
+            scope: activeScope,
+            relays: profilePayload.relays,
+            profile: profilePayload.profile,
+            expectedPubkey: activeRuntimeStatus?.pubkeyHex || null,
+            origin: activeViewer?.origin || null,
+            authBroker: activeAuthBroker
+          }
+        });
+        if (response?.error) throw new Error(response.error);
+        const result = response?.result || {};
+        const relay = String(result.relay || profilePayload.relays[0] || '').trim();
+        const pubkey = String(result.pubkey || activeRuntimeStatus?.pubkeyHex || '').trim();
+        showStatus(relay
+          ? `Profil veröffentlicht auf ${relay} (${formatShortHex(pubkey)}).`
+          : `Profil veröffentlicht (${formatShortHex(pubkey)}).`);
+      } catch (e) {
+        showStatus(`Profil-Publish fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        publishProfileButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Key Export
+  // ========================================
+
+  if (exportKeyButton) {
+    exportKeyButton.addEventListener('click', async () => {
+      exportKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_EXPORT_NSEC',
+          payload: { scope: activeScope }
+        });
+        if (response?.error) throw new Error(response.error);
+        const nsec = String(response?.result?.nsec || '').trim();
+        if (!nsec) throw new Error('Export lieferte keinen nsec');
+
+        if (backupOutput) {
+          backupOutput.value = nsec;
+          backupOutput.type = 'password';
+        }
+        showStatus('Schlüssel exportiert (verborgen). Nutze 👁 zum Anzeigen.');
+      } catch (e) {
+        showStatus(`Export fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        exportKeyButton.disabled = false;
+      }
+    });
+  }
+
+  if (backupOutputToggleButton && backupOutput) {
     backupOutputToggleButton.addEventListener('click', () => {
       const isHidden = backupOutput.type === 'password';
       backupOutput.type = isHidden ? 'text' : 'password';
@@ -212,237 +778,278 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  backupOutputCopyButton.addEventListener('click', async () => {
-    const nsec = String(backupOutput.value || '').trim();
-    if (!nsec) {
-      status.textContent = 'Kein exportierter Schlüssel zum Kopieren vorhanden.';
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(nsec);
-      status.textContent = 'Exportierter Schlüssel wurde kopiert.';
-    } catch {
-      status.textContent = 'Kopieren des exportierten Schlüssels fehlgeschlagen.';
-    }
-  });
+  if (backupOutputCopyButton && backupOutput) {
+    backupOutputCopyButton.addEventListener('click', async () => {
+      const nsec = String(backupOutput.value || '').trim();
+      if (!nsec) {
+        showStatus('Kein exportierter Schlüssel zum Kopieren vorhanden.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(nsec);
+        showStatus('Exportierter Schlüssel wurde kopiert.');
+      } catch {
+        showStatus('Kopieren des exportierten Schlüssels fehlgeschlagen.', true);
+      }
+    });
+  }
 
-  backupDownloadButton.addEventListener('click', async () => {
-    backupDownloadButton.disabled = true;
-    try {
-      // Fetch nsec directly from background – no prior export needed
-      const exportResponse = await chrome.runtime.sendMessage({
-        type: 'NOSTR_EXPORT_NSEC',
-        payload: { scope: activeScope }
-      });
-      if (exportResponse?.error) throw new Error(exportResponse.error);
-      const nsec = String(exportResponse?.result?.nsec || '').trim();
-      if (!nsec) throw new Error('Export lieferte keinen nsec');
+  if (backupDownloadButton) {
+    backupDownloadButton.addEventListener('click', async () => {
+      backupDownloadButton.disabled = true;
+      try {
+        // Fetch nsec directly from background – no prior export needed
+        const exportResponse = await chrome.runtime.sendMessage({
+          type: 'NOSTR_EXPORT_NSEC',
+          payload: { scope: activeScope }
+        });
+        if (exportResponse?.error) throw new Error(exportResponse.error);
+        const nsec = String(exportResponse?.result?.nsec || '').trim();
+        if (!nsec) throw new Error('Export lieferte keinen nsec');
 
-      const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
-      const npub = String(response?.result || '').trim();
-      const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
-      const namePart = displayName ? `-${displayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
-      const datePart = new Date().toISOString().split('T')[0];
-      const content = `Nostr Backup\n===========\n\n${npub ? `npub: ${npub}\n` : ''}nsec: ${nsec}\n\n!! GEHEIM HALTEN \u2013 NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich \"Nostr-Schluessel\" den nsec in das Import-Feld einfuegen\n4. \"Importieren\" klicken\n`;
-      const blob = new Blob([content], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `nostr-backup${namePart}-${datePart}.txt`;
-      a.click();
-      URL.revokeObjectURL(url);
-      status.textContent = 'Backup-Datei heruntergeladen.';
-    } catch (e) {
-      status.textContent = `Download fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      backupDownloadButton.disabled = false;
-    }
-  });
+        const response = await chrome.runtime.sendMessage({ type: 'getPublicKey', payload: { scope: activeScope } });
+        const npub = String(response?.result || '').trim();
+        const displayName = String(activeViewer?.displayName || activeViewer?.userLogin || '').trim();
+        const namePart = displayName ? `-${displayName.toLowerCase().replace(/[^a-z0-9_-]/g, '-').slice(0, 24)}` : '';
+        const datePart = new Date().toISOString().split('T')[0];
+        const content = `Nostr Backup\n===========\n\n${npub ? `npub: ${npub}\n` : ''}nsec: ${nsec}\n\n!! GEHEIM HALTEN \u2013 NIEMALS TEILEN !!\n\nWiederherstellen / anderer Browser:\n1. WP Nostr Signer Extension installieren\n2. Extension-Popup oeffnen (Klick auf das Extension-Icon)\n3. Im Bereich "Schluessel" den nsec in das Import-Feld einfuegen\n4. "Importieren" klicken\n`;
+        const blob = new Blob([content], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `nostr-backup${namePart}-${datePart}.txt`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showStatus('Backup-Datei heruntergeladen.');
+      } catch (e) {
+        showStatus(`Download fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        backupDownloadButton.disabled = false;
+      }
+    });
+  }
 
-  importKeyButton.addEventListener('click', async () => {
-    const nsec = String(importNsecInput.value || '').trim();
-    if (!nsec) {
-      status.textContent = 'Bitte zuerst einen nsec eingeben.';
-      return;
-    }
+  // ========================================
+  // Event Listeners: Key Import
+  // ========================================
 
-    const confirmed = confirm('Das ersetzt den bestehenden Nostr-Schlüssel für dieses Profil. Fortfahren?');
-    if (!confirmed) return;
+  if (importKeyButton && importNsecInput) {
+    importKeyButton.addEventListener('click', async () => {
+      const nsec = String(importNsecInput.value || '').trim();
+      if (!nsec) {
+        showStatus('Bitte zuerst einen nsec eingeben.', true);
+        return;
+      }
 
-    importKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_IMPORT_NSEC',
-        payload: { scope: activeScope, nsec, wpApi: activeWpApi }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '');
-      importNsecInput.value = '';
-      backupOutput.value = '';
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      status.textContent = pubkey
-        ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
-        : 'Schlüssel importiert. Seite neu laden.';
-    } catch (e) {
-      status.textContent = `Import fehlgeschlagen: ${e.message || e}`;
-    } finally {
-      importKeyButton.disabled = false;
-    }
-  });
+      const confirmed = confirm('Das ersetzt den bestehenden Nostr-Schlüssel für dieses Profil. Fortfahren?');
+      if (!confirmed) return;
 
-  createKeyButton.addEventListener('click', async () => {
-    const confirmed = confirm('Neue Schlüssel erstellen? Das ersetzt die aktuelle Nostr-Identität für dieses Profil.');
-    if (!confirmed) return;
+      importKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_IMPORT_NSEC',
+          payload: { scope: activeScope, nsec, wpApi: activeWpApi }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '');
+        importNsecInput.value = '';
+        if (backupOutput) backupOutput.value = '';
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+        setContactRequestContext(activeScope, activeWpApi);
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        showStatus(pubkey
+          ? `Schlüssel wiederhergestellt (${formatShortHex(pubkey)}). Seite neu laden und ggf. erneut verknüpfen.`
+          : 'Schlüssel importiert. Seite neu laden.');
+      } catch (e) {
+        showStatus(`Import fehlgeschlagen: ${e.message || e}`, true);
+      } finally {
+        importKeyButton.disabled = false;
+      }
+    });
+  }
 
-    createKeyButton.disabled = true;
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_CREATE_NEW_KEY',
-        payload: { scope: activeScope, wpApi: activeWpApi }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '').trim();
+  // ========================================
+  // Event Listeners: Key Create
+  // ========================================
 
-      importNsecInput.value = '';
-      backupOutput.value = '';
+  if (createKeyButton) {
+    createKeyButton.addEventListener('click', async () => {
+      const confirmed = confirm('Neue Schlüssel erstellen? Das ersetzt die aktuelle Nostr-Identität für dieses Profil.');
+      if (!confirmed) return;
 
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
+      createKeyButton.disabled = true;
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_CREATE_NEW_KEY',
+          payload: { scope: activeScope, wpApi: activeWpApi }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '').trim();
+
+        if (importNsecInput) importNsecInput.value = '';
+        if (backupOutput) backupOutput.value = '';
+
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, false);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+        setContactRequestContext(activeScope, activeWpApi);
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        updateConnectionStatus(Boolean(activeRuntimeStatus?.hasKey));
+
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+
+        showStatus(pubkey
+          ? `Neue Schlüssel erstellt (${formatShortHex(pubkey)}).`
+          : 'Neue Schlüssel erstellt.');
+      } catch (e) {
+        showStatus(`Neue Schlüssel konnten nicht erstellt werden: ${e.message || e}`, true);
+      } finally {
+        createKeyButton.disabled = false;
+      }
+    });
+  }
+
+  // ========================================
+  // Event Listeners: Cloud Backup
+  // ========================================
+
+  if (cloudBackupEnableButton) {
+    cloudBackupEnableButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
+      }, true);
+      showStatus('Speichere Schlüsselkopie in WordPress...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_ENABLE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        showStatus('Schlüsselkopie in WordPress gespeichert.');
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Speichern der Schlüsselkopie fehlgeschlagen: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-      status.textContent = pubkey
-        ? `Neue Schlüssel erstellt (${formatShortHex(pubkey)}).`
-        : 'Neue Schlüssel erstellt.';
-    } catch (e) {
-      status.textContent = `Neue Schlüssel konnten nicht erstellt werden: ${e.message || e}`;
-    } finally {
-      createKeyButton.disabled = false;
-    }
-  });
+  if (cloudBackupRestoreButton) {
+    cloudBackupRestoreButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Wiederherstellen ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      const confirmed = confirm('Wiederherstellen aus WordPress ersetzt den lokalen Nostr-Schlüssel. Fortfahren?');
+      if (!confirmed) return;
 
-  cloudBackupEnableButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Speichere Schlüsselkopie in WordPress...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_ENABLE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      status.textContent = 'Schlüsselkopie in WordPress gespeichert.';
-      await refreshCloudBackupState(cloudBackupMeta, {
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Speichern der Schlüsselkopie fehlgeschlagen: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+      }, true);
+      showStatus('Stelle aus WordPress-Schlüsselkopie wieder her...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_RESTORE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        const pubkey = String(response?.result?.pubkey || '');
+        showStatus(pubkey
+          ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
+          : 'Wiederherstellung erfolgreich. Seite neu laden.');
+        const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
+        activeRuntimeStatus = signerContext?.runtimeStatus || null;
+        activeScope = signerContext?.scope || activeScope;
+        currentUserPubkey = activeRuntimeStatus?.pubkeyHex || null;
+        setContactRequestContext(activeScope, activeWpApi);
+        renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
+        updateUserHero(activeViewer, activeRuntimeStatus);
+        await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Wiederherstellung fehlgeschlagen: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-  cloudBackupRestoreButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Wiederherstellen ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    const confirmed = confirm('Wiederherstellen aus WordPress ersetzt den lokalen Nostr-Schlüssel. Fortfahren?');
-    if (!confirmed) return;
+  if (cloudBackupDeleteButton) {
+    cloudBackupDeleteButton.addEventListener('click', async () => {
+      if (!activeWpApi) {
+        showStatus('Löschen der Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.', true);
+        return;
+      }
+      const confirmed = confirm('Schlüsselkopie in WordPress wirklich löschen?');
+      if (!confirmed) return;
 
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Stelle aus WordPress-Schlüsselkopie wieder her...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_RESTORE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      const pubkey = String(response?.result?.pubkey || '');
-      status.textContent = pubkey
-        ? `Wiederherstellung erfolgreich (${formatShortHex(pubkey)}). Seite neu laden.`
-        : 'Wiederherstellung erfolgreich. Seite neu laden.';
-      const signerContext = await refreshSignerIdentity(protectionRow, activeScope, true);
-      activeRuntimeStatus = signerContext?.runtimeStatus || null;
-      activeScope = signerContext?.scope || activeScope;
-      renderProfileCard(profileCard, profileHint, activeViewer, activeRuntimeStatus);
-      await refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCachePolicySelect, activeScope);
-      await refreshCloudBackupState(cloudBackupMeta, {
+      setCloudButtonsDisabled({
         enableButton: cloudBackupEnableButton,
         restoreButton: cloudBackupRestoreButton,
         deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Wiederherstellung fehlgeschlagen: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+      }, true);
+      showStatus('Lösche Schlüsselkopie in WordPress...');
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'NOSTR_BACKUP_DELETE',
+          payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
+        });
+        if (response?.error) throw new Error(response.error);
+        showStatus('Schlüsselkopie in WordPress gelöscht.');
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      } catch (e) {
+        showStatus(`Schlüsselkopie konnte nicht gelöscht werden: ${e.message || e}`, true);
+        await refreshCloudBackupState(cloudBackupMeta, {
+          enableButton: cloudBackupEnableButton,
+          restoreButton: cloudBackupRestoreButton,
+          deleteButton: cloudBackupDeleteButton
+        }, activeScope, activeWpApi);
+      }
+    });
+  }
 
-  cloudBackupDeleteButton.addEventListener('click', async () => {
-    if (!activeWpApi) {
-      status.textContent = 'Löschen der Schlüsselkopie ist nur auf einem eingeloggten WordPress-Tab verfügbar.';
-      return;
-    }
-    const confirmed = confirm('Schlüsselkopie in WordPress wirklich löschen?');
-    if (!confirmed) return;
-
-    setCloudButtonsDisabled({
-      enableButton: cloudBackupEnableButton,
-      restoreButton: cloudBackupRestoreButton,
-      deleteButton: cloudBackupDeleteButton
-    }, true);
-    status.textContent = 'Lösche Schlüsselkopie in WordPress...';
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'NOSTR_BACKUP_DELETE',
-        payload: { scope: activeScope, wpApi: activeWpApi, authBroker: activeAuthBroker }
-      });
-      if (response?.error) throw new Error(response.error);
-      status.textContent = 'Schlüsselkopie in WordPress gelöscht.';
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    } catch (e) {
-      status.textContent = `Schlüsselkopie konnte nicht gelöscht werden: ${e.message || e}`;
-      await refreshCloudBackupState(cloudBackupMeta, {
-        enableButton: cloudBackupEnableButton,
-        restoreButton: cloudBackupRestoreButton,
-        deleteButton: cloudBackupDeleteButton
-      }, activeScope, activeWpApi);
-    }
-  });
+  // ========================================
+  // Event Delegation: Copy Buttons
+  // ========================================
 
   document.addEventListener('click', async (event) => {
     const copyButton = event.target?.closest?.('[data-copy-value]');
@@ -450,19 +1057,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const value = String(copyButton.getAttribute('data-copy-value') || '').trim();
     if (!value) {
-      status.textContent = 'Kein Wert zum Kopieren vorhanden.';
+      showStatus('Kein Wert zum Kopieren vorhanden.', true);
       return;
     }
 
     try {
       await navigator.clipboard.writeText(value);
-      status.textContent = 'In die Zwischenablage kopiert.';
+      showStatus('In die Zwischenablage kopiert.');
     } catch {
-      status.textContent = 'Kopieren fehlgeschlagen.';
+      showStatus('Kopieren fehlgeschlagen.', true);
     }
   });
 
+  // ========================================
+  // Initial Contact Load (Home View is active by default)
+  // ========================================
+  
+  await loadContacts(false);
+  const sameScope = savedUiState?.scope === normalizeScope(contactsRequestScope);
+  if (sameScope && savedUiState?.viewId === 'conversation' && savedUiState.conversationPubkey) {
+    openConversation(savedUiState.conversationPubkey);
+  } else {
+    switchView('home');
+    queueSavePopupUiState();
+  }
+
 });
+
+// ========================================
+// Helper Functions
+// ========================================
 
 function escapeHtml(text) {
   const div = document.createElement('div');
@@ -498,6 +1122,11 @@ function sanitizeAuthBroker(raw) {
   } catch {
     return null;
   }
+}
+
+function setContactRequestContext(scope, wpApi) {
+  contactsRequestScope = normalizeScope(scope);
+  contactsRequestWpApi = sanitizeWpApi(wpApi);
 }
 
 function hasProfileContext(viewer) {
@@ -1007,11 +1636,11 @@ async function refreshUnlockState(unlockCacheState, unlockCacheHint, unlockCache
 
     setUnlockStateBadge(unlockCacheState, runtimeStatus);
     updateUnlockPolicySelect(unlockCachePolicySelect, runtimeStatus);
-    unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
+    if (unlockCacheHint) unlockCacheHint.textContent = formatUnlockCacheHint(runtimeStatus);
   } catch {
     setUnlockStateBadge(unlockCacheState, null);
     updateUnlockPolicySelect(unlockCachePolicySelect, null);
-    unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
+    if (unlockCacheHint) unlockCacheHint.textContent = 'ReLogin-Status konnte nicht geladen werden.';
   }
 }
 
@@ -1329,4 +1958,842 @@ function formatShortHex(hex) {
   const value = String(hex || '').trim().toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(value)) return value || 'unbekannt';
   return `${value.slice(0, 12)}...${value.slice(-8)}`;
+}
+
+// ========================================
+// DM Functions (für TASK-19/20)
+// ========================================
+
+async function loadDmNotificationsEnabled() {
+  try {
+    const result = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
+    return result[DM_NOTIFICATIONS_KEY] !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function saveDmNotificationsEnabled(enabled) {
+  const normalized = Boolean(enabled);
+  await chrome.storage.local.set({ [DM_NOTIFICATIONS_KEY]: normalized });
+  return normalized;
+}
+
+async function loadOpenInSidebarEnabled() {
+  try {
+    const result = await chrome.storage.local.get([OPEN_IN_SIDEBAR_KEY]);
+    return result[OPEN_IN_SIDEBAR_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+async function saveOpenInSidebarEnabled(enabled) {
+  const normalized = Boolean(enabled);
+  await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: normalized });
+  return normalized;
+}
+
+function closeFirefoxSidebarFromUserInput() {
+  if (typeof chrome?.sidebarAction?.close !== 'function') return;
+  try {
+    const result = chrome.sidebarAction.close();
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch {
+    // ignore user-input restriction / unsupported context
+  }
+}
+
+async function applyOpenInSidebarMode(enabled) {
+  let windowId = null;
+  try {
+    if (typeof chrome?.windows?.getCurrent === 'function') {
+      const currentWindow = await chrome.windows.getCurrent();
+      if (currentWindow && Number.isInteger(currentWindow.id)) {
+        windowId = currentWindow.id;
+      }
+    }
+  } catch {
+    // ignore window lookup errors
+  }
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'NOSTR_SET_OPEN_IN_SIDEBAR',
+      payload: {
+        enabled: Boolean(enabled),
+        windowId
+      }
+    });
+  } catch {
+    // ignore; background storage listener also applies this setting
+  }
+}
+
+async function loadDmRelay() {
+  try {
+    const result = await chrome.storage.local.get([DM_RELAY_KEY]);
+    return String(result[DM_RELAY_KEY] || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+async function saveDmRelay(url) {
+  const normalized = normalizeRelayUrl(url);
+  if (url && !normalized) {
+    throw new Error('Ungültige Relay-URL');
+  }
+  await chrome.storage.local.set({ [DM_RELAY_KEY]: normalized || '' });
+  return normalized;
+}
+
+// ========================================
+// Contact List Functions (TASK-18)
+// ========================================
+
+let currentContacts = [];
+let currentContactFilter = 'all';
+let contactSearchQuery = '';
+
+async function loadContacts(forceRefresh = false) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  // Show loading state
+  contactList.innerHTML = '<div class="contact-loading"><p class="empty">Kontakte werden geladen...</p></div>';
+  
+  try {
+    await loadDmConversationMeta(contactsRequestScope);
+
+    // Fetch from background
+    const requestType = forceRefresh ? 'NOSTR_REFRESH_CONTACTS' : 'NOSTR_GET_CONTACTS';
+    const response = await chrome.runtime.sendMessage({
+      type: requestType,
+      payload: {
+        scope: contactsRequestScope,
+        wpApi: contactsRequestWpApi
+      }
+    });
+    
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+    
+    currentContacts = response?.result?.contacts || [];
+    renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+    
+    // Show status
+    const count = currentContacts.length;
+    if (count > 0) {
+      showStatus(`${count} Kontakt${count !== 1 ? 'e' : ''} geladen.`);
+    }
+  } catch (error) {
+    renderContactError(error.message || error);
+    showStatus(`Fehler beim Laden der Kontakte: ${error.message || error}`, true);
+  }
+}
+
+function getContactSources(contact) {
+  const sources = new Set();
+  const rawSources = Array.isArray(contact?.sources) ? contact.sources : [];
+  for (const source of rawSources) {
+    const normalized = String(source || '').trim().toLowerCase();
+    if (!normalized) continue;
+    if (normalized === 'wp') {
+      sources.add('wordpress');
+      continue;
+    }
+    if (normalized === 'both' || normalized === 'merged') {
+      sources.add('nostr');
+      sources.add('wordpress');
+      continue;
+    }
+    sources.add(normalized);
+  }
+
+  const rawSource = String(contact?.source || '').trim().toLowerCase();
+  if (rawSource === 'wp') {
+    sources.add('wordpress');
+  } else if (rawSource === 'both' || rawSource === 'merged') {
+    sources.add('nostr');
+    sources.add('wordpress');
+  } else if (rawSource) {
+    sources.add(rawSource);
+  }
+
+  if (!sources.size) {
+    sources.add('nostr');
+  }
+  return Array.from(sources);
+}
+
+function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  // Eigenen User aus der Kontaktliste ausblenden
+  let filtered = contacts;
+  if (currentUserPubkey) {
+    filtered = filtered.filter(c => c.pubkey !== currentUserPubkey);
+  }
+
+  // Filter by source
+  if (sourceFilter !== 'all') {
+    filtered = filtered.filter(c => {
+      const sources = getContactSources(c);
+      if (sourceFilter === 'nostr') return sources.includes('nostr');
+      if (sourceFilter === 'wordpress') return sources.includes('wordpress');
+      return true;
+    });
+  }
+  
+  // Filter by search query
+  if (searchQuery && searchQuery.trim()) {
+    const query = searchQuery.toLowerCase().trim();
+    filtered = filtered.filter(c => {
+      const name = String(c.displayName || c.name || '').toLowerCase();
+      const nip05 = String(c.nip05 || '').toLowerCase();
+      const npub = String(c.npub || '').toLowerCase();
+      return name.includes(query) || nip05.includes(query) || npub.includes(query);
+    });
+  }
+  
+  // Sort by displayName
+  filtered.sort((a, b) => {
+    const nameA = String(a.displayName || a.name || '').toLowerCase();
+    const nameB = String(b.displayName || b.name || '').toLowerCase();
+    return nameA.localeCompare(nameB);
+  });
+  
+  if (filtered.length === 0) {
+    if (contacts.length === 0) {
+      renderEmptyContacts('Keine Kontakte gefunden. Verbinde deine Nostr-Identität oder logge dich in WordPress ein.');
+    } else {
+      renderEmptyContacts('Keine Kontakte entsprechen dem Filter.');
+    }
+    return;
+  }
+  
+  const html = filtered.map(contact => renderContactItem(contact)).join('');
+  contactList.innerHTML = html;
+  
+  // Add click handlers -> Open Conversation
+  contactList.querySelectorAll('.contact-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      // Prevent clicking if selecting text or something? No, standard click.
+      const pubkey = item.dataset.pubkey;
+      if (pubkey) {
+        openConversation(pubkey);
+      }
+    });
+
+    // Handle Enter key for accessibility
+    item.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        const pubkey = item.dataset.pubkey;
+        if (pubkey) openConversation(pubkey);
+      }
+    });
+  });
+}
+
+// CSP-compliant avatar error handling (replaces inline onerror)
+document.addEventListener('error', function(e) {
+  if (e.target.tagName === 'IMG' && e.target.dataset.fallback === 'avatar') {
+    const img = e.target;
+    if (img.classList.contains('contact-avatar-img')) {
+      const container = img.closest('.contact-avatar');
+      if (container) {
+        container.innerHTML = '<span class="contact-avatar-placeholder">&#128100;</span>';
+      }
+      return;
+    }
+    if (img.id === 'conversation-avatar') {
+      img.removeAttribute('data-fallback');
+      img.src = AVATAR_FALLBACK_DATA_URI;
+    }
+  }
+}, true); // 'true' = capture phase to catch img errors
+
+function renderContactItem(contact) {
+  const pubkey = String(contact.pubkey || '');
+  const displayName = String(contact.displayName || contact.name || '').trim() || formatShortHex(pubkey);
+  const nip05 = String(contact.nip05 || '').trim();
+  const avatarUrl = String(contact.picture || contact.avatarUrl || '').trim();
+  const sources = getContactSources(contact);
+  const isWpOnly = sources.includes('wordpress') && !sources.includes('nostr');
+  const isKind3Contact = sources.includes('nostr');
+  const conversationMeta = dmConversationMeta.get(pubkey) || null;
+  
+  const avatarHtml = avatarUrl
+    ? `<img src="${escapeHtml(avatarUrl)}" class="contact-avatar-img" alt="" data-fallback="avatar" />`
+    : '<span class="contact-avatar-placeholder">👤</span>';
+  
+  const previewText = conversationMeta?.lastMessage
+    || nip05
+    || formatShortHex(pubkey);
+  const relativeTime = conversationMeta?.lastMessageAt
+    ? formatRelativeTime(conversationMeta.lastMessageAt)
+    : '';
+  const unreadCount = Number(conversationMeta?.unreadCount || 0);
+  const unreadBadge = unreadCount > 0
+    ? `<span class="unread-badge">${unreadCount > 99 ? '99+' : unreadCount}</span>`
+    : '';
+
+  const sourceBadges = [];
+  if (isWpOnly) {
+    sourceBadges.push('<span class="source-badge source-badge-wp" title="WordPress-Kontakt">WP</span>');
+  }
+  if (isKind3Contact) {
+    sourceBadges.push('<span class="source-badge source-badge-nostr" title="Nostr Kind-3 Kontakt">★</span>');
+  }
+
+  return `
+    <div class="contact-item" data-pubkey="${escapeHtml(pubkey)}" tabindex="0" role="button">
+      <div class="contact-avatar">${avatarHtml}</div>
+      <div class="contact-info">
+        <div class="contact-name">${escapeHtml(displayName)}</div>
+        <div class="contact-preview">${escapeHtml(previewText)}</div>
+      </div>
+      <div class="contact-meta">
+        <div class="contact-time">${escapeHtml(relativeTime)}</div>
+        <div class="contact-badges">${sourceBadges.join('')}${unreadBadge}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderEmptyContacts(message) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  contactList.innerHTML = `
+    <div class="contact-empty">
+      <p class="empty">${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function renderContactError(error) {
+  const contactList = document.getElementById('contact-list');
+  if (!contactList) return;
+  
+  contactList.innerHTML = `
+    <div class="contact-error">
+      <p class="empty">Fehler: ${escapeHtml(error)}</p>
+    </div>
+  `;
+}
+
+function initContactListEvents() {
+  // Refresh button
+  const refreshButton = document.getElementById('refresh-contacts');
+  if (refreshButton) {
+    refreshButton.addEventListener('click', async () => {
+      refreshButton.disabled = true;
+      try {
+        await loadContacts(true);
+      } finally {
+        refreshButton.disabled = false;
+      }
+    });
+  }
+  
+  // Search input
+  const searchInput = document.getElementById('contact-search-input');
+  if (searchInput) {
+    let searchTimeout = null;
+    searchInput.addEventListener('input', () => {
+      if (searchTimeout) clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => {
+        contactSearchQuery = searchInput.value;
+        renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+      }, 200);
+    });
+  }
+
+  const toggleAddButton = document.getElementById('toggle-add-contact');
+  const addContactForm = document.getElementById('contact-add-form');
+  const addContactInput = document.getElementById('add-contact-input');
+  const addContactSubmit = document.getElementById('add-contact-submit');
+
+  const closeAddContactForm = (clearInput = true) => {
+    if (addContactForm) {
+      addContactForm.hidden = true;
+    }
+    if (clearInput && addContactInput) {
+      addContactInput.value = '';
+    }
+  };
+
+  if (toggleAddButton && addContactForm) {
+    toggleAddButton.addEventListener('click', () => {
+      const nextHidden = !addContactForm.hidden;
+      addContactForm.hidden = nextHidden;
+      if (!nextHidden && addContactInput) {
+        addContactInput.focus();
+        addContactInput.select();
+      }
+      if (nextHidden && addContactInput) {
+        addContactInput.value = '';
+      }
+    });
+  }
+
+  const submitAddContact = async () => {
+    const value = String(addContactInput?.value || '').trim();
+    if (!value) {
+      showStatus('Bitte einen Pubkey (hex oder npub) eingeben.', true);
+      return;
+    }
+
+    if (addContactSubmit) addContactSubmit.disabled = true;
+    if (toggleAddButton) toggleAddButton.disabled = true;
+    if (addContactInput) addContactInput.disabled = true;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'NOSTR_ADD_CONTACT',
+        payload: {
+          scope: contactsRequestScope,
+          contact: value
+        }
+      });
+
+      if (response?.error) {
+        throw new Error(response.error);
+      }
+
+      const result = response?.result || {};
+      if (result.alreadyExists) {
+        showStatus('Kontakt ist bereits in deiner Nostr-Kontaktliste.');
+      } else {
+        showStatus('Kontakt wurde hinzugefügt.');
+      }
+
+      closeAddContactForm(true);
+      await loadContacts(true);
+    } catch (error) {
+      showStatus(`Kontakt konnte nicht hinzugefügt werden: ${error.message || error}`, true);
+    } finally {
+      if (addContactSubmit) addContactSubmit.disabled = false;
+      if (toggleAddButton) toggleAddButton.disabled = false;
+      if (addContactInput) addContactInput.disabled = false;
+    }
+  };
+
+  if (addContactSubmit) {
+    addContactSubmit.addEventListener('click', submitAddContact);
+  }
+
+  if (addContactInput) {
+    addContactInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeAddContactForm(true);
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitAddContact();
+      }
+    });
+  }
+  
+  // Filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentContactFilter = btn.dataset.source || 'all';
+      renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+    });
+  });
+}
+
+// ========================================
+// TASK-20: Chat Logic & Helpers
+// ========================================
+
+let activeConversationPubkey = null;
+
+function formatRelativeTime(unixTimestamp) {
+  if (!unixTimestamp) return '';
+  const diff = Math.floor(Date.now() / 1000) - unixTimestamp;
+  if (diff < 60) return 'jetzt';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return new Date(unixTimestamp * 1000).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+}
+
+function formatMessageTime(unixTimestamp) {
+  if (!unixTimestamp) return '';
+  return new Date(unixTimestamp * 1000).toLocaleTimeString('de-DE', { 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  });
+}
+
+function renderMinimalMarkdown(text) {
+  if (!text) return '';
+  let escaped = escapeHtml(text);
+  escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  escaped = escaped.replace(/(?<![<code>])\*([^*]+)\*(?![<])/g, '<em>$1</em>');
+  escaped = escaped.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
+  );
+  // Autolink: Bare URLs in Links umwandeln (nur wenn nicht schon in einem <a>-Tag)
+  escaped = escaped.replace(
+    /(?<!href=")(?<!<a[^>]*>)(https?:\/\/[^\s<]+)/g,
+    '<a href="$1" rel="nofollow noopener noreferrer" target="_blank">$1</a>'
+  );
+  escaped = escaped.replace(/^- (.+)$/gm, '• $1');
+  escaped = escaped.replace(/\n/g, '<br>');
+  return escaped;
+}
+
+// Live Update Listener for new messages
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'NOSTR_NEW_DM') {
+    const newMessage = message.payload;
+    if (!newMessage) return;
+    const partnerPubkey = resolveConversationPartnerPubkey(newMessage);
+
+    // 1. If chat is open for this contact, append message
+    if (activeConversationPubkey && 
+        (newMessage.senderPubkey === activeConversationPubkey || newMessage.recipientPubkey === activeConversationPubkey)) {
+      appendNewMessage(newMessage);
+      if (partnerPubkey && newMessage.direction === 'in') {
+        markConversationAsRead(partnerPubkey, newMessage.createdAt).catch(() => {});
+      }
+    }
+    
+    // 2. Refresh contact list snippet if visible (Home view)
+    const homeView = document.getElementById('view-home');
+    if (homeView && homeView.classList.contains('active')) {
+       // Refresh list without full reload to update snippets/unread counts
+       loadContacts(false); 
+    }
+  }
+});
+
+function appendNewMessage(msg) {
+  const messageList = document.getElementById('message-list');
+  if (!messageList) return;
+  
+  // Dedup: Prüfe ob Nachricht schon in der UI ist (per innerId oder giftWrapId)
+  const msgInnerId = msg.innerId;
+  const msgGiftWrapId = msg.giftWrapId || msg.id;
+  if (msgInnerId && messageList.querySelector(`[data-inner-id="${CSS.escape(msgInnerId)}"]`)) return;
+  if (msgGiftWrapId && messageList.querySelector(`[data-gw-id="${CSS.escape(msgGiftWrapId)}"]`)) return;
+  
+  // Remove "empty" placeholder if present
+  const empty = messageList.querySelector('.empty');
+  if (empty) empty.remove();
+  
+  const isOutgoing = msg.direction === 'out'; 
+  const timeStr = formatMessageTime(msg.createdAt);
+  
+  const div = document.createElement('div');
+  div.className = `message-bubble ${isOutgoing ? 'message-out' : 'message-in'} message-new`;
+  if (msgInnerId) div.dataset.innerId = msgInnerId;
+  if (msgGiftWrapId) div.dataset.gwId = msgGiftWrapId;
+  div.innerHTML = `
+    <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
+    <div class="message-time">${timeStr}</div>
+  `;
+  
+  messageList.appendChild(div);
+  
+  // Scroll to bottom
+  setTimeout(() => {
+    messageList.scrollTop = messageList.scrollHeight;
+  }, 50);
+}
+
+// Conversation Management
+function openConversation(contactPubkey) {
+  console.log('Opening conversation with', contactPubkey);
+  const contact = currentContacts.find(c => c.pubkey === contactPubkey) || { pubkey: contactPubkey };
+  
+  // Header Update
+  const nameEl = document.getElementById('conversation-name');
+  const pubkeyEl = document.getElementById('conversation-pubkey');
+  const pubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
+  const avatarEl = document.getElementById('conversation-avatar');
+  
+  if (nameEl) nameEl.textContent = contact.displayName || contact.name || formatShortHex(contactPubkey);
+  if (pubkeyEl) {
+    pubkeyEl.textContent = contactPubkey;
+    pubkeyEl.title = contactPubkey;
+  }
+  if (pubkeyCopyButton) {
+    pubkeyCopyButton.dataset.pubkey = contactPubkey;
+  }
+  if (avatarEl) {
+    avatarEl.src = contact.picture || contact.avatarUrl || '';
+    avatarEl.onerror = function() {
+      this.onerror = null;
+      this.src = AVATAR_FALLBACK_DATA_URI;
+    };
+  }
+  
+  activeConversationPubkey = contactPubkey;
+  markConversationAsRead(contactPubkey).catch(() => {});
+  
+  // Switch View
+  switchView('conversation');
+  
+  // Load Messages
+  loadConversationMessages(contactPubkey);
+}
+
+function closeConversation() {
+  const pubkeyEl = document.getElementById('conversation-pubkey');
+  const pubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
+  if (pubkeyEl) {
+    pubkeyEl.textContent = '-';
+    pubkeyEl.removeAttribute('title');
+  }
+  if (pubkeyCopyButton) {
+    delete pubkeyCopyButton.dataset.pubkey;
+  }
+  activeConversationPubkey = null;
+  renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
+  switchView('home');
+}
+
+function normalizePreviewText(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function loadDmConversationMeta(scope) {
+  const normalizedScope = normalizeScope(scope);
+  try {
+    const result = await chrome.storage.local.get([DM_CACHE_STORAGE_KEY, DM_LAST_READ_BY_CONTACT_KEY]);
+    const cache = result?.[DM_CACHE_STORAGE_KEY];
+    const rawLastRead = result?.[DM_LAST_READ_BY_CONTACT_KEY];
+    dmLastReadByContact = (rawLastRead && typeof rawLastRead === 'object') ? { ...rawLastRead } : {};
+
+    const nextMeta = new Map();
+    if (!cache || cache.scope !== normalizedScope || typeof cache.conversations !== 'object') {
+      dmConversationMeta = nextMeta;
+      return nextMeta;
+    }
+
+    for (const [pubkey, rawMessages] of Object.entries(cache.conversations)) {
+      const messages = Array.isArray(rawMessages) ? rawMessages : [];
+      if (!messages.length) continue;
+
+      const lastMsg = messages[messages.length - 1] || {};
+      const lastMessageAt = Number(lastMsg.createdAt) || 0;
+      const lastReadAt = Number(dmLastReadByContact[pubkey]) || 0;
+      const unreadCount = messages.filter((msg) => {
+        const createdAt = Number(msg?.createdAt) || 0;
+        return String(msg?.direction || '') === 'in' && createdAt > lastReadAt;
+      }).length;
+
+      nextMeta.set(pubkey, {
+        lastMessage: normalizePreviewText(lastMsg.content),
+        lastMessageAt,
+        unreadCount
+      });
+    }
+
+    dmConversationMeta = nextMeta;
+    return nextMeta;
+  } catch {
+    dmConversationMeta = new Map();
+    dmLastReadByContact = {};
+    return dmConversationMeta;
+  }
+}
+
+function resolveConversationPartnerPubkey(message) {
+  const senderPubkey = String(message?.senderPubkey || '').trim();
+  const recipientPubkey = String(message?.recipientPubkey || '').trim();
+  if (!senderPubkey || !recipientPubkey) return null;
+
+  if (currentUserPubkey && senderPubkey === currentUserPubkey) return recipientPubkey;
+  if (currentUserPubkey && recipientPubkey === currentUserPubkey) return senderPubkey;
+
+  return String(message?.direction || '').trim() === 'out' ? recipientPubkey : senderPubkey;
+}
+
+async function markConversationAsRead(contactPubkey, createdAt = null) {
+  const pubkey = String(contactPubkey || '').trim();
+  if (!pubkey) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const knownLastMessageAt = Number(dmConversationMeta.get(pubkey)?.lastMessageAt || 0);
+  const readUntil = Math.max(Number(createdAt) || 0, knownLastMessageAt, now);
+  const previousReadUntil = Number(dmLastReadByContact[pubkey]) || 0;
+  if (readUntil <= previousReadUntil) return;
+
+  dmLastReadByContact = { ...dmLastReadByContact, [pubkey]: readUntil };
+  await chrome.storage.local.set({ [DM_LAST_READ_BY_CONTACT_KEY]: dmLastReadByContact });
+
+  const meta = dmConversationMeta.get(pubkey);
+  if (meta) {
+    dmConversationMeta.set(pubkey, { ...meta, unreadCount: 0 });
+  }
+}
+
+async function loadConversationMessages(contactPubkey) {
+  const messageList = document.getElementById('message-list');
+  const relayStatus = document.getElementById('conversation-relays');
+  if (!messageList) return;
+  
+  messageList.innerHTML = '<p class="empty">Nachrichten werden geladen...</p>';
+  if (relayStatus) relayStatus.style.display = 'none';
+  
+  try {
+    const dmRelayInput = document.getElementById('dm-relay-url');
+    // Multirelay-Support: Split by comma
+    const rawRelayUrl = dmRelayInput?.value || '';
+    const relayUrls = rawRelayUrl.split(',').map(r => r.trim()).filter(Boolean);
+
+    // We request DMs with this specific contact
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_GET_DMS',
+      payload: {
+        scope: contactsRequestScope,
+        relayUrl: relayUrls.length > 0 ? relayUrls : null, // Pass array or null
+        contactPubkey: contactPubkey,
+        limit: 50
+      }
+    });
+
+    // Display used relays if available in response
+    if (relayStatus && response?.result?.relays) {
+       const usedRelays = Array.isArray(response.result.relays) ? response.result.relays : [response.result.relays];
+       relayStatus.innerHTML = `Relays: ${usedRelays.map(r => `<span class="relay-tag">${new URL(r).hostname}</span>`).join('')}`;
+       relayStatus.style.display = 'flex';
+    }
+    
+    // Error Handling
+    if (response?.error) {
+       console.error('DM Fetch Error:', response.error);
+       messageList.innerHTML = `<p class="empty error">Fehler: ${escapeHtml(response.error.message || response.error)}</p>`;
+       return;
+    }
+    
+    const messages = response?.result?.messages || [];
+    renderMessages(messages, contactPubkey);
+    
+    // Scroll to bottom
+    setTimeout(() => {
+      messageList.scrollTop = messageList.scrollHeight;
+    }, 50);
+
+  } catch (error) {
+    console.error('Message Load Failed:', error);
+    messageList.innerHTML = `<p class="empty error">Fehler beim Laden: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderMessages(messages, contactPubkey) {
+  const messageList = document.getElementById('message-list');
+  if (!messageList) return;
+  
+  if (!messages || messages.length === 0) {
+    messageList.innerHTML = '<p class="empty">Noch keine Nachrichten. Schreibe die erste!</p>';
+    return;
+  }
+  
+  // Sortier-Sicherheit (Chronologisch aufsteigend für Chat-View)
+  messages.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  
+  const html = messages.map(msg => {
+    const isOutgoing = msg.direction === 'out'; 
+    const timeStr = formatMessageTime(msg.createdAt);
+    const innerIdAttr = msg.innerId ? ` data-inner-id="${escapeHtml(msg.innerId)}"` : '';
+    const gwIdAttr = (msg.giftWrapId || msg.id) ? ` data-gw-id="${escapeHtml(msg.giftWrapId || msg.id)}"` : '';
+    
+    return `
+      <div class="message-bubble ${isOutgoing ? 'message-out' : 'message-in'}"${innerIdAttr}${gwIdAttr}>
+        <div class="message-content">${renderMinimalMarkdown(msg.content)}</div>
+        <div class="message-time">${timeStr}</div>
+      </div>
+    `;
+  }).join('');
+  
+  messageList.innerHTML = html;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('message-input');
+  const sendButton = document.getElementById('send-message');
+  
+  if (!input || !activeConversationPubkey) return;
+  
+  const content = input.value.trim();
+  if (!content) return;
+  
+  if (sendButton) sendButton.disabled = true;
+  input.disabled = true;
+  
+  try {
+    const dmRelayInput = document.getElementById('dm-relay-url');
+    const relayUrl = dmRelayInput?.value || null;
+    
+    const response = await chrome.runtime.sendMessage({
+      type: 'NOSTR_SEND_DM',
+      payload: {
+        recipientPubkey: activeConversationPubkey,
+        content: content,
+        scope: contactsRequestScope,
+        relayUrl: relayUrl
+      }
+    });
+
+    if (response?.error) {
+       throw new Error(response.error);
+    }
+    
+    // Success: Append nur wenn nicht schon per Broadcast eingefügt
+    const messageList = document.getElementById('message-list');
+    if (messageList) {
+       const innerId = response.result?.innerId;
+       const eventId = response.result?.eventId;
+
+       // Dedup: Falls die Self-Copy per Subscription-Broadcast schon da ist, überspringen
+       const alreadyExists =
+         (innerId && messageList.querySelector(`[data-inner-id="${CSS.escape(innerId)}"]`)) ||
+         (eventId && messageList.querySelector(`[data-gw-id="${CSS.escape(eventId)}"]`));
+
+       if (!alreadyExists) {
+         const hasEmpty = messageList.querySelector('.empty');
+         if (hasEmpty) hasEmpty.remove();
+         
+         const div = document.createElement('div');
+         div.className = 'message-bubble message-out';
+         if (innerId) div.dataset.innerId = innerId;
+         if (eventId) div.dataset.gwId = eventId;
+         div.innerHTML = `
+          <div class="message-content">${renderMinimalMarkdown(content)}</div>
+          <div class="message-time">${formatMessageTime(Math.floor(Date.now() / 1000))}</div>
+         `;
+         messageList.appendChild(div);
+       }
+       messageList.scrollTop = messageList.scrollHeight;
+    }
+    
+    input.value = '';
+    autoResizeTextarea(input);
+
+  } catch (error) {
+    showStatus(`Senden fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    if (sendButton) sendButton.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
 }

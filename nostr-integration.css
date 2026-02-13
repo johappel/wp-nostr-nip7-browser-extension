@@ -97,11 +97,11 @@
   gap: 12px;
 }
 
-.nostr-register-prompt p {
+/* .nostr-register-prompt p {
   margin: 0;
   flex: 1;
   min-width: 200px;
-}
+} */
 
 /* Status Messages */
 .nostr-success,

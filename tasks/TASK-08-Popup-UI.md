@@ -1,5 +1,10 @@
 # TASK-08: Popup UI
 
+## Hinweis zum Iststand (2026-02)
+
+Historisches Task-Dokument. Die frühere Lock-Aktion per `NOSTR_LOCK` wurde entfernt.
+Aktive Popup-Kommunikation läuft über Commands wie `NOSTR_GET_STATUS`, `NOSTR_SET_UNLOCK_CACHE_POLICY`, `NOSTR_CHANGE_PROTECTION`, Key/Backup/Profile/DM-Commands.
+
 ## Ziel
 Implementierung der Benutzeroberfläche für das Extension-Popup (`popup.html`).
 
@@ -11,7 +16,7 @@ Nach Abschluss dieses Tasks:
 - Klick auf Extension-Icon öffnet ein UI.
 - UI zeigt Status (Setup nötig, Gesperrt, Bereit).
 - User kann Npub kopieren.
-- User kann Extension sperren ("Lock").
+- (historisch) User kann Extension sperren ("Lock").
 
 ---
 
@@ -28,7 +33,7 @@ Styling passend zum Dialog-Design.
 ### 3. src/popup.js
 
 Logik für:
-- Kommunikation mit Background-Script (`NOSTR_GET_STATUS`, `NOSTR_LOCK`).
+- Kommunikation mit Background-Script (u. a. `NOSTR_GET_STATUS`).
 - UI-Updates basierend auf Status.
 - Clipboard-Aktionen.
 
