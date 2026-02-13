@@ -62,6 +62,7 @@ npm run package:firefox
 Ergebnis:
 - Extension-Builds liegen in `dist/chrome` und `dist/firefox`.
 - Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.0.xpi`).
+- Hinweis: Das lokale XPI ist unsigniert. In Firefox Release kann das als "Datei ist korrupt" erscheinen. Für dauerhafte Installation muss die XPI signiert werden (AMO / `web-ext sign`).
 
 ### 3. WordPress-Plugin lokal installieren
 
@@ -149,3 +150,8 @@ Hinweis:
 8. Firefox zeigt die Extension-Sidebar links statt rechts.
 - Die Position der Firefox-Sidebar ist eine Browser-Einstellung und kann nicht von der Extension erzwungen werden.
 - In Firefox in der Sidebar auf Einstellungen gehen und "Move Sidebar to Right" waehlen.
+
+9. Firefox meldet beim Installieren von `dist/packages/*.xpi` "Datei ist korrupt".
+- Das ist bei unsignierten XPIs in Firefox Release ein typisches Symptom.
+- Für lokale Tests `about:debugging#/runtime/this-firefox` und `Load Temporary Add-on` mit `dist/firefox/manifest.json` nutzen.
+- Für Verteilung oder dauerhafte Installation die Erweiterung signieren (AMO / `web-ext sign`).

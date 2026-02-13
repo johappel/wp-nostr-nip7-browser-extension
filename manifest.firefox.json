@@ -38,6 +38,12 @@
       "128": "icons/icon128.png"
     }
   },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "wp-nostr-signer@wp-nostr.local",
+      "strict_min_version": "121.0"
+    }
+  },
   "sidebar_action": {
     "default_panel": "sidebar.html",
     "default_title": "WP Nostr Signer",

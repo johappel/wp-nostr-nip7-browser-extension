@@ -19,6 +19,18 @@ if (!existsSync(manifestPath)) {
   fail('Missing dist/firefox/manifest.json. Build output is incomplete.');
 }
 
+let firefoxManifest = null;
+try {
+  firefoxManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+} catch (error) {
+  fail(`Could not read dist/firefox/manifest.json: ${error.message || error}`);
+}
+
+const geckoId = String(firefoxManifest?.browser_specific_settings?.gecko?.id || '').trim();
+if (!geckoId) {
+  fail('Missing browser_specific_settings.gecko.id in dist/firefox/manifest.json.');
+}
+
 const packageJsonPath = resolve(rootDir, 'package.json');
 if (!existsSync(packageJsonPath)) {
   fail('Missing package.json.');
@@ -51,3 +63,4 @@ if (tarResult.status !== 0) {
 copyFileSync(zipPath, xpiPath);
 
 console.log(`[package:firefox] Created: ${xpiPath}`);
+console.log('[package:firefox] Note: This XPI is unsigned. Firefox Release may show it as corrupt unless signed via AMO/web-ext sign.');
