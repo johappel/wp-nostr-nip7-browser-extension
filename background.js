@@ -1601,7 +1601,6 @@ const DM_RELAY_DISCOVERY_RELAYS = [
   ...DEFAULT_DM_RELAYS,
   'wss://relay.0xchat.com',
   'wss://inbox.nostr.wine',
-  'wss://relay.oxchat.com'
 ];
 
 function parseRelayInputList(input) {

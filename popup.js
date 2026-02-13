@@ -1068,9 +1068,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sameScope = savedUiState?.scope === normalizeScope(contactsRequestScope);
   if (sameScope && savedUiState?.viewId === 'conversation' && savedUiState.conversationPubkey) {
     openConversation(savedUiState.conversationPubkey);
-  } else if (savedUiState?.viewId && savedUiState.viewId !== 'home') {
-    switchView(savedUiState.viewId);
   } else {
+    switchView('home');
     queueSavePopupUiState();
   }
 
