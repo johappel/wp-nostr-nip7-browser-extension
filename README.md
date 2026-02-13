@@ -97,6 +97,10 @@ npm run release:chrome
 Hinweis:
 - `release:chrome` erzeugt zuerst das Upload-ZIP und zeigt danach eine kurze CWS-Checkliste.
 - Lokale `.crx`-Installation per Drag-and-drop ist auf Chrome (Windows/macOS) für normale Nutzer blockiert.
+- Vor CWS-Upload in `manifest.chrome.json` die Host-Liste anpassen:
+  - `https://example.com/*`
+  - `https://*.example.com/*`
+  durch eure echten Produktionsdomains ersetzen.
 
 ### 3. WordPress-Plugin lokal installieren
 

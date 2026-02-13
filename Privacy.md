@@ -28,8 +28,8 @@ Wird fuer lokale Desktop-Benachrichtigungen bei neuen Direktnachrichten genutzt 
 ### `sidePanel`
 Wird verwendet, um die Erweiterungs-UI alternativ zum Popup im Browser-Seitenpanel zu oeffnen.
 
-### Begruendung fuer Hostberechtigung (`http://*/*`, `https://*/*`)
-Die Erweiterung injiziert die NIP-07 Bridge in Webseitenkontexte und muss WordPress-REST-Endpunkte auf den vom Nutzer verwendeten Domains erreichen. Zudem werden Nostr-Relay-Verbindungen (WebSocket) zu konfigurierten Relays aufgebaut. Die Domainfreigabe wird intern durch Whitelist/Benutzerbestaetigung begrenzt.
+### Begruendung fuer Hostberechtigung (domainspezifisch statt global)
+Die Erweiterung injiziert die NIP-07 Bridge nur auf den explizit im Manifest freigegebenen WordPress-Domains (plus lokale Entwicklungsdomains wie `localhost`). Dort werden WordPress-REST-Endpunkte genutzt und Nostr-Relay-Verbindungen (WebSocket) aufgebaut. Es wird kein globaler Vollzugriff auf beliebige Websites angefordert.
 
 ## Nutzt die Extension Remote Code?
 Nein. Die Erweiterung laedt oder evaluiert keinen externen JavaScript-Code zur Laufzeit (kein `eval`, kein `new Function`, kein Remote-Script-Import). Netzwerkzugriffe dienen nur dem Datenaustausch mit WordPress-APIs und Nostr-Relays.
