@@ -7,6 +7,8 @@
     "build": "npm run clean && rollup -c",
     "package:firefox": "npm run build && node scripts/package-firefox.js",
     "package:firefox:only": "node scripts/package-firefox.js",
+    "sign:firefox": "npm run build && node scripts/sign-firefox.js",
+    "sign:firefox:only": "node scripts/sign-firefox.js",
     "dev": "npm run clean && rollup -c -w",
     "test": "vitest run"
   },

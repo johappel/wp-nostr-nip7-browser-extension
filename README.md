@@ -64,6 +64,28 @@ Ergebnis:
 - Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.0.xpi`).
 - Hinweis: Das lokale XPI ist unsigniert. In Firefox Release kann das als "Datei ist korrupt" erscheinen. Für dauerhafte Installation muss die XPI signiert werden (AMO / `web-ext sign`).
 
+Firefox XPI signieren (AMO):
+
+PowerShell:
+```powershell
+$env:WEB_EXT_API_KEY="DEIN_AMO_JWT_ISSUER"
+$env:WEB_EXT_API_SECRET="DEIN_AMO_JWT_SECRET"
+$env:FIREFOX_SIGN_CHANNEL="unlisted" # optional: unlisted|listed
+npm run sign:firefox
+```
+
+bash:
+```bash
+export WEB_EXT_API_KEY="DEIN_AMO_JWT_ISSUER"
+export WEB_EXT_API_SECRET="DEIN_AMO_JWT_SECRET"
+export FIREFOX_SIGN_CHANNEL="unlisted" # optional: unlisted|listed
+npm run sign:firefox
+```
+
+Hinweis:
+- `sign:firefox` baut zuerst neu (`dist/firefox`) und startet dann `web-ext sign`.
+- Wenn `web-ext` lokal nicht installiert ist, wird automatisch `npx web-ext` verwendet.
+
 ### 3. WordPress-Plugin lokal installieren
 
 1. Lege einen Plugin-Ordner an, z. B. `wp-content/plugins/nostr-integration/`.
