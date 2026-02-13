@@ -249,10 +249,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Chat View Events (TASK-20)
   const conversationBack = document.getElementById('conversation-back');
+  const conversationPubkeyNode = document.getElementById('conversation-pubkey');
+  const conversationPubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
   const sendMessageBtn = document.getElementById('send-message');
   const messageInput = document.getElementById('message-input');
 
   if (conversationBack) conversationBack.addEventListener('click', closeConversation);
+
+  if (conversationPubkeyCopyButton && conversationPubkeyNode) {
+    conversationPubkeyCopyButton.addEventListener('click', async () => {
+      const pubkey = String(conversationPubkeyCopyButton.dataset.pubkey || conversationPubkeyNode.textContent || '').trim();
+      if (!pubkey || pubkey === '-') {
+        showStatus('Kein Pubkey zum Kopieren vorhanden.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(pubkey);
+        showStatus('Pubkey in die Zwischenablage kopiert.');
+      } catch {
+        showStatus('Pubkey konnte nicht kopiert werden.', true);
+      }
+    });
+  }
   
   if (sendMessageBtn) sendMessageBtn.addEventListener('click', sendMessage);
   
@@ -2300,9 +2318,18 @@ function openConversation(contactPubkey) {
   
   // Header Update
   const nameEl = document.getElementById('conversation-name');
+  const pubkeyEl = document.getElementById('conversation-pubkey');
+  const pubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
   const avatarEl = document.getElementById('conversation-avatar');
   
   if (nameEl) nameEl.textContent = contact.displayName || contact.name || formatShortHex(contactPubkey);
+  if (pubkeyEl) {
+    pubkeyEl.textContent = contactPubkey;
+    pubkeyEl.title = contactPubkey;
+  }
+  if (pubkeyCopyButton) {
+    pubkeyCopyButton.dataset.pubkey = contactPubkey;
+  }
   if (avatarEl) {
     avatarEl.src = contact.picture || contact.avatarUrl || '';
     avatarEl.onerror = function() {
@@ -2321,6 +2348,15 @@ function openConversation(contactPubkey) {
 }
 
 function closeConversation() {
+  const pubkeyEl = document.getElementById('conversation-pubkey');
+  const pubkeyCopyButton = document.getElementById('conversation-pubkey-copy');
+  if (pubkeyEl) {
+    pubkeyEl.textContent = '-';
+    pubkeyEl.removeAttribute('title');
+  }
+  if (pubkeyCopyButton) {
+    delete pubkeyCopyButton.dataset.pubkey;
+  }
   activeConversationPubkey = null;
   renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
   switchView('home');

@@ -1095,44 +1095,67 @@ async function clearContactsCache() {
  * @param {string|string[]} lookupRelays - Relay URL(s) für Lookup (String oder Array)
  * @returns {Promise<Array<string>>} - Array von Relay URLs
  */
+function extractRelayTagsFromKind10050(event) {
+  const relaysFromTags = Array.isArray(event?.tags)
+    ? event.tags
+      .filter((tag) => Array.isArray(tag) && (tag[0] === 'relay' || tag[0] === 'r') && tag[1])
+      .map((tag) => normalizeRelayUrl(tag[1]))
+      .filter(Boolean)
+    : [];
+  if (relaysFromTags.length > 0) {
+    return relaysFromTags;
+  }
+
+  // Some clients may serialize relay URLs in content (JSON array fallback).
+  try {
+    const parsed = JSON.parse(String(event?.content || ''));
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((value) => normalizeRelayUrl(value))
+        .filter(Boolean);
+    }
+  } catch {
+    // ignore malformed content fallback
+  }
+  return [];
+}
+
 async function fetchDmRelays(pubkey, lookupRelays) {
   const normalizedPubkey = normalizePubkeyHex(pubkey);
   if (!normalizedPubkey) return [];
   
   // Immer als Array behandeln
   const relayList = Array.isArray(lookupRelays) ? lookupRelays : [lookupRelays];
-  const normalizedRelays = relayList
+  const normalizedRelays = [...new Set(relayList
     .map(r => normalizeRelayUrl(r))
-    .filter(Boolean);
+    .filter(Boolean))];
   if (!normalizedRelays.length) return [];
-  
-  // Nacheinander versuchen bis Kind 10050 gefunden
-  for (const relay of normalizedRelays) {
+
+  const foundRelays = new Set();
+  await Promise.all(normalizedRelays.map(async (relay) => {
     try {
       const events = await subscribeOnce(relay, [
-        { kinds: [10050], authors: [normalizedPubkey], limit: 1 }
-      ]);
-      
-      if (!events.length) continue;
-      
-      // Neuestes Event
-      const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
-      
-      // relay-Tags extrahieren
-      const relays = latest.tags
-        .filter(t => t[0] === 'relay' && t[1])
-        .map(t => normalizeRelayUrl(t[1]))
-        .filter(Boolean);
-      
-      if (relays.length) {
-        console.log('[NIP-17] Found Kind 10050 for', normalizedPubkey.slice(0, 8), 'on', relay, '→', relays);
-        return relays;
-      }
+        { kinds: [10050], authors: [normalizedPubkey], limit: 2 }
+      ], 4000);
+
+      if (!events.length) return;
+
+      const latest = events.sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+      const relays = extractRelayTagsFromKind10050(latest);
+      if (!relays.length) return;
+
+      relays.forEach((r) => foundRelays.add(r));
+      console.log('[NIP-17] Found Kind 10050 for', normalizedPubkey.slice(0, 8), 'on', relay, '→', relays);
     } catch (error) {
       console.warn('[NIP-17] Failed to fetch Kind 10050 from', relay, ':', error.message);
     }
+  }));
+
+  const discovered = [...foundRelays];
+  if (discovered.length > 0) {
+    return discovered;
   }
-  
+
   console.log('[NIP-17] No Kind 10050 found for', normalizedPubkey.slice(0, 8), 'on any of', normalizedRelays);
   return [];
 }
@@ -1460,6 +1483,38 @@ async function getContactProfile(pubkey) {
 // ============================================================
 
 const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
+const DM_RELAY_DISCOVERY_RELAYS = [
+  ...DEFAULT_DM_RELAYS,
+  'wss://relay.oxchat.com',
+  'wss://auth.nostr1.com',
+  'wss://inbox.nostr.wine'
+];
+
+function parseRelayInputList(input) {
+  const raw = Array.isArray(input) ? input : String(input || '').split(',');
+  return raw
+    .map((entry) => normalizeRelayUrl(String(entry || '').trim()))
+    .filter(Boolean);
+}
+
+async function getConfiguredDmRelayList() {
+  try {
+    const stored = await chrome.storage.local.get(['dmRelayUrl']);
+    return parseRelayInputList(stored.dmRelayUrl);
+  } catch {
+    return [];
+  }
+}
+
+async function resolveRecipientLookupRelays(clientRelayUrl = null) {
+  const explicit = parseRelayInputList(clientRelayUrl);
+  const configured = await getConfiguredDmRelayList();
+  return [...new Set([
+    ...explicit,
+    ...configured,
+    ...DM_RELAY_DISCOVERY_RELAYS
+  ])];
+}
 
 /**
  * Ermittelt alle Inbox-Relays für DM-Operationen.
@@ -1482,25 +1537,18 @@ async function resolveDmInboxRelays(clientRelayUrl = null, myPubkey = null) {
 
   // 1. Explizit vom Client
   if (clientRelayUrl) {
-    const raw = Array.isArray(clientRelayUrl) ? clientRelayUrl : String(clientRelayUrl).split(',');
-    relays = raw.map(r => normalizeRelayUrl(r.trim())).filter(Boolean);
+    relays = parseRelayInputList(clientRelayUrl);
   }
 
   // 2. Gespeichertes DM-Relay aus Settings
   if (relays.length === 0) {
-    try {
-      const stored = await chrome.storage.local.get(['dmRelayUrl']);
-      if (stored.dmRelayUrl) {
-        const raw = String(stored.dmRelayUrl).split(',');
-        relays = raw.map(r => normalizeRelayUrl(r.trim())).filter(Boolean);
-      }
-    } catch { /* ignore */ }
+    relays = await getConfiguredDmRelayList();
   }
 
   // 3. Kind 10050 (NIP-17 Inbox Relays)
   if (relays.length === 0 && myPubkey) {
     try {
-      const discovered = await fetchDmRelays(myPubkey, DEFAULT_DM_RELAYS);
+      const discovered = await fetchDmRelays(myPubkey, DM_RELAY_DISCOVERY_RELAYS);
       if (discovered.length > 0) {
         relays = discovered;
       }
@@ -2641,11 +2689,12 @@ async function handleMessage(request, sender) {
       // DM-Relays des Empfängers herausfinden (Kind 10050)
       // WICHTIG: Lookup über allgemeine Relays, NICHT über eigene Inbox-Relays!
       // Eigene Inbox-Relays haben das Kind 10050 des Empfängers i.d.R. nicht.
-      let targetRelays = await fetchDmRelays(normalizedRecipient, DEFAULT_DM_RELAYS);
+      const recipientLookupRelays = await resolveRecipientLookupRelays(relayUrl);
+      let targetRelays = await fetchDmRelays(normalizedRecipient, recipientLookupRelays);
       if (!targetRelays.length) {
-        // Fallback: allgemeine Relays (nicht eigene Inbox!)
-        console.log('[NIP-17] No recipient relays found, using DEFAULT_DM_RELAYS as fallback');
-        targetRelays = [...DEFAULT_DM_RELAYS];
+        // Fallback: send to lookup relays to maximize interoperability.
+        console.log('[NIP-17] No recipient relays found, using lookup relays as fallback');
+        targetRelays = [...new Set([...recipientLookupRelays, ...DEFAULT_DM_RELAYS])];
       }
 
       // Gift Wraps erstellen

@@ -75,7 +75,15 @@
         <div class="conversation-header">
           <button class="btn-back" id="conversation-back" title="Zurück">←</button>
           <img class="conversation-avatar" id="conversation-avatar" src="" alt="" data-fallback="avatar" />
-          <span class="conversation-name" id="conversation-name"></span>
+          <div class="conversation-identity">
+            <span class="conversation-name" id="conversation-name"></span>
+            <div class="conversation-pubkey-row">
+              <code class="conversation-pubkey" id="conversation-pubkey">-</code>
+              <button class="conversation-pubkey-copy" id="conversation-pubkey-copy" type="button" title="Pubkey kopieren">
+                Kopieren
+              </button>
+            </div>
+          </div>
         </div>
         
         <!-- Optional: Relay Info -->
