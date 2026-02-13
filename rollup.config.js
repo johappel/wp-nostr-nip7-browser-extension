@@ -12,6 +12,7 @@ const staticFiles = [
   'content.js',
   'inpage.js',
   'popup.html',
+  'sidebar.html',
   'popup.js',
   'popup.css',
   'dialog.html',

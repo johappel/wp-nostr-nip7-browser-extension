@@ -27,6 +27,8 @@ const UNLOCK_CACHE_ALLOWED_POLICY_LIST = ['off', '5m', '15m', '30m', '60m', 'ses
 const UNLOCK_CACHE_ALLOWED_POLICIES = new Set(UNLOCK_CACHE_ALLOWED_POLICY_LIST);
 const KEY_SCOPE_DEFAULT = 'global';
 const LAST_ACTIVE_SCOPE_KEY = 'lastActiveKeyScope';
+const OPEN_IN_SIDEBAR_KEY = 'openInSidebar';
+const DEFAULT_ACTION_POPUP_PATH = 'popup.html';
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
@@ -59,6 +61,47 @@ async function restoreActiveScope() {
     }
   } catch {
     // ignore – keep default scope
+  }
+}
+
+function hasChromeSidePanelApi() {
+  return typeof chrome?.sidePanel?.setPanelBehavior === 'function';
+}
+
+function hasFirefoxSidebarApi() {
+  return typeof chrome?.sidebarAction?.open === 'function';
+}
+
+async function getOpenInSidebarEnabled() {
+  try {
+    const result = await chrome.storage.local.get([OPEN_IN_SIDEBAR_KEY]);
+    return result?.[OPEN_IN_SIDEBAR_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+async function applyOpenInSidebarMode() {
+  const enabled = await getOpenInSidebarEnabled();
+
+  if (typeof chrome?.action?.setPopup === 'function') {
+    try {
+      await chrome.action.setPopup({
+        popup: enabled ? '' : DEFAULT_ACTION_POPUP_PATH
+      });
+    } catch (error) {
+      console.warn('[UI] Failed to set action popup mode:', error?.message || error);
+    }
+  }
+
+  if (hasChromeSidePanelApi()) {
+    try {
+      await chrome.sidePanel.setPanelBehavior({
+        openPanelOnActionClick: enabled
+      });
+    } catch (error) {
+      console.warn('[UI] Failed to configure side panel behavior:', error?.message || error);
+    }
   }
 }
 
@@ -1557,8 +1600,8 @@ const DEFAULT_DM_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay
 const DM_RELAY_DISCOVERY_RELAYS = [
   ...DEFAULT_DM_RELAYS,
   'wss://relay.0xchat.com',
-  'wss://relay.oxchat.com',
   'wss://inbox.nostr.wine',
+  'wss://relay.oxchat.com'
 ];
 
 function parseRelayInputList(input) {
@@ -1942,6 +1985,56 @@ async function resolvePasskeyAuthOptions(request, domain, isInternalExtensionReq
 // ============================================================
 // Message Handler
 // ============================================================
+applyOpenInSidebarMode().catch((error) => {
+  console.warn('[UI] Failed to initialize open-in-sidebar mode:', error?.message || error);
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode on install/update:', error?.message || error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode on startup:', error?.message || error);
+  });
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes?.[OPEN_IN_SIDEBAR_KEY]) return;
+  applyOpenInSidebarMode().catch((error) => {
+    console.warn('[UI] Failed to apply mode after setting change:', error?.message || error);
+  });
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  const enabled = await getOpenInSidebarEnabled();
+  if (!enabled) return;
+
+  if (hasChromeSidePanelApi() && typeof chrome?.sidePanel?.open === 'function') {
+    try {
+      const windowId = tab?.windowId;
+      if (typeof windowId === 'number') {
+        await chrome.sidePanel.open({ windowId });
+      } else {
+        await chrome.sidePanel.open({});
+      }
+      return;
+    } catch (error) {
+      console.warn('[UI] Failed to open Chrome side panel:', error?.message || error);
+    }
+  }
+
+  if (hasFirefoxSidebarApi()) {
+    try {
+      await chrome.sidebarAction.open();
+    } catch (error) {
+      console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
+    }
+  }
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   handleMessage(request, sender)
     .then(result => sendResponse({ result }))
@@ -1997,6 +2090,16 @@ async function handleMessage(request, sender) {
   // PING erfordert keine Domain-Validierung (f????r Extension-Detection)
   if (request.type === 'NOSTR_PING') {
     return { pong: true, version: CURRENT_VERSION };
+  }
+
+  if (request.type === 'NOSTR_SET_OPEN_IN_SIDEBAR') {
+    if (!isInternalExtensionRequest) {
+      throw new Error('Sidebar mode can only be set from extension UI');
+    }
+    const enabled = request?.payload?.enabled === true;
+    await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: enabled });
+    await applyOpenInSidebarMode();
+    return { success: true, enabled };
   }
 
   if (request.type === 'NOSTR_SET_UNLOCK_CACHE_POLICY') {

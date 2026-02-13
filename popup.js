@@ -5,10 +5,12 @@ const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
 const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
 const DM_RELAY_KEY = 'dmRelayUrl';
 const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
+const OPEN_IN_SIDEBAR_KEY = 'openInSidebar';
 const DM_CACHE_STORAGE_KEY = 'nostrDmCacheV2';
 const DM_LAST_READ_BY_CONTACT_KEY = 'dmLastReadByContactV1';
 const DEFAULT_APP_TITLE = 'WP Nostr Signer';
 const AVATAR_FALLBACK_DATA_URI = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg==';
+const POPUP_UI_STATE_KEY = 'popupUiStateV1';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
   off: 'Immer nachfragen',
@@ -27,6 +29,7 @@ let dmLastReadByContact = {};
 let dmSubscriptionStarted = false;
 let dmSubscriptionRelayKey = '';
 let dmSubscriptionInFlight = null;
+let popupUiStateWriteTimer = null;
 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';
@@ -50,6 +53,7 @@ function switchView(viewId) {
   
   // View-spezifische Initialisierung
   onViewActivated(viewId);
+  queueSavePopupUiState();
 }
 
 // View-spezifische Aktionen bei Aktivierung
@@ -81,6 +85,63 @@ async function onViewActivated(viewId) {
       break;
   }
 }
+
+function getActiveViewId() {
+  const activeView = document.querySelector('.view.active');
+  if (!activeView || !activeView.id) return 'home';
+  return activeView.id.replace(/^view-/, '') || 'home';
+}
+
+async function loadPopupUiState() {
+  try {
+    const result = await chrome.storage.local.get([POPUP_UI_STATE_KEY]);
+    const raw = result?.[POPUP_UI_STATE_KEY];
+    if (!raw || typeof raw !== 'object') return null;
+
+    const viewId = String(raw.viewId || 'home').trim() || 'home';
+    const conversationPubkey = String(raw.conversationPubkey || '').trim();
+    const scope = normalizeScope(raw.scope || 'global');
+    return {
+      viewId,
+      conversationPubkey: conversationPubkey || null,
+      scope
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function savePopupUiState() {
+  const payload = {
+    viewId: getActiveViewId(),
+    conversationPubkey: activeConversationPubkey || null,
+    scope: normalizeScope(contactsRequestScope),
+    savedAt: Date.now()
+  };
+  try {
+    await chrome.storage.local.set({ [POPUP_UI_STATE_KEY]: payload });
+  } catch {
+    // ignore storage write errors
+  }
+}
+
+function queueSavePopupUiState() {
+  if (popupUiStateWriteTimer) {
+    clearTimeout(popupUiStateWriteTimer);
+  }
+  popupUiStateWriteTimer = setTimeout(() => {
+    popupUiStateWriteTimer = null;
+    savePopupUiState().catch(() => {});
+  }, 120);
+}
+
+window.addEventListener('beforeunload', () => {
+  if (popupUiStateWriteTimer) {
+    clearTimeout(popupUiStateWriteTimer);
+    popupUiStateWriteTimer = null;
+  }
+  savePopupUiState().catch(() => {});
+});
 
 function normalizeRelayListForKey(input) {
   const raw = Array.isArray(input) ? input : String(input || '').split(',');
@@ -259,6 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const dmRelayInput = document.getElementById('dm-relay-url');
   const saveDmRelayButton = document.getElementById('save-dm-relay');
   const dmNotificationsCheckbox = document.getElementById('dm-notifications-enabled');
+  const openInSidebarCheckbox = document.getElementById('open-in-sidebar');
   const extensionVersionSpan = document.getElementById('extension-version');
   const activeScopeSpan = document.getElementById('active-scope');
   const refreshProfileButton = document.getElementById('refresh-profile');
@@ -268,6 +330,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   let activeAuthBroker = null;
   let activeViewer = null;
   let activeRuntimeStatus = null;
+  const savedUiState = await loadPopupUiState();
+
+  const openInSidebarEnabled = await loadOpenInSidebarEnabled();
+  if (openInSidebarCheckbox) {
+    openInSidebarCheckbox.checked = openInSidebarEnabled;
+  }
+  applyOpenInSidebarMode(openInSidebarEnabled).catch(() => {});
 
   // ========================================
   // Event Listeners: Navigation & Dialogs
@@ -282,7 +351,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (viewId) switchView(viewId);
     });
   }
-  
+
   // Initialize contact list events
   initContactListEvents();
 
@@ -470,6 +539,24 @@ document.addEventListener('DOMContentLoaded', async () => {
         showStatus(`Einstellung konnte nicht gespeichert werden: ${e.message || e}`, true);
       } finally {
         dmNotificationsCheckbox.disabled = false;
+      }
+    });
+  }
+
+  if (openInSidebarCheckbox) {
+    openInSidebarCheckbox.addEventListener('change', async () => {
+      openInSidebarCheckbox.disabled = true;
+      try {
+        const enabled = await saveOpenInSidebarEnabled(openInSidebarCheckbox.checked);
+        await applyOpenInSidebarMode(enabled);
+        showStatus(enabled
+          ? 'Sidebar/Side-Panel-Modus aktiviert.'
+          : 'Sidebar/Side-Panel-Modus deaktiviert (Popup aktiv).');
+      } catch (e) {
+        openInSidebarCheckbox.checked = await loadOpenInSidebarEnabled();
+        showStatus(`Einstellung konnte nicht gespeichert werden: ${e.message || e}`, true);
+      } finally {
+        openInSidebarCheckbox.disabled = false;
       }
     });
   }
@@ -978,6 +1065,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ========================================
   
   await loadContacts(false);
+  const sameScope = savedUiState?.scope === normalizeScope(contactsRequestScope);
+  if (sameScope && savedUiState?.viewId === 'conversation' && savedUiState.conversationPubkey) {
+    openConversation(savedUiState.conversationPubkey);
+  } else if (savedUiState?.viewId && savedUiState.viewId !== 'home') {
+    switchView(savedUiState.viewId);
+  } else {
+    queueSavePopupUiState();
+  }
 
 });
 
@@ -1874,6 +1969,32 @@ async function saveDmNotificationsEnabled(enabled) {
   const normalized = Boolean(enabled);
   await chrome.storage.local.set({ [DM_NOTIFICATIONS_KEY]: normalized });
   return normalized;
+}
+
+async function loadOpenInSidebarEnabled() {
+  try {
+    const result = await chrome.storage.local.get([OPEN_IN_SIDEBAR_KEY]);
+    return result[OPEN_IN_SIDEBAR_KEY] === true;
+  } catch {
+    return false;
+  }
+}
+
+async function saveOpenInSidebarEnabled(enabled) {
+  const normalized = Boolean(enabled);
+  await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: normalized });
+  return normalized;
+}
+
+async function applyOpenInSidebarMode(enabled) {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'NOSTR_SET_OPEN_IN_SIDEBAR',
+      payload: { enabled: Boolean(enabled) }
+    });
+  } catch {
+    // ignore; background storage listener also applies this setting
+  }
 }
 
 async function loadDmRelay() {
