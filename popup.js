@@ -5,6 +5,8 @@ const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
 const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
 const DM_RELAY_KEY = 'dmRelayUrl';
 const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
+const DM_CACHE_STORAGE_KEY = 'nostrDmCacheV2';
+const DM_LAST_READ_BY_CONTACT_KEY = 'dmLastReadByContactV1';
 const DEFAULT_APP_TITLE = 'WP Nostr Signer';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
@@ -19,6 +21,8 @@ const UNLOCK_CACHE_POLICY_LABELS = {
 let contactsRequestScope = 'global';
 let contactsRequestWpApi = null;
 let currentUserPubkey = null;
+let dmConversationMeta = new Map();
+let dmLastReadByContact = {};
 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';
@@ -1847,6 +1851,8 @@ async function loadContacts(forceRefresh = false) {
   contactList.innerHTML = '<div class="contact-loading"><p class="empty">Kontakte werden geladen...</p></div>';
   
   try {
+    await loadDmConversationMeta(contactsRequestScope);
+
     // Fetch from background
     const requestType = forceRefresh ? 'NOSTR_REFRESH_CONTACTS' : 'NOSTR_GET_CONTACTS';
     const response = await chrome.runtime.sendMessage({
@@ -1995,16 +2001,33 @@ function renderContactItem(contact) {
   const displayName = String(contact.displayName || contact.name || '').trim() || formatShortHex(pubkey);
   const nip05 = String(contact.nip05 || '').trim();
   const avatarUrl = String(contact.picture || contact.avatarUrl || '').trim();
-  
-  // Determine source badge not needed for chat view usually, but good for info
-  // We use the CSS from TASK-20 which expects specific structure
+  const sources = getContactSources(contact);
+  const isWpOnly = sources.includes('wordpress') && !sources.includes('nostr');
+  const isKind3Contact = sources.includes('nostr');
+  const conversationMeta = dmConversationMeta.get(pubkey) || null;
   
   const avatarHtml = avatarUrl
     ? `<img src="${escapeHtml(avatarUrl)}" class="contact-avatar-img" alt="" data-fallback="avatar" />`
     : '<span class="contact-avatar-placeholder">👤</span>';
   
-  // Placeholder for last message (TASK-20 optional: "preview")
-  const previewText = nip05 || formatShortHex(pubkey);
+  const previewText = conversationMeta?.lastMessage
+    || nip05
+    || formatShortHex(pubkey);
+  const relativeTime = conversationMeta?.lastMessageAt
+    ? formatRelativeTime(conversationMeta.lastMessageAt)
+    : '';
+  const unreadCount = Number(conversationMeta?.unreadCount || 0);
+  const unreadBadge = unreadCount > 0
+    ? `<span class="unread-badge">${unreadCount > 99 ? '99+' : unreadCount}</span>`
+    : '';
+
+  const sourceBadges = [];
+  if (isWpOnly) {
+    sourceBadges.push('<span class="source-badge source-badge-wp" title="WordPress-Kontakt">WP</span>');
+  }
+  if (isKind3Contact) {
+    sourceBadges.push('<span class="source-badge source-badge-nostr" title="Nostr Kind-3 Kontakt">★</span>');
+  }
 
   return `
     <div class="contact-item" data-pubkey="${escapeHtml(pubkey)}" tabindex="0" role="button">
@@ -2014,7 +2037,8 @@ function renderContactItem(contact) {
         <div class="contact-preview">${escapeHtml(previewText)}</div>
       </div>
       <div class="contact-meta">
-         <!-- Time / Unread badge placeholders -->
+        <div class="contact-time">${escapeHtml(relativeTime)}</div>
+        <div class="contact-badges">${sourceBadges.join('')}${unreadBadge}</div>
       </div>
     </div>
   `;
@@ -2215,11 +2239,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'NOSTR_NEW_DM') {
     const newMessage = message.payload;
     if (!newMessage) return;
+    const partnerPubkey = resolveConversationPartnerPubkey(newMessage);
 
     // 1. If chat is open for this contact, append message
     if (activeConversationPubkey && 
         (newMessage.senderPubkey === activeConversationPubkey || newMessage.recipientPubkey === activeConversationPubkey)) {
       appendNewMessage(newMessage);
+      if (partnerPubkey && newMessage.direction === 'in') {
+        markConversationAsRead(partnerPubkey, newMessage.createdAt).catch(() => {});
+      }
     }
     
     // 2. Refresh contact list snippet if visible (Home view)
@@ -2283,6 +2311,7 @@ function openConversation(contactPubkey) {
   }
   
   activeConversationPubkey = contactPubkey;
+  markConversationAsRead(contactPubkey).catch(() => {});
   
   // Switch View
   switchView('conversation');
@@ -2293,7 +2322,86 @@ function openConversation(contactPubkey) {
 
 function closeConversation() {
   activeConversationPubkey = null;
+  renderContacts(currentContacts, currentContactFilter, contactSearchQuery);
   switchView('home');
+}
+
+function normalizePreviewText(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function loadDmConversationMeta(scope) {
+  const normalizedScope = normalizeScope(scope);
+  try {
+    const result = await chrome.storage.local.get([DM_CACHE_STORAGE_KEY, DM_LAST_READ_BY_CONTACT_KEY]);
+    const cache = result?.[DM_CACHE_STORAGE_KEY];
+    const rawLastRead = result?.[DM_LAST_READ_BY_CONTACT_KEY];
+    dmLastReadByContact = (rawLastRead && typeof rawLastRead === 'object') ? { ...rawLastRead } : {};
+
+    const nextMeta = new Map();
+    if (!cache || cache.scope !== normalizedScope || typeof cache.conversations !== 'object') {
+      dmConversationMeta = nextMeta;
+      return nextMeta;
+    }
+
+    for (const [pubkey, rawMessages] of Object.entries(cache.conversations)) {
+      const messages = Array.isArray(rawMessages) ? rawMessages : [];
+      if (!messages.length) continue;
+
+      const lastMsg = messages[messages.length - 1] || {};
+      const lastMessageAt = Number(lastMsg.createdAt) || 0;
+      const lastReadAt = Number(dmLastReadByContact[pubkey]) || 0;
+      const unreadCount = messages.filter((msg) => {
+        const createdAt = Number(msg?.createdAt) || 0;
+        return String(msg?.direction || '') === 'in' && createdAt > lastReadAt;
+      }).length;
+
+      nextMeta.set(pubkey, {
+        lastMessage: normalizePreviewText(lastMsg.content),
+        lastMessageAt,
+        unreadCount
+      });
+    }
+
+    dmConversationMeta = nextMeta;
+    return nextMeta;
+  } catch {
+    dmConversationMeta = new Map();
+    dmLastReadByContact = {};
+    return dmConversationMeta;
+  }
+}
+
+function resolveConversationPartnerPubkey(message) {
+  const senderPubkey = String(message?.senderPubkey || '').trim();
+  const recipientPubkey = String(message?.recipientPubkey || '').trim();
+  if (!senderPubkey || !recipientPubkey) return null;
+
+  if (currentUserPubkey && senderPubkey === currentUserPubkey) return recipientPubkey;
+  if (currentUserPubkey && recipientPubkey === currentUserPubkey) return senderPubkey;
+
+  return String(message?.direction || '').trim() === 'out' ? recipientPubkey : senderPubkey;
+}
+
+async function markConversationAsRead(contactPubkey, createdAt = null) {
+  const pubkey = String(contactPubkey || '').trim();
+  if (!pubkey) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  const knownLastMessageAt = Number(dmConversationMeta.get(pubkey)?.lastMessageAt || 0);
+  const readUntil = Math.max(Number(createdAt) || 0, knownLastMessageAt, now);
+  const previousReadUntil = Number(dmLastReadByContact[pubkey]) || 0;
+  if (readUntil <= previousReadUntil) return;
+
+  dmLastReadByContact = { ...dmLastReadByContact, [pubkey]: readUntil };
+  await chrome.storage.local.set({ [DM_LAST_READ_BY_CONTACT_KEY]: dmLastReadByContact });
+
+  const meta = dmConversationMeta.get(pubkey);
+  if (meta) {
+    dmConversationMeta.set(pubkey, { ...meta, unreadCount: 0 });
+  }
 }
 
 async function loadConversationMessages(contactPubkey) {
