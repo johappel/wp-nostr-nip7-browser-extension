@@ -61,7 +61,7 @@ npm run package:firefox
 
 Ergebnis:
 - Extension-Builds liegen in `dist/chrome` und `dist/firefox`.
-- Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.0.xpi`).
+- Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.1.xpi`).
 - Hinweis: Das lokale XPI ist unsigniert. In Firefox Release kann das als "Datei ist korrupt" erscheinen. Für dauerhafte Installation muss die XPI signiert werden (AMO / `web-ext sign`).
 
 Firefox XPI signieren (AMO):

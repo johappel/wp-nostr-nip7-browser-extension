@@ -1,6 +1,6 @@
 {
   "name": "wp-nostr-nip7-signer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NIP-07 Signer Extension for WordPress",
   "scripts": {
     "clean": "rimraf dist",

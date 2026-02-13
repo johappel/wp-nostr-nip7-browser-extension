@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WordPress Nostr Signer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NIP-07 Signer für WordPress Nostr Integration",
   "permissions": [
     "storage",

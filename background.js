@@ -17,7 +17,7 @@ import {
   formatShortHex
 } from './lib/nip17-chat.js';
 
-const CURRENT_VERSION = '1.0.0';
+const CURRENT_VERSION = '1.0.1';
 const DOMAIN_SYNC_CONFIGS_KEY = 'domainSyncConfigs';
 const UNLOCK_CACHE_POLICY_KEY = 'unlockCachePolicy';
 const UNLOCK_PASSWORD_SESSION_KEY = 'unlockPasswordSession';
