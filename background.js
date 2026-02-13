@@ -29,6 +29,7 @@ const KEY_SCOPE_DEFAULT = 'global';
 const LAST_ACTIVE_SCOPE_KEY = 'lastActiveKeyScope';
 const OPEN_IN_SIDEBAR_KEY = 'openInSidebar';
 const DEFAULT_ACTION_POPUP_PATH = 'popup.html';
+const DEFAULT_SIDEBAR_PANEL_PATH = 'sidebar.html';
 
 // Global KeyManager Instance
 const keyManager = new KeyManager();
@@ -72,6 +73,80 @@ function hasFirefoxSidebarApi() {
   return typeof chrome?.sidebarAction?.open === 'function';
 }
 
+async function getSidebarTargetTabIds(windowId = null) {
+  if (typeof chrome?.tabs?.query !== 'function') return [];
+  try {
+    const query = {};
+    if (typeof windowId === 'number') {
+      query.windowId = windowId;
+    }
+    const tabs = await chrome.tabs.query(query);
+    return tabs
+      .map((tab) => tab?.id)
+      .filter((tabId) => typeof tabId === 'number');
+  } catch {
+    return [];
+  }
+}
+
+async function setChromeSidePanelEnabledForTabs(enabled, windowId = null) {
+  if (!hasChromeSidePanelApi() || typeof chrome?.sidePanel?.setOptions !== 'function') return;
+
+  const tabIds = await getSidebarTargetTabIds(windowId);
+  if (!tabIds.length) return;
+
+  await Promise.all(tabIds.map(async (tabId) => {
+    try {
+      if (enabled) {
+        await chrome.sidePanel.setOptions({
+          tabId,
+          enabled: true,
+          path: DEFAULT_SIDEBAR_PANEL_PATH
+        });
+        return;
+      }
+      await chrome.sidePanel.setOptions({
+        tabId,
+        enabled: false
+      });
+    } catch {
+      // ignore tab-specific side panel errors
+    }
+  }));
+}
+
+async function closeOpenSidebarPanels(windowId = null) {
+  if (hasChromeSidePanelApi()) {
+    if (typeof chrome?.sidePanel?.close === 'function') {
+      try {
+        if (typeof windowId === 'number') {
+          await chrome.sidePanel.close({ windowId });
+        } else {
+          await chrome.sidePanel.close({});
+        }
+        return;
+      } catch (error) {
+        console.warn('[UI] Failed to close Chrome side panel directly:', error?.message || error);
+      }
+    }
+
+    // Fallback for older Chrome versions without sidePanel.close()
+    await setChromeSidePanelEnabledForTabs(false, windowId);
+  }
+
+  if (hasFirefoxSidebarApi() && typeof chrome?.sidebarAction?.close === 'function') {
+    try {
+      if (typeof windowId === 'number') {
+        await chrome.sidebarAction.close(windowId);
+      } else {
+        await chrome.sidebarAction.close();
+      }
+    } catch (error) {
+      console.warn('[UI] Failed to close Firefox sidebar:', error?.message || error);
+    }
+  }
+}
+
 async function getOpenInSidebarEnabled() {
   try {
     const result = await chrome.storage.local.get([OPEN_IN_SIDEBAR_KEY]);
@@ -81,7 +156,7 @@ async function getOpenInSidebarEnabled() {
   }
 }
 
-async function applyOpenInSidebarMode() {
+async function applyOpenInSidebarMode(closeWindowId = null) {
   const enabled = await getOpenInSidebarEnabled();
 
   if (typeof chrome?.action?.setPopup === 'function') {
@@ -103,6 +178,15 @@ async function applyOpenInSidebarMode() {
       console.warn('[UI] Failed to configure side panel behavior:', error?.message || error);
     }
   }
+
+  if (enabled) {
+    // Re-enable tab-level side panel overrides in case they were disabled as a close fallback.
+    await setChromeSidePanelEnabledForTabs(true);
+    return;
+  }
+
+  // User disabled sidebar mode: close currently open sidebars to avoid duplicate UI.
+  await closeOpenSidebarPanels(closeWindowId);
 }
 
 function extractPasswordFromDialogResult(result) {
@@ -2096,8 +2180,11 @@ async function handleMessage(request, sender) {
       throw new Error('Sidebar mode can only be set from extension UI');
     }
     const enabled = request?.payload?.enabled === true;
+    const requestedWindowId = Number.isInteger(request?.payload?.windowId)
+      ? request.payload.windowId
+      : null;
     await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: enabled });
-    await applyOpenInSidebarMode();
+    await applyOpenInSidebarMode(requestedWindowId);
     return { success: true, enabled };
   }
 

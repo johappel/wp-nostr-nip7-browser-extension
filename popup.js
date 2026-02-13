@@ -1986,10 +1986,25 @@ async function saveOpenInSidebarEnabled(enabled) {
 }
 
 async function applyOpenInSidebarMode(enabled) {
+  let windowId = null;
+  try {
+    if (typeof chrome?.windows?.getCurrent === 'function') {
+      const currentWindow = await chrome.windows.getCurrent();
+      if (currentWindow && Number.isInteger(currentWindow.id)) {
+        windowId = currentWindow.id;
+      }
+    }
+  } catch {
+    // ignore window lookup errors
+  }
+
   try {
     await chrome.runtime.sendMessage({
       type: 'NOSTR_SET_OPEN_IN_SIDEBAR',
-      payload: { enabled: Boolean(enabled) }
+      payload: {
+        enabled: Boolean(enabled),
+        windowId
+      }
     });
   } catch {
     // ignore; background storage listener also applies this setting
