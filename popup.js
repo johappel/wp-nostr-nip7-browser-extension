@@ -545,9 +545,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (openInSidebarCheckbox) {
     openInSidebarCheckbox.addEventListener('change', async () => {
+      const requestedEnabled = openInSidebarCheckbox.checked;
+      if (!requestedEnabled) {
+        closeFirefoxSidebarFromUserInput();
+      }
       openInSidebarCheckbox.disabled = true;
       try {
-        const enabled = await saveOpenInSidebarEnabled(openInSidebarCheckbox.checked);
+        const enabled = await saveOpenInSidebarEnabled(requestedEnabled);
         await applyOpenInSidebarMode(enabled);
         showStatus(enabled
           ? 'Sidebar/Side-Panel-Modus aktiviert.'
@@ -1983,6 +1987,18 @@ async function saveOpenInSidebarEnabled(enabled) {
   const normalized = Boolean(enabled);
   await chrome.storage.local.set({ [OPEN_IN_SIDEBAR_KEY]: normalized });
   return normalized;
+}
+
+function closeFirefoxSidebarFromUserInput() {
+  if (typeof chrome?.sidebarAction?.close !== 'function') return;
+  try {
+    const result = chrome.sidebarAction.close();
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch {
+    // ignore user-input restriction / unsupported context
+  }
 }
 
 async function applyOpenInSidebarMode(enabled) {

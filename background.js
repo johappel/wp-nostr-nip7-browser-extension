@@ -73,6 +73,11 @@ function hasFirefoxSidebarApi() {
   return typeof chrome?.sidebarAction?.open === 'function';
 }
 
+function isFirefoxUserInputRestrictionError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('may only be called from a user input handler');
+}
+
 async function getSidebarTargetTabIds(windowId = null) {
   if (typeof chrome?.tabs?.query !== 'function') return [];
   try {
@@ -115,7 +120,7 @@ async function setChromeSidePanelEnabledForTabs(enabled, windowId = null) {
   }));
 }
 
-async function closeOpenSidebarPanels(windowId = null) {
+async function closeOpenSidebarPanels(windowId = null, { includeFirefox = false } = {}) {
   if (hasChromeSidePanelApi()) {
     if (typeof chrome?.sidePanel?.close === 'function') {
       try {
@@ -134,6 +139,8 @@ async function closeOpenSidebarPanels(windowId = null) {
     await setChromeSidePanelEnabledForTabs(false, windowId);
   }
 
+  if (!includeFirefox) return;
+
   if (hasFirefoxSidebarApi() && typeof chrome?.sidebarAction?.close === 'function') {
     try {
       if (typeof windowId === 'number') {
@@ -142,6 +149,7 @@ async function closeOpenSidebarPanels(windowId = null) {
         await chrome.sidebarAction.close();
       }
     } catch (error) {
+      if (isFirefoxUserInputRestrictionError(error)) return;
       console.warn('[UI] Failed to close Firefox sidebar:', error?.message || error);
     }
   }
@@ -186,7 +194,7 @@ async function applyOpenInSidebarMode(closeWindowId = null) {
   }
 
   // User disabled sidebar mode: close currently open sidebars to avoid duplicate UI.
-  await closeOpenSidebarPanels(closeWindowId);
+  await closeOpenSidebarPanels(closeWindowId, { includeFirefox: false });
 }
 
 function extractPasswordFromDialogResult(result) {
@@ -2091,29 +2099,37 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   });
 });
 
-chrome.action.onClicked.addListener(async (tab) => {
-  const enabled = await getOpenInSidebarEnabled();
-  if (!enabled) return;
+chrome.action.onClicked.addListener((tab) => {
+  if (hasFirefoxSidebarApi()) {
+    try {
+      const result = chrome.sidebarAction.open();
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          if (isFirefoxUserInputRestrictionError(error)) return;
+          console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
+        });
+      }
+      return;
+    } catch (error) {
+      if (isFirefoxUserInputRestrictionError(error)) return;
+      console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
+      return;
+    }
+  }
 
   if (hasChromeSidePanelApi() && typeof chrome?.sidePanel?.open === 'function') {
     try {
       const windowId = tab?.windowId;
-      if (typeof windowId === 'number') {
-        await chrome.sidePanel.open({ windowId });
-      } else {
-        await chrome.sidePanel.open({});
+      const result = (typeof windowId === 'number')
+        ? chrome.sidePanel.open({ windowId })
+        : chrome.sidePanel.open({});
+      if (result && typeof result.catch === 'function') {
+        result.catch((error) => {
+          console.warn('[UI] Failed to open Chrome side panel:', error?.message || error);
+        });
       }
-      return;
     } catch (error) {
       console.warn('[UI] Failed to open Chrome side panel:', error?.message || error);
-    }
-  }
-
-  if (hasFirefoxSidebarApi()) {
-    try {
-      await chrome.sidebarAction.open();
-    } catch (error) {
-      console.warn('[UI] Failed to open Firefox sidebar:', error?.message || error);
     }
   }
 });
