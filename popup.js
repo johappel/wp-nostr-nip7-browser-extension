@@ -8,6 +8,7 @@ const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
 const DM_CACHE_STORAGE_KEY = 'nostrDmCacheV2';
 const DM_LAST_READ_BY_CONTACT_KEY = 'dmLastReadByContactV1';
 const DEFAULT_APP_TITLE = 'WP Nostr Signer';
+const AVATAR_FALLBACK_DATA_URI = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg==';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
   off: 'Immer nachfragen',
@@ -2047,9 +2048,17 @@ function renderContacts(contacts, sourceFilter = 'all', searchQuery = '') {
 // CSP-compliant avatar error handling (replaces inline onerror)
 document.addEventListener('error', function(e) {
   if (e.target.tagName === 'IMG' && e.target.dataset.fallback === 'avatar') {
-    const parent = e.target.parentElement;
-    if (parent) {
-      parent.innerHTML = '<span class="contact-avatar-placeholder">👤</span>';
+    const img = e.target;
+    if (img.classList.contains('contact-avatar-img')) {
+      const container = img.closest('.contact-avatar');
+      if (container) {
+        container.innerHTML = '<span class="contact-avatar-placeholder">&#128100;</span>';
+      }
+      return;
+    }
+    if (img.id === 'conversation-avatar') {
+      img.removeAttribute('data-fallback');
+      img.src = AVATAR_FALLBACK_DATA_URI;
     }
   }
 }, true); // 'true' = capture phase to catch img errors
@@ -2373,7 +2382,8 @@ function openConversation(contactPubkey) {
   if (avatarEl) {
     avatarEl.src = contact.picture || contact.avatarUrl || '';
     avatarEl.onerror = function() {
-       this.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48Y2lyY2xlIGN4PSI1MCIgY3k9IjUwIiByPSI1MCIgZmlsbD0iI2UzZTNiOCIvPjwvc3ZnPg==';
+      this.onerror = null;
+      this.src = AVATAR_FALLBACK_DATA_URI;
     };
   }
   
