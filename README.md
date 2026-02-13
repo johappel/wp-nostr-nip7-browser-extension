@@ -56,11 +56,13 @@ Die Task-Dokumente `TASK-19` und `TASK-20` sind auf den aktuellen Iststand angep
 npm install
 npm test
 npm run build
+npm run package:chrome
 npm run package:firefox
 ```
 
 Ergebnis:
 - Extension-Builds liegen in `dist/chrome` und `dist/firefox`.
+- Chrome-ZIP für CWS liegt in `dist/packages/` (z. B. `wp-nostr-signer-chrome-1.0.1.zip`).
 - Firefox-XPI liegt in `dist/packages/` (z. B. `wp-nostr-signer-firefox-1.0.1.xpi`).
 - Hinweis: Das lokale XPI ist unsigniert. In Firefox Release kann das als "Datei ist korrupt" erscheinen. Für dauerhafte Installation muss die XPI signiert werden (AMO / `web-ext sign`).
 
@@ -85,6 +87,16 @@ npm run sign:firefox
 Hinweis:
 - `sign:firefox` baut zuerst neu (`dist/firefox`) und startet dann `web-ext sign`.
 - Wenn `web-ext` lokal nicht installiert ist, wird automatisch `npx web-ext` verwendet.
+
+Chrome Release (CWS):
+
+```bash
+npm run release:chrome
+```
+
+Hinweis:
+- `release:chrome` erzeugt zuerst das Upload-ZIP und zeigt danach eine kurze CWS-Checkliste.
+- Lokale `.crx`-Installation per Drag-and-drop ist auf Chrome (Windows/macOS) für normale Nutzer blockiert.
 
 ### 3. WordPress-Plugin lokal installieren
 
