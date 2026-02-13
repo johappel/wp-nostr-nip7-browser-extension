@@ -2,6 +2,9 @@
 
 Stand: 13. Februar 2026
 
+## Allgemeine Beschreibung
+Die Erweiterung ist fuer den Einsatz im Rahmen eines geplanten WordPress-Auftritts vorgesehen. Sie stellt die NIP-07 Bridge im Browser bereit, verbindet WordPress-REST-Endpunkte der vom Nutzer verwendeten Domain mit der lokalen Signer-Funktion und nutzt Nostr-Relay-Verbindungen (WebSocket) fuer Nostr-Funktionen wie Profilabgleich, Kontakte und Direktnachrichten. Domain-Zugriffe werden dabei ueber Whitelist und Nutzerbestaetigung kontrolliert.
+
 ## Beschreibung Alleiniger Zweck
 Die Erweiterung stellt einen lokalen NIP-07 Signer bereit, damit Nutzer auf WordPress- und Nostr-Webseiten ihre Nostr-Identitaet sicher verwenden koennen (Signieren, Verschluesseln/Entschluesseln, Kontakt- und DM-Funktionen) und Domain-Zugriffe kontrolliert freigeben koennen.
 
