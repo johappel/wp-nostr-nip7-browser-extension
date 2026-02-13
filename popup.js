@@ -4,6 +4,8 @@ const VIEWER_CACHE_KEY = 'nostrViewerProfileCacheV1';
 const DEFAULT_UNLOCK_CACHE_POLICY = 'session';
 const FALLBACK_UNLOCK_CACHE_POLICIES = ['off', '5m', '15m', '30m', '60m', 'session'];
 const DM_RELAY_KEY = 'dmRelayUrl';
+const DM_NOTIFICATIONS_KEY = 'dmNotificationsEnabled';
+const DEFAULT_APP_TITLE = 'WP Nostr Signer';
 
 const UNLOCK_CACHE_POLICY_LABELS = {
   off: 'Immer nachfragen',
@@ -165,6 +167,20 @@ function updateConnectionStatus(connected) {
   }
 }
 
+function updateHeaderBranding(viewer) {
+  const appTitleNode = document.getElementById('app-title');
+  const primaryDomain = String(viewer?.primaryDomain || '').trim();
+  const activeOrigin = String(viewer?.activeSiteOrigin || '').trim();
+  const origin = String(viewer?.origin || '').trim();
+  const host = extractHost(primaryDomain || activeOrigin || origin);
+  const brandTitle = host ? `${host} - nostr` : DEFAULT_APP_TITLE;
+
+  if (appTitleNode) {
+    appTitleNode.textContent = brandTitle;
+  }
+  document.title = brandTitle;
+}
+
 // ========================================
 // Main Initialization
 // ========================================
@@ -199,6 +215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const footerNav = document.getElementById('footer-nav');
   const dmRelayInput = document.getElementById('dm-relay-url');
   const saveDmRelayButton = document.getElementById('save-dm-relay');
+  const dmNotificationsCheckbox = document.getElementById('dm-notifications-enabled');
   const extensionVersionSpan = document.getElementById('extension-version');
   const activeScopeSpan = document.getElementById('active-scope');
   const refreshProfileButton = document.getElementById('refresh-profile');
@@ -303,6 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const initialViewer = await loadViewerContext(null, status);
   await persistViewerCache(initialViewer);
   activeViewer = initialViewer;
+  updateHeaderBranding(activeViewer);
   activeScope = initialViewer?.scope || 'global';
   activeWpApi = sanitizeWpApi(initialViewer?.wpApi);
   activeAuthBroker = sanitizeAuthBroker(initialViewer?.authBroker);
@@ -350,6 +368,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     dmRelayInput.value = currentDmRelay;
   }
 
+  if (dmNotificationsCheckbox) {
+    dmNotificationsCheckbox.checked = await loadDmNotificationsEnabled();
+  }
+
   // ========================================
   // Event Listeners: DM-Relay
   // ========================================
@@ -372,6 +394,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  if (dmNotificationsCheckbox) {
+    dmNotificationsCheckbox.addEventListener('change', async () => {
+      dmNotificationsCheckbox.disabled = true;
+      try {
+        const enabled = await saveDmNotificationsEnabled(dmNotificationsCheckbox.checked);
+        showStatus(enabled
+          ? 'Desktop-Benachrichtigungen für Nachrichten aktiviert.'
+          : 'Desktop-Benachrichtigungen für Nachrichten deaktiviert.');
+      } catch (e) {
+        dmNotificationsCheckbox.checked = await loadDmNotificationsEnabled();
+        showStatus(`Einstellung konnte nicht gespeichert werden: ${e.message || e}`, true);
+      } finally {
+        dmNotificationsCheckbox.disabled = false;
+      }
+    });
+  }
+
   // ========================================
   // Event Listeners: Refresh Profile Dialog
   // ========================================
@@ -383,6 +422,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const viewer = await loadViewerContext(null, status);
         await persistViewerCache(viewer);
         activeViewer = viewer;
+        updateHeaderBranding(activeViewer);
         activeScope = viewer?.scope || 'global';
         activeWpApi = sanitizeWpApi(viewer?.wpApi);
         activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
@@ -459,6 +499,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const viewer = await loadViewerContext(null, status);
         await persistViewerCache(viewer);
         activeViewer = viewer;
+        updateHeaderBranding(activeViewer);
         activeScope = viewer?.scope || 'global';
         activeWpApi = sanitizeWpApi(viewer?.wpApi);
         activeAuthBroker = sanitizeAuthBroker(viewer?.authBroker);
@@ -1754,8 +1795,23 @@ function formatShortHex(hex) {
 }
 
 // ========================================
-// DM-Relay Functions (für TASK-19/20)
+// DM Functions (für TASK-19/20)
 // ========================================
+
+async function loadDmNotificationsEnabled() {
+  try {
+    const result = await chrome.storage.local.get([DM_NOTIFICATIONS_KEY]);
+    return result[DM_NOTIFICATIONS_KEY] !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function saveDmNotificationsEnabled(enabled) {
+  const normalized = Boolean(enabled);
+  await chrome.storage.local.set({ [DM_NOTIFICATIONS_KEY]: normalized });
+  return normalized;
+}
 
 async function loadDmRelay() {
   try {

@@ -11,7 +11,7 @@
     <!-- Header -->
     <header class="app-header">
       <div class="header-title">
-        <h1>WP Nostr Signer</h1>
+        <h1 id="app-title">WP Nostr Signer</h1>
         <span class="connection-status" id="connection-status">
           <span class="status-dot"></span>
           <span class="status-text">Connected</span>
@@ -202,6 +202,15 @@
             <button id="save-dm-relay" class="btn-secondary" type="button">Speichern</button>
           </div>
           <p class="hint">Relay für DM-Empfang/Versand (Kind 10050 / NIP-17). Leer = verwendet Relay des Gesprächspartners.</p>
+        </div>
+
+        <!-- DM-Benachrichtigungen -->
+        <div class="settings-section">
+          <label class="row">
+            <input type="checkbox" id="dm-notifications-enabled" />
+            <span>Desktop-Benachrichtigungen für neue Nachrichten</span>
+          </label>
+          <p class="hint">Zeigt bei eingehenden Direktnachrichten eine System-Benachrichtigung an.</p>
         </div>
 
         <!-- Erweitert -->

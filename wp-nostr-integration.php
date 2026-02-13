@@ -14,6 +14,7 @@ if (!defined('ABSPATH')) {
 
 // Hooks registrieren
 add_action('wp_enqueue_scripts', 'nostr_enqueue_scripts');
+add_action('admin_enqueue_scripts', 'nostr_enqueue_admin_scripts');
 add_action('rest_api_init', 'nostr_register_endpoints');
 add_action('admin_menu', 'nostr_admin_menu');
 add_action('admin_init', 'nostr_admin_init');
@@ -63,6 +64,14 @@ function nostr_get_default_primary_domain() {
 // ============================================================
 
 function nostr_enqueue_scripts() {
+    nostr_enqueue_integration_assets();
+}
+
+function nostr_enqueue_admin_scripts() {
+    nostr_enqueue_integration_assets();
+}
+
+function nostr_enqueue_integration_assets() {
     // Nur für eingeloggte User laden
     if (!is_user_logged_in()) {
         return;
