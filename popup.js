@@ -321,6 +321,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const saveDmRelayButton = document.getElementById('save-dm-relay');
   const dmNotificationsCheckbox = document.getElementById('dm-notifications-enabled');
   const openInSidebarCheckbox = document.getElementById('open-in-sidebar');
+  const firefoxSidebarPositionHint = document.getElementById('firefox-sidebar-position-hint');
   const extensionVersionSpan = document.getElementById('extension-version');
   const activeScopeSpan = document.getElementById('active-scope');
   const refreshProfileButton = document.getElementById('refresh-profile');
@@ -335,6 +336,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const openInSidebarEnabled = await loadOpenInSidebarEnabled();
   if (openInSidebarCheckbox) {
     openInSidebarCheckbox.checked = openInSidebarEnabled;
+  }
+  if (firefoxSidebarPositionHint) {
+    const isFirefoxSidebar = typeof chrome?.sidebarAction?.open === 'function';
+    firefoxSidebarPositionHint.hidden = !isFirefoxSidebar;
   }
   applyOpenInSidebarMode(openInSidebarEnabled).catch(() => {});
 

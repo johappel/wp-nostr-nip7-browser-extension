@@ -145,3 +145,7 @@ Hinweis:
 - Oeffne das Popup der WP Nostr Extension und aktiviere Prefer WP Nostr Lock.
 - Lade den Tab neu, damit die Inpage-API mit Lock neu injiziert wird.
 - Wenn du bewusst die andere Extension bevorzugen willst, deaktiviere den Lock wieder.
+
+8. Firefox zeigt die Extension-Sidebar links statt rechts.
+- Die Position der Firefox-Sidebar ist eine Browser-Einstellung und kann nicht von der Extension erzwungen werden.
+- In Firefox in der Sidebar auf Einstellungen gehen und "Move Sidebar to Right" waehlen.
