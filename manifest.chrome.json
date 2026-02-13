@@ -11,8 +11,8 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://example.com/*",
-    "http://localhost/*",
+    "http://forums.test/*",
+    "http://forums.test:*/*",
     "http://127.0.0.1/*"
   ],
   "background": {
@@ -22,8 +22,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://example.com/*",
-        "http://localhost/*",
+        "http://forums.test/*",
+        "http://forums.test:*/*",
         "http://127.0.0.1/*"
       ],
       "js": ["content.js"],
@@ -35,8 +35,8 @@
     {
       "resources": ["inpage.js", "dialog.html", "dialog.css"],
       "matches": [
-        "https://example.com/*",
-        "http://localhost/*",
+        "http://forums.test/*",
+        "http://forums.test:*/*",
         "http://127.0.0.1/*"
       ]
     }
